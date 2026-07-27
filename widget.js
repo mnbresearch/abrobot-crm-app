@@ -199,7 +199,7 @@
   // so each site looks right immediately. Live CRM config always takes precedence.
   var PRESETS = {
     "aa-enterprises": {
-      header_title: "AA Enterprises", header_subtitle: "Yarn & textile supplier · online", widget_color: "#1e40af",
+      header_title: "AA Enterprises", header_subtitle: "Yarn & textile supplier · online", widget_color: "#1e40af", widget_position: "left",
       greeting: "Hi 👋 Welcome to AA Enterprises — mill-grade cotton & blended yarn and fabric since 1974. Tell me the count, blend and quantity you need and I'll help you get a firm quote.",
       teaser: "Need a yarn quote? 👋 Ask me anything!",
       quick_replies: [
@@ -212,7 +212,7 @@
       logo_url: "https://www.aaenterprises.in/web/image/website/1/logo/AA%20Enterprises"
     },
     "toppers-hub": {
-      header_title: "Toppers Hub Academy", header_subtitle: "Coaching · Faridabad · online", widget_color: "#059669",
+      header_title: "Toppers Hub Academy", header_subtitle: "Coaching · Faridabad · online", widget_color: "#059669", widget_position: "left",
       greeting: "Hi 👋 Welcome to Toppers Hub Academy! Whether it's Classes 1–12 or CA / CS / CFA / CMA / ACCA, tell me the student's class or course and I'll help you get started — you can book a free demo class too.",
       teaser: "Looking for coaching? 👋 Ask me!",
       quick_replies: [
