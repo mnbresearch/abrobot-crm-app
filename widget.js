@@ -177,7 +177,7 @@
       dots.className = "abx-dots"; dots.innerHTML = "<i></i><i></i><i></i>";
       body.appendChild(dots); body.scrollTop = body.scrollHeight;
       try {
-        var r = await fetch(API, {
+        var r = await fetch(API + "?org=" + encodeURIComponent(ORG), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ org: ORG, conversation_id: convId, page_url: location.href, message: text })
         });
