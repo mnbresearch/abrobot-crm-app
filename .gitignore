@@ -2,6 +2,11 @@
 supabase/.temp/
 supabase/.branches/
 
-# Node
+# Node / build
 node_modules/
+app/dist/
 .DS_Store
+*.local
+
+# Vite temp config artifacts
+vite.config.ts.timestamp-*
