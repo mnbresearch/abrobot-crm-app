@@ -219,21 +219,54 @@ Deno.serve(async (req) => {
   ];
 
   let reply = `Sorry, I'm having trouble right now. Please reach ${brand}${waLine} and our team will help you.`;
-  try {
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
-      body: JSON.stringify({
-        model: cfg?.model || DEFAULT_MODEL,
-        temperature: typeof cfg?.temperature === "number" ? cfg.temperature : 0.5,
-        max_tokens: cfg?.max_tokens || 350,
-        messages,
-      }),
-    });
-    const data = await r.json();
-    const text = data?.choices?.[0]?.message?.content;
-    if (text) reply = text.trim();
-  } catch (_e) { /* fall back */ }
+
+  // Retry on transient failures.
+  //
+  // Measured 2026-08-18: 8 of 165 assistant replies were this fallback,
+  // clustered on three dates rather than spread evenly — the signature of
+  // free-tier rate limiting during traffic bursts, not a broken key.
+  //
+  // Two bugs were causing every one of those to reach a real visitor:
+  //   1. a single attempt, so any blip lost the conversation
+  //   2. a 429 does NOT throw — it returns JSON with no `choices`, so the
+  //      catch block never ran and the failure was completely silent
+  // Now: up to 3 attempts with backoff, and every failure is logged so it
+  // shows up in the function logs instead of only in the transcript.
+  const ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+        body: JSON.stringify({
+          model: cfg?.model || DEFAULT_MODEL,
+          temperature: typeof cfg?.temperature === "number" ? cfg.temperature : 0.5,
+          max_tokens: cfg?.max_tokens || 350,
+          messages,
+        }),
+      });
+
+      if (r.ok) {
+        const data = await r.json();
+        const text = data?.choices?.[0]?.message?.content;
+        if (text) { reply = text.trim(); break; }
+        console.error(`groq ok but no content (attempt ${attempt}):`, JSON.stringify(data).slice(0, 300));
+      } else {
+        const body = await r.text();
+        console.error(`groq ${r.status} (attempt ${attempt}/${ATTEMPTS}): ${body.slice(0, 300)}`);
+        // 4xx other than 429 will not succeed on retry — fail fast.
+        if (r.status !== 429 && r.status < 500) break;
+      }
+    } catch (e) {
+      console.error(`groq threw (attempt ${attempt}/${ATTEMPTS}):`, (e as Error).message);
+    }
+
+    if (attempt < ATTEMPTS) {
+      // 400ms, then 1200ms — enough for a burst limit to clear without
+      // holding the visitor's chat window open too long.
+      await new Promise((res) => setTimeout(res, attempt === 1 ? 400 : 1200));
+    }
+  }
 
   await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "assistant", content: reply });
   await supabase.from("conversations").update({

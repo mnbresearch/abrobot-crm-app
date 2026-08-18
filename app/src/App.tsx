@@ -8,14 +8,39 @@ import { Leads } from "./routes/Leads";
 import { LeadDetail } from "./routes/LeadDetail";
 import { Pipeline } from "./routes/Pipeline";
 import { Settings } from "./routes/Settings";
+import { Conversations } from "./routes/Conversations";
+import { Reports } from "./routes/Reports";
+import { Team } from "./routes/Team";
+import { Activity } from "./routes/Activity";
+import { Calendar } from "./routes/Calendar";
+import { Templates } from "./routes/Templates";
+import { Import } from "./routes/Import";
 
-// Routes deliberately mirror the legacy app's URLs so both frontends can serve
-// the same links during the takeover.
-const NAV = [
+// Routes mirror the legacy app's URLs so both frontends can serve the same
+// links during the takeover. The legacy /analytics, /reports and /leaderboard
+// are consolidated into /reports — they answered the same question, and three
+// near-duplicate screens was part of what made the old app feel heavy.
+
+interface NavItem {
+  path: string;
+  label: string | null;   // null = use the industry's plural noun
+  icon: string;
+  adminOnly?: boolean;
+  group?: string;
+}
+
+const NAV: NavItem[] = [
   { path: "/", label: "Dashboard", icon: "📊" },
-  { path: "/leads", label: null, icon: "👥" },   // label comes from the industry
+  { path: "/leads", label: null, icon: "👥" },
   { path: "/pipeline", label: "Pipeline", icon: "🔀" },
-  { path: "/settings", label: "Settings", icon: "⚙️", adminOnly: true },
+  { path: "/calendar", label: "Calendar", icon: "📅" },
+  { path: "/conversations", label: "Conversations", icon: "💬", group: "Engage" },
+  { path: "/templates", label: "Templates", icon: "📄", group: "Engage" },
+  { path: "/reports", label: "Reports", icon: "📈", group: "Insight" },
+  { path: "/activity", label: "Activity", icon: "🗂️", group: "Insight" },
+  { path: "/team", label: "Team", icon: "🧑‍🤝‍🧑", group: "Manage" },
+  { path: "/import", label: "Import", icon: "📥", group: "Manage", adminOnly: true },
+  { path: "/settings", label: "Settings", icon: "⚙️", group: "Manage", adminOnly: true },
 ];
 
 export default function App() {
@@ -42,6 +67,9 @@ export default function App() {
   if (needsOnboarding) return <Onboarding onDone={() => { void refresh(); navigate("/"); }} />;
 
   const leadParams = match("/leads/:id", path);
+  const visible = NAV.filter((n) => !n.adminOnly || isAdmin);
+
+  let lastGroup: string | undefined;
 
   return (
     <div className="shell">
@@ -56,17 +84,18 @@ export default function App() {
           </div>
         </div>
 
-        {NAV.filter((n) => !n.adminOnly || isAdmin).map((n) => {
+        {visible.map((n) => {
           const active = n.path === "/" ? path === "/" : path.startsWith(n.path);
+          const header = n.group && n.group !== lastGroup ? n.group : null;
+          lastGroup = n.group;
           return (
-            <button
-              key={n.path}
-              className={`nav-item${active ? " active" : ""}`}
-              onClick={() => navigate(n.path)}
-            >
-              <span className="ico">{n.icon}</span>
-              {n.label ?? ui.leadNounPlural}
-            </button>
+            <div key={n.path}>
+              {header && <div className="nav-group">{header}</div>}
+              <button className={`nav-item${active ? " active" : ""}`} onClick={() => navigate(n.path)}>
+                <span className="ico">{n.icon}</span>
+                {n.label ?? ui.leadNounPlural}
+              </button>
+            </div>
           );
         })}
 
@@ -85,9 +114,7 @@ export default function App() {
 
       <main className="main">
         <header className="topbar">
-          <div style={{ fontWeight: 700 }}>
-            {leadParams ? ui.leadNoun : path === "/" ? "Dashboard" : titleFor(path, ui.leadNounPlural)}
-          </div>
+          <div style={{ fontWeight: 700 }}>{titleFor(path, ui.leadNoun, ui.leadNounPlural)}</div>
           <div className="row">
             {org?.plan && <span className="pill pill-muted">{org.plan}</span>}
           </div>
@@ -98,11 +125,22 @@ export default function App() {
           {path === "/leads" && <Leads navigate={navigate} />}
           {leadParams && <LeadDetail id={leadParams.id} navigate={navigate} />}
           {path === "/pipeline" && <Pipeline navigate={navigate} />}
+          {path === "/calendar" && <Calendar navigate={navigate} />}
+          {path === "/conversations" && <Conversations navigate={navigate} />}
+          {path === "/templates" && <Templates />}
+          {path === "/reports" && <Reports />}
+          {path === "/activity" && <Activity navigate={navigate} />}
+          {path === "/team" && <Team />}
+          {path === "/import" && <Import navigate={navigate} />}
           {path === "/settings" && <Settings />}
+
           {!isKnown(path) && (
             <div className="empty">
               <div className="empty-icon">🧭</div>
               <div style={{ fontWeight: 700 }}>Page not found</div>
+              <p className="sub" style={{ marginTop: 6 }}>
+                This route may still be served by the previous version of the app.
+              </p>
               <button className="btn" style={{ marginTop: 14 }} onClick={() => navigate("/")}>Go to dashboard</button>
             </div>
           )}
@@ -112,19 +150,20 @@ export default function App() {
   );
 }
 
+const KNOWN = [
+  "/", "/leads", "/pipeline", "/calendar", "/conversations",
+  "/templates", "/reports", "/activity", "/team", "/import", "/settings",
+];
+
 function isKnown(path: string): boolean {
-  return (
-    path === "/" ||
-    path === "/leads" ||
-    path === "/pipeline" ||
-    path === "/settings" ||
-    match("/leads/:id", path) !== null
-  );
+  return KNOWN.includes(path) || match("/leads/:id", path) !== null;
 }
 
-function titleFor(path: string, leadsLabel: string): string {
+function titleFor(path: string, leadNoun: string, leadsLabel: string): string {
+  if (match("/leads/:id", path)) return leadNoun;
+  if (path === "/") return "Dashboard";
   if (path.startsWith("/leads")) return leadsLabel;
-  if (path.startsWith("/pipeline")) return "Pipeline";
-  if (path.startsWith("/settings")) return "Settings";
-  return "AbroBot CRM";
+  const found = KNOWN.find((k) => k !== "/" && path.startsWith(k));
+  if (!found) return "AbroBot CRM";
+  return found.slice(1).replace(/^\w/, (c) => c.toUpperCase());
 }
