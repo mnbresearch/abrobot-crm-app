@@ -68,7 +68,9 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
           const { value } = computeKpi(k, leads, stageMeta);
           return (
             <div className="kpi" key={k.key}>
-              <div className="kpi-label">{k.icon} {k.label}</div>
+              {/* icon in its own element so the flex gap applies — bare text
+                  nodes collapse against the label */}
+              <div className="kpi-label"><span aria-hidden="true">{k.icon}</span><span>{k.label}</span></div>
               <div className="kpi-value" style={{ color: accent }}>{value}</div>
               {k.hint && <div className="kpi-hint">{k.hint}</div>}
             </div>

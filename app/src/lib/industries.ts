@@ -152,7 +152,8 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
       { key: "open", label: "Active Students", icon: "🎓", kind: "total" },
       { key: "apps", label: "In Application", icon: "📄", kind: "stage_count", stageKey: "application" },
       { key: "visa", label: "At Visa Stage", icon: "🛂", kind: "stage_count", stageKey: "visa" },
-      { key: "due", label: "Follow-ups Due", icon: "⏰", kind: "due_today" },
+      { key: "due", label: "Due Today", icon: "⏰", kind: "due_today" },
+      { key: "overdue", label: "Overdue", icon: "🚨", kind: "overdue", hint: "Past their follow-up date" },
       { key: "conv", label: "Enrolment Rate", icon: "📈", kind: "conversion" },
     ],
     quickActions: [

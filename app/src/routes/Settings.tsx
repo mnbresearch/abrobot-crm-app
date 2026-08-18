@@ -33,7 +33,7 @@ export function Settings() {
       <div className="tabs">
         {TABS.map((t) => (
           <button key={t.key} className={`tab${tab === t.key ? " active" : ""}`} onClick={() => setTab(t.key)}>
-            {t.icon} {t.label}
+            <span aria-hidden="true" style={{ marginRight: 6 }}>{t.icon}</span>{t.label}
           </button>
         ))}
       </div>

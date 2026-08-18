@@ -9,8 +9,14 @@ instead of in a big-bang cutover.
 ```bash
 cd app
 npm install
-npm run dev            # http://localhost:5173
+npm run dev
 ```
+
+Then open http://localhost:5173
+
+> Paste those lines one at a time. Do **not** append a `# comment` to
+> `npm run dev` — npm forwards it to vite as an argument, vite treats it as the
+> project root, and you get a stray `app/#` directory and an empty page.
 
 Optional `.env.local` (defaults point at the live project):
 
