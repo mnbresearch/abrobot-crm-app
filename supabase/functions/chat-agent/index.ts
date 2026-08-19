@@ -137,7 +137,8 @@ Deno.serve(async (req) => {
   const message = (body.message ?? "").toString().slice(0, 2000).trim();
   if (!message) return json({ error: "empty message" }, 400);
 
-  const { data: org } = await supabase.from("organizations").select("id, name, active").eq("slug", slug).single();
+  // `plan` is selected for the usage-limit check further down.
+  const { data: org } = await supabase.from("organizations").select("id, name, active, plan").eq("slug", slug).single();
   if (!org?.active) return json({ error: "agent unavailable" }, 404);
 
   const { data: cfg } = await supabase.from("agent_config").select(
@@ -208,6 +209,45 @@ Deno.serve(async (req) => {
       }
     }
     if (leadId) await supabase.from("conversations").update({ lead_id: leadId }).eq("id", convId);
+  }
+
+  // --- plan limit enforcement ---
+  //
+  // Until now nothing checked credits outside the browser, which meant the
+  // limits were advisory: anyone calling this endpoint directly, or simply
+  // leaving the widget open, consumed unlimited AI messages. A limit enforced
+  // only in the client is not a limit.
+  //
+  // consume_usage() increments and checks atomically, so two concurrent chats
+  // cannot both slip past the last credit.
+  try {
+    const { data: limits } = await supabase
+      .from("plan_limits")
+      .select("max_ai_messages")
+      .eq("plan", (org.plan ?? "trial"))
+      .maybeSingle();
+
+    const { data: usage } = await supabase.rpc("consume_usage", {
+      p_org_id: org.id,
+      p_metric: "ai_messages",
+      p_limit: limits?.max_ai_messages ?? null,
+      p_amount: 1,
+    });
+
+    if (usage && usage.allowed === false) {
+      // Deliberately warm rather than a raw 429: this message is read by a
+      // prospective customer of *our customer*, not by a developer.
+      const overMsg = cfg?.away_message?.trim() ||
+        `Thanks for reaching out! Our assistant is taking a short break. ` +
+        `Please leave your phone or email and the ${brand} team will get straight back to you.`;
+      await supabase.from("chat_messages").insert({
+        conversation_id: convId, org_id: org.id, role: "assistant", content: overMsg,
+      });
+      return json({ reply: overMsg, conversation_id: convId, limited: true });
+    }
+  } catch (e) {
+    // Never block a real conversation because metering failed.
+    console.error("usage check failed, allowing through:", (e as Error).message);
   }
 
   // --- build Groq request from full config ---

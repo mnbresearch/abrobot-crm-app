@@ -5,7 +5,7 @@ import { getIndustry } from "../lib/industries";
 import { Card, Empty, Modal, useToast } from "../components/ui";
 import type { AgentConfig, FieldDef, FieldType, PipelineStage } from "../lib/types";
 
-type Tab = "industry" | "pipeline" | "fields" | "agent" | "install";
+type Tab = "industry" | "pipeline" | "fields" | "agent" | "install" | "usage";
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "industry", label: "Industry", icon: "🏭" },
@@ -13,7 +13,90 @@ const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "fields", label: "Fields", icon: "🧩" },
   { key: "agent", label: "AI Agent", icon: "🤖" },
   { key: "install", label: "Install Widget", icon: "🚀" },
+  { key: "usage", label: "Plan & Usage", icon: "📊" },
 ];
+
+interface UsageMetric { used: number; limit: number | null }
+interface UsageSnapshot {
+  plan: string; label: string; period: string;
+  ai_messages: UsageMetric; leads: UsageMetric;
+  seats: UsageMetric; automations: UsageMetric;
+  whatsapp: boolean;
+}
+
+function UsageTab() {
+  const { org } = useApp();
+  const [snap, setSnap] = useState<UsageSnapshot | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!org) return;
+    void supabase.rpc("usage_snapshot", { p_org_id: org.id }).then(({ data, error }) => {
+      if (error) setErr(error.message);
+      else setSnap(data as UsageSnapshot);
+    });
+  }, [org]);
+
+  if (err) {
+    return (
+      <Card title="Plan & usage">
+        <p className="sub">
+          Couldn't load usage: {err}
+        </p>
+        <p className="sub" style={{ fontSize: 12, marginTop: 8 }}>
+          This needs migration <code>20260819090000_automations_and_plan_limits.sql</code> to be applied.
+        </p>
+      </Card>
+    );
+  }
+  if (!snap) return <Card><p className="sub">Loading…</p></Card>;
+
+  const Meter = ({ label, m, unit }: { label: string; m: UsageMetric; unit?: string }) => {
+    const pct = m.limit ? Math.min(100, Math.round((m.used / m.limit) * 100)) : 0;
+    const color = pct >= 90 ? "var(--red)" : pct >= 70 ? "var(--amber)" : "var(--green)";
+    return (
+      <div style={{ marginBottom: 15 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <span style={{ fontWeight: 600 }}>{label}</span>
+          <span className="mono sub">
+            {m.used.toLocaleString("en-IN")}{m.limit ? ` / ${m.limit.toLocaleString("en-IN")}` : " · unlimited"}{unit ? ` ${unit}` : ""}
+          </span>
+        </div>
+        {m.limit !== null && (
+          <div style={{ height: 7, background: "#f0efed", borderRadius: 999, marginTop: 5, overflow: "hidden" }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 999 }} />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="stack">
+      <Card title={`Plan — ${snap.label}`}>
+        <p className="sub" style={{ marginTop: -8, marginBottom: 15 }}>
+          AI messages reset monthly. Current period {snap.period}.
+        </p>
+        <Meter label="AI chat messages" m={snap.ai_messages} />
+        <Meter label="Records" m={snap.leads} />
+        <Meter label="Active team members" m={snap.seats} />
+        <Meter label="Active automations" m={snap.automations} />
+        <div className="row" style={{ marginTop: 4 }}>
+          <span className={snap.whatsapp ? "pill pill-green" : "pill pill-muted"}>
+            {snap.whatsapp ? "✓ WhatsApp included" : "WhatsApp not on this plan"}
+          </span>
+        </div>
+      </Card>
+      <Card title="How limits work">
+        <p className="sub" style={{ marginTop: -8 }}>
+          Limits are enforced on the server, inside the edge functions — not in this browser. When the AI
+          message allowance runs out the assistant switches to a polite hand-off message and still captures
+          the visitor's contact details, so you never lose the enquiry itself.
+        </p>
+      </Card>
+    </div>
+  );
+}
 
 export function Settings() {
   const { isAdmin } = useApp();
@@ -42,6 +125,7 @@ export function Settings() {
       {tab === "fields" && <FieldsTab />}
       {tab === "agent" && <AgentTab />}
       {tab === "install" && <InstallTab />}
+      {tab === "usage" && <UsageTab />}
     </div>
   );
 }

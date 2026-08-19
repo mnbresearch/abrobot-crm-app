@@ -15,6 +15,7 @@ import { Activity } from "./routes/Activity";
 import { Calendar } from "./routes/Calendar";
 import { Templates } from "./routes/Templates";
 import { Import } from "./routes/Import";
+import { Automations } from "./routes/Automations";
 
 // Routes mirror the legacy app's URLs so both frontends can serve the same
 // links during the takeover. The legacy /analytics, /reports and /leaderboard
@@ -36,6 +37,7 @@ const NAV: NavItem[] = [
   { path: "/calendar", label: "Calendar", icon: "📅" },
   { path: "/conversations", label: "Conversations", icon: "💬", group: "Engage" },
   { path: "/templates", label: "Templates", icon: "📄", group: "Engage" },
+  { path: "/automations", label: "Automations", icon: "⚡", group: "Engage", adminOnly: true },
   { path: "/reports", label: "Reports", icon: "📈", group: "Insight" },
   { path: "/activity", label: "Activity", icon: "🗂️", group: "Insight" },
   { path: "/team", label: "Team", icon: "🧑‍🤝‍🧑", group: "Manage" },
@@ -128,6 +130,7 @@ export default function App() {
           {path === "/calendar" && <Calendar navigate={navigate} />}
           {path === "/conversations" && <Conversations navigate={navigate} />}
           {path === "/templates" && <Templates />}
+          {path === "/automations" && <Automations />}
           {path === "/reports" && <Reports />}
           {path === "/activity" && <Activity navigate={navigate} />}
           {path === "/team" && <Team />}
@@ -152,7 +155,7 @@ export default function App() {
 
 const KNOWN = [
   "/", "/leads", "/pipeline", "/calendar", "/conversations",
-  "/templates", "/reports", "/activity", "/team", "/import", "/settings",
+  "/templates", "/automations", "/reports", "/activity", "/team", "/import", "/settings",
 ];
 
 function isKnown(path: string): boolean {
