@@ -16,6 +16,7 @@ import { Calendar } from "./routes/Calendar";
 import { Templates } from "./routes/Templates";
 import { Import } from "./routes/Import";
 import { Automations } from "./routes/Automations";
+import { CommandPalette } from "./components/CommandPalette";
 
 // Routes mirror the legacy app's URLs so both frontends can serve the same
 // links during the takeover. The legacy /analytics, /reports and /leaderboard
@@ -75,6 +76,7 @@ export default function App() {
 
   return (
     <div className="shell">
+      <CommandPalette navigate={navigate} />
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">{ui.icon}</div>
@@ -118,6 +120,13 @@ export default function App() {
         <header className="topbar">
           <div style={{ fontWeight: 700 }}>{titleFor(path, ui.leadNoun, ui.leadNounPlural)}</div>
           <div className="row">
+            <button
+              className="btn btn-sm"
+              onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }))}
+              title="Search everything (⌘K)"
+            >
+              🔍 Search <span className="sub" style={{ fontSize: 11 }}>⌘K</span>
+            </button>
             {org?.plan && <span className="pill pill-muted">{org.plan}</span>}
           </div>
         </header>

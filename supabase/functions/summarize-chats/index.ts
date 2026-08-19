@@ -16,7 +16,10 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 const GROQ_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
-const MODEL = "llama-3.3-70b-versatile";
+// See the note in chat-agent: llama-3.3-70b-versatile was shut down by Groq on
+// 2026-08-16 for free/developer tiers. Keep this in step with chat-agent's
+// DEFAULT_MODEL.
+const MODEL = "openai/gpt-oss-120b";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",

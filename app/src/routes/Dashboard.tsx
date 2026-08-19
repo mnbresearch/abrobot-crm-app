@@ -3,6 +3,8 @@ import { BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGri
 import { useApp, useLeads } from "../lib/store";
 import { computeKpi } from "../lib/industries";
 import { Card, Empty, ScoreChip, Spinner, StagePill, timeAgo } from "../components/ui";
+import { HealthCard } from "../components/HealthCard";
+import { SetupChecklist } from "../components/SetupChecklist";
 import type { Lead } from "../lib/types";
 
 // The dashboard reshapes itself entirely from the industry registry: which
@@ -62,6 +64,10 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
         <h1>{ui.icon} {org?.name}</h1>
         <p className="sub" style={{ marginTop: 3 }}>{ui.dashboardNote}</p>
       </div>
+
+      {/* Both render nothing when there's nothing to say. */}
+      <HealthCard />
+      <SetupChecklist navigate={navigate} />
 
       <div className="grid grid-kpi">
         {ui.kpis.map((k) => {

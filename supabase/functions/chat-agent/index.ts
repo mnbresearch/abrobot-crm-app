@@ -22,7 +22,20 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 const GROQ_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
-const DEFAULT_MODEL = "llama-3.3-70b-versatile";
+// Model chain, tried in order.
+//
+// 2026-08-19 incident: Groq shut down `llama-3.3-70b-versatile` for free and
+// developer tiers on 2026-08-16. Every org had model = null, so all of them
+// fell through to that one hardcoded constant and the agent broke everywhere
+// at once. Last good reply 08-16 20:34, first failure 08-17.
+//
+// The lesson isn't "pick a better model" — it's that a single hardcoded model
+// is a single point of failure against a provider that deprecates on its own
+// schedule. So: a chain. If one model is gone, the next is tried, and the
+// failure is logged loudly instead of silently becoming an apology to a
+// customer.
+const DEFAULT_MODEL = "openai/gpt-oss-120b";
+const FALLBACK_MODELS = ["qwen/qwen3.6-27b", "llama-3.1-8b-instant"];
 const BOOKING_URL = Deno.env.get("BOOKING_URL") || "https://calendly.com/mridulnanda2004/abrobot-meet";
 
 const CORS = {
@@ -272,40 +285,51 @@ Deno.serve(async (req) => {
   //      catch block never ran and the failure was completely silent
   // Now: up to 3 attempts with backoff, and every failure is logged so it
   // shows up in the function logs instead of only in the transcript.
-  const ATTEMPTS = 3;
-  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
-    try {
-      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
-        body: JSON.stringify({
-          model: cfg?.model || DEFAULT_MODEL,
-          temperature: typeof cfg?.temperature === "number" ? cfg.temperature : 0.5,
-          max_tokens: cfg?.max_tokens || 350,
-          messages,
-        }),
-      });
+  // Try each model in turn; retry transient failures within a model.
+  const chain = [cfg?.model || DEFAULT_MODEL, ...FALLBACK_MODELS]
+    .filter((m, i, arr) => m && arr.indexOf(m) === i);
+  const ATTEMPTS = 2;
+  let got = false;
 
-      if (r.ok) {
-        const data = await r.json();
-        const text = data?.choices?.[0]?.message?.content;
-        if (text) { reply = text.trim(); break; }
-        console.error(`groq ok but no content (attempt ${attempt}):`, JSON.stringify(data).slice(0, 300));
-      } else {
-        const body = await r.text();
-        console.error(`groq ${r.status} (attempt ${attempt}/${ATTEMPTS}): ${body.slice(0, 300)}`);
-        // 4xx other than 429 will not succeed on retry — fail fast.
-        if (r.status !== 429 && r.status < 500) break;
+  outer:
+  for (const model of chain) {
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      try {
+        const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+          body: JSON.stringify({
+            model,
+            temperature: typeof cfg?.temperature === "number" ? cfg.temperature : 0.5,
+            max_tokens: cfg?.max_tokens || 350,
+            messages,
+          }),
+        });
+
+        if (r.ok) {
+          const data = await r.json();
+          const text = data?.choices?.[0]?.message?.content;
+          if (text) { reply = text.trim(); got = true; break outer; }
+          console.error(`groq ${model}: ok but no content:`, JSON.stringify(data).slice(0, 300));
+        } else {
+          const body = await r.text();
+          console.error(`groq ${model} -> ${r.status} (attempt ${attempt}): ${body.slice(0, 300)}`);
+          // 400/404 = model gone or bad request: move to the next model
+          // rather than retrying something that will never work.
+          // 401/403 = the key itself is wrong; no model will help.
+          if (r.status === 401 || r.status === 403) break outer;
+          if (r.status !== 429 && r.status < 500) break; // next model
+        }
+      } catch (e) {
+        console.error(`groq ${model} threw (attempt ${attempt}):`, (e as Error).message);
       }
-    } catch (e) {
-      console.error(`groq threw (attempt ${attempt}/${ATTEMPTS}):`, (e as Error).message);
-    }
 
-    if (attempt < ATTEMPTS) {
-      // 400ms, then 1200ms — enough for a burst limit to clear without
-      // holding the visitor's chat window open too long.
-      await new Promise((res) => setTimeout(res, attempt === 1 ? 400 : 1200));
+      if (attempt < ATTEMPTS) await new Promise((res) => setTimeout(res, 500));
     }
+  }
+
+  if (!got) {
+    console.error(`ALL MODELS FAILED for org ${org.id}; chain: ${chain.join(", ")}`);
   }
 
   await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "assistant", content: reply });

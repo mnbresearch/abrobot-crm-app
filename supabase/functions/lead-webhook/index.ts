@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
 import { scoreLead } from "../_shared/score.ts";
 import { getWhatsAppConfig, sendWhatsAppText } from "../_shared/whatsapp.ts";
+import { fireEventAutomations } from "../_shared/run-actions.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -174,5 +175,16 @@ Deno.serve(async (req) => {
     }
   }
 
-  return json({ ok: true, deduped: false, lead_id: inserted.id, score, alert, autoreply });
+  // Event-driven automations. Runs after the lead is safely persisted and the
+  // alert is out, so a misconfigured rule can never cost us the enquiry.
+  const automations = await fireEventAutomations(
+    supabase, wk.org_id,
+    { ...lead, id: inserted.id, score, tags: [], stage_key: null },
+    "lead_created",
+  );
+
+  return json({
+    ok: true, deduped: false, lead_id: inserted.id, score,
+    alert, autoreply, automations,
+  });
 });
