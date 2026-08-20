@@ -16,14 +16,23 @@
 # To hand one back, add it. That is the whole cutover mechanism.
 
 # ── still served by the legacy bundle ────────────────────────────────────────
-/get            /legacy.html   200
-/onboarding     /legacy.html   200
-/myday          /legacy.html   200
-/priority       /legacy.html   200
-/compose        /legacy.html   200
-/analytics      /legacy.html   200
-/leaderboard    /legacy.html   200
-/super          /legacy.html   200
+#
+# Targets are extensionless ON PURPOSE.
+#
+# Cloudflare Pages normalises .html away: a target of /legacy.html produced a
+# 308 to /legacy, so the browser URL changed. That matters here because the
+# legacy bundle is a SPA that routes off window.location.pathname — arriving at
+# /legacy instead of /get means it cannot find the route and never renders the
+# landing page. With an extensionless target the 200 is a true rewrite: the
+# file is served, the URL stays /get, and the old router sees what it expects.
+/get            /legacy   200
+/onboarding     /legacy   200
+/myday          /legacy   200
+/priority       /legacy   200
+/compose        /legacy   200
+/analytics      /legacy   200
+/leaderboard    /legacy   200
+/super          /legacy   200
 
 # ── everything else: the new app ─────────────────────────────────────────────
 /*              /index.html    200
