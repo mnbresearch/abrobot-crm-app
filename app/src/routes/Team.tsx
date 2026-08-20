@@ -35,7 +35,9 @@ export function Team() {
     <div className="stack">
       <div>
         <h1>Team</h1>
-        <p className="sub" style={{ marginTop: 2 }}>{members.length} members</p>
+        <p className="sub" style={{ marginTop: 2 }}>
+          {members.length} {members.length === 1 ? "member" : "members"}
+        </p>
       </div>
 
       {!isAdmin && (

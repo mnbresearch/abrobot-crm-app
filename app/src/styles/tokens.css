@@ -1,12 +1,22 @@
-/* Design tokens recovered verbatim from the legacy bundle's
-   index-B9KeoLgM.css. Unchanged on purpose: screens built here must be
-   visually indistinguishable from the screens they replace, so the app can be
-   taken over one route at a time without users noticing a seam.
+/* ─────────────────────────────────────────────────────────────────────────────
+   AbroBot CRM — design tokens
 
-   --industry-* are new. They let an industry pack tint the UI without
-   touching the core brand. */
+   The core palette is recovered verbatim from the legacy bundle
+   (index-B9KeoLgM.css) so screens replacing old ones are indistinguishable.
+   Everything else — motion, elevation, dark mode, the type scale — is new.
+
+   Principles borrowed from the tools people actually enjoy using:
+     · Motion is fast. 120–220ms. Anything slower reads as lag, not polish.
+     · One spring easing used everywhere, so the whole app feels like one hand
+       made it.
+     · Elevation is a scale, not a per-component guess.
+     · Dark mode is a first-class theme, not an inverted filter.
+     · Every animation is opt-out via prefers-reduced-motion. Vestibular
+       disorders are real and a CRM is not worth a migraine.
+   ───────────────────────────────────────────────────────────────────────── */
 
 :root {
+  /* ── brand (recovered, unchanged) ─────────────────────────────────────── */
   --brand: #b45309;
   --brand-2: #f59e0b;
   --brand-dark: #92400e;
@@ -14,32 +24,93 @@
   --accent: #d97706;
   --grad: linear-gradient(135deg, #b45309 0%, #d97706 55%, #f59e0b 100%);
   --grad-soft: linear-gradient(135deg, rgba(217, 119, 6, 0.07), rgba(245, 158, 11, 0.07));
+
+  /* ── surfaces ─────────────────────────────────────────────────────────── */
   --ink: #1c1917;
   --ink-2: #292524;
   --bg: #faf9f7;
+  --bg-2: #f5f4f2;
   --card: #ffffff;
+  --card-hover: #fdfcfb;
   --text: #1c1917;
   --muted: #78716c;
+  --muted-2: #a8a29e;
   --border: #e7e5e4;
+  --border-strong: #d6d3d1;
+  --track: #f0efed;
+
+  /* ── status ───────────────────────────────────────────────────────────── */
   --green: #10b981;
+  --green-soft: #d1fae5;
   --red: #ef4444;
+  --red-soft: #fee2e2;
+  --amber: #f59e0b;
+  --amber-soft: #fef3c7;
+  --blue: #3b82f6;
+  --blue-soft: #dbeafe;
+  --purple: #8b5cf6;
+
+  /* ── geometry ─────────────────────────────────────────────────────────── */
   --radius: 16px;
+  --radius-sm: 10px;
+  --radius-lg: 22px;
+  --sidebar-w: 236px;
+
+  /* ── elevation ────────────────────────────────────────────────────────── */
   --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.05);
   --shadow: 0 4px 16px -2px rgba(180, 83, 9, 0.1), 0 2px 6px -2px rgba(28, 25, 23, 0.06);
+  --shadow-md: 0 10px 24px -6px rgba(180, 83, 9, 0.14), 0 4px 10px -4px rgba(28, 25, 23, 0.07);
   --shadow-lg: 0 20px 40px -12px rgba(180, 83, 9, 0.22);
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --shadow-xl: 0 32px 64px -16px rgba(28, 25, 23, 0.28);
+  --ring: 0 0 0 3px var(--industry-soft);
 
-  /* extensions */
-  --amber: #f59e0b;
-  --blue: #3b82f6;
-  --purple: #8b5cf6;
+  /* ── motion ───────────────────────────────────────────────────────────── */
+  /* One spring, used everywhere. Overshoots very slightly, which is what
+     makes an interface feel responsive rather than mechanical. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 120ms;
+  --t: 180ms;
+  --t-slow: 260ms;
+
+  /* ── industry accent (set at runtime from the industry pack) ──────────── */
   --industry: var(--brand);
   --industry-soft: var(--brand-light);
-  --sidebar-w: 232px;
+}
+
+/* ── dark theme ───────────────────────────────────────────────────────────
+   Warm-neutral rather than blue-grey, so it still reads as the same product.
+   Surfaces lift as they come forward; borders get lighter, not darker.      */
+:root[data-theme="dark"] {
+  --ink: #fafaf9;
+  --ink-2: #e7e5e4;
+  --bg: #14120f;
+  --bg-2: #1c1917;
+  --card: #1f1c19;
+  --card-hover: #262220;
+  --text: #f5f5f4;
+  --muted: #a8a29e;
+  --muted-2: #78716c;
+  --border: #322c28;
+  --border-strong: #44403c;
+  --track: #2a2522;
+
+  --brand-light: #422006;
+  --grad-soft: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(217, 119, 6, 0.06));
+  --green-soft: #06301f;
+  --red-soft: #3b1212;
+  --amber-soft: #3b2606;
+  --blue-soft: #16233d;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.5), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 10px 24px -6px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 20px 40px -12px rgba(0, 0, 0, 0.6);
+  --shadow-xl: 0 32px 64px -16px rgba(0, 0, 0, 0.7);
 }
 
 * { box-sizing: border-box; }
-
 html, body, #root { height: 100%; }
 
 body {
@@ -51,27 +122,56 @@ body {
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Theme switches should feel like a dimmer, not a strobe. */
+  transition: background var(--t-slow) var(--ease), color var(--t-slow) var(--ease);
 }
 
-h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); }
-h1 { font-size: 24px; }
-h2 { font-size: 18px; }
-h3 { font-size: 15px; }
+/* ── type scale ───────────────────────────────────────────────────────────
+   Tight tracking on large text is the single cheapest way to make an
+   interface look considered.                                                */
+h1, h2, h3, h4 { margin: 0; font-weight: 700; color: var(--ink); }
+h1 { font-size: 25px; letter-spacing: -0.028em; line-height: 1.2; }
+h2 { font-size: 17px; letter-spacing: -0.02em; }
+h3 { font-size: 15px; letter-spacing: -0.015em; }
 
 a { color: inherit; text-decoration: none; }
-
-button, input, select, textarea {
-  font-family: inherit;
-  font-size: inherit;
-  color: inherit;
-}
+button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
 
 .sub { color: var(--muted); font-size: 13px; }
-.mono { font-variant-numeric: tabular-nums; }
+.mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ── focus ────────────────────────────────────────────────────────────────
+   Visible for keyboard users, invisible for mouse users. :focus-visible is
+   the whole reason this can be both accessible and clean.                   */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--industry);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ── scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 3px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--muted-2); }
+
+::selection { background: var(--industry-soft); color: var(--industry); }
+
+/* ── reduced motion ───────────────────────────────────────────────────────
+   Not a nicety. Motion-triggered vestibular disorders are real, and no
+   animation in a CRM is worth causing one.                                  */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }

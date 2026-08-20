@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, PieChart, Pie, Cell } from "recharts";
 import { useApp, useLeads } from "../lib/store";
 import { computeKpi } from "../lib/industries";
-import { Card, Empty, ScoreChip, Spinner, StagePill, timeAgo } from "../components/ui";
+import { AnimatedNumber, Card, Empty, ScoreChip, Skeleton, StagePill, timeAgo } from "../components/ui";
 import { HealthCard } from "../components/HealthCard";
 import { SetupChecklist } from "../components/SetupChecklist";
 import type { Lead } from "../lib/types";
@@ -53,7 +53,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
       .slice(0, 8);
   }, [leads, stages]);
 
-  if (loading) return <Spinner />;
+  if (loading) return <Skeleton kind="page" />;
 
   const accent = ui.accent ?? "#b45309";
   const PIE = [accent, "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ef4444", "#78716c"];
@@ -69,15 +69,20 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
       <HealthCard />
       <SetupChecklist navigate={navigate} />
 
-      <div className="grid grid-kpi">
+      <div className="grid grid-kpi stagger">
         {ui.kpis.map((k) => {
-          const { value } = computeKpi(k, leads, stageMeta);
+          const { value, raw } = computeKpi(k, leads, stageMeta);
+          // Overdue is the one number that should feel uncomfortable when it
+          // isn't zero — everything else stays in the industry accent.
+          const isAlert = k.kind === "overdue" && raw > 0;
           return (
-            <div className="kpi" key={k.key}>
+            <div className={`kpi${isAlert ? " kpi-alert" : ""}`} key={k.key}>
               {/* icon in its own element so the flex gap applies — bare text
                   nodes collapse against the label */}
               <div className="kpi-label"><span aria-hidden="true">{k.icon}</span><span>{k.label}</span></div>
-              <div className="kpi-value" style={{ color: accent }}>{value}</div>
+              <div className="kpi-value" style={isAlert ? undefined : { color: accent }}>
+                <AnimatedNumber value={value} />
+              </div>
               {k.hint && <div className="kpi-hint">{k.hint}</div>}
             </div>
           );

@@ -17,6 +17,8 @@ import { Templates } from "./routes/Templates";
 import { Import } from "./routes/Import";
 import { Automations } from "./routes/Automations";
 import { CommandPalette } from "./components/CommandPalette";
+import { ShortcutsHelp } from "./components/ShortcutsHelp";
+import { useTheme } from "./lib/theme";
 
 // Routes mirror the legacy app's URLs so both frontends can serve the same
 // links during the takeover. The legacy /analytics, /reports and /leaderboard
@@ -49,6 +51,7 @@ const NAV: NavItem[] = [
 export default function App() {
   const { loading, session, profile, org, ui, isAdmin, needsOnboarding, signOut, refresh } = useApp();
   const { path, navigate } = useRoute();
+  const { theme, cycle, resolved } = useTheme();
 
   if (loading) return <Spinner />;
   if (!session) return <Login />;
@@ -77,6 +80,7 @@ export default function App() {
   return (
     <div className="shell">
       <CommandPalette navigate={navigate} />
+      <ShortcutsHelp navigate={navigate} cycleTheme={cycle} />
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">{ui.icon}</div>
@@ -125,13 +129,22 @@ export default function App() {
               onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }))}
               title="Search everything (⌘K)"
             >
-              🔍 Search <span className="sub" style={{ fontSize: 11 }}>⌘K</span>
+              🔍 Search <span className="kbd">⌘K</span>
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={cycle}
+              title={`Theme: ${theme}${theme === "system" ? ` (${resolved})` : ""} — press T`}
+              aria-label="Change theme"
+            >
+              {theme === "system" ? "🖥️" : resolved === "dark" ? "🌙" : "☀️"}
             </button>
             {org?.plan && <span className="pill pill-muted">{org.plan}</span>}
           </div>
         </header>
 
-        <div className="content">
+        {/* keyed on path so each route change replays the entrance animation */}
+        <div className="content route-enter" key={path}>
           {path === "/" && <Dashboard navigate={navigate} />}
           {path === "/leads" && <Leads navigate={navigate} />}
           {leadParams && <LeadDetail id={leadParams.id} navigate={navigate} />}

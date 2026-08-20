@@ -135,12 +135,26 @@ export function Automations() {
   };
 
   const toggle = async (a: Automation) => {
-    await supabase.from("automations").update({ enabled: !a.enabled }).eq("id", a.id);
+    const next = !a.enabled;
+    // Optimistic: the pill flips immediately. Reloading alone was leaving the
+    // card showing the old state even though the write had succeeded, which
+    // reads as "the button is broken" — the worst possible impression for a
+    // control that arms something acting on customer records.
+    setRows((rs) => rs.map((r) => (r.id === a.id ? { ...r, enabled: next } : r)));
+
+    const { error } = await supabase.from("automations").update({ enabled: next }).eq("id", a.id);
+    if (error) {
+      setRows((rs) => rs.map((r) => (r.id === a.id ? { ...r, enabled: a.enabled } : r))); // roll back
+      toast.error(error.message);
+      return;
+    }
+    toast.show(next ? "Rule is now active" : "Rule paused");
     await load();
   };
 
   const remove = async (id: string) => {
-    await supabase.from("automations").delete().eq("id", id);
+    const { error } = await supabase.from("automations").delete().eq("id", id);
+    if (error) { toast.error(error.message); return; }
     await load();
     toast.show("Rule deleted");
   };

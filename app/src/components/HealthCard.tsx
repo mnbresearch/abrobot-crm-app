@@ -46,8 +46,14 @@ export function HealthCard() {
 
   return (
     <div
-      className="card"
-      style={{ borderColor: color, borderWidth: 1.5, background: isFail ? "#fef2f2" : "#fffbeb" }}
+      className={`card${isFail ? " alert-pulse" : ""}`}
+      style={{
+        borderColor: color,
+        borderWidth: 1.5,
+        // Tokens, not hex — hardcoded light colours turned this into a glaring
+        // white slab the moment dark mode existed.
+        background: isFail ? "var(--red-soft)" : "var(--amber-soft)",
+      }}
     >
       <div className="row" style={{ alignItems: "flex-start" }}>
         <div style={{ fontSize: 20, lineHeight: 1.2 }}>{isFail ? "🚨" : "⚠️"}</div>
