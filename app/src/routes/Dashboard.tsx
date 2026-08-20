@@ -130,7 +130,9 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                   <XAxis dataKey="name" tick={{ fontSize: 11, fill: "var(--muted)" }} interval={0} angle={-18} textAnchor="end" height={62} />
                   <YAxis tick={{ fontSize: 11, fill: "var(--muted)" }} allowDecimals={false} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13 }} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13, background: "var(--card)", color: "var(--text)", boxShadow: "var(--shadow-md)" }}
+                  itemStyle={{ color: "var(--text)" }}
+                  labelStyle={{ color: "var(--muted)" }} />
                   <Bar dataKey="count" fill={accent} radius={[7, 7, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -142,7 +144,9 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
                   <Pie data={bySource} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={88} label={{ fontSize: 11 }}>
                     {bySource.map((_, i) => <Cell key={i} fill={PIE[i % PIE.length]} />)}
                   </Pie>
-                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13 }} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13, background: "var(--card)", color: "var(--text)", boxShadow: "var(--shadow-md)" }}
+                  itemStyle={{ color: "var(--text)" }}
+                  labelStyle={{ color: "var(--muted)" }} />
                 </PieChart>
               </ResponsiveContainer>
             </Card>

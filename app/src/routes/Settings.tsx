@@ -296,12 +296,14 @@ function FieldsTab() {
   const toast = useToast();
 
   const toggleList = async (f: FieldDef) => {
-    await supabase.from("field_defs").update({ show_in_list: !f.show_in_list }).eq("id", f.id);
+    const { error } = await supabase.from("field_defs").update({ show_in_list: !f.show_in_list }).eq("id", f.id);
+    if (error) { toast.error(error.message); return; }
     await refresh();
   };
 
   const remove = async (id: string) => {
-    await supabase.from("field_defs").delete().eq("id", id);
+    const { error } = await supabase.from("field_defs").delete().eq("id", id);
+    if (error) { toast.error(error.message); return; }
     await refresh();
     toast.show("Field removed");
   };

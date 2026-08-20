@@ -145,7 +145,9 @@ export function Reports() {
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 11, fill: "var(--muted)" }} />
                 <YAxis tick={{ fontSize: 11, fill: "var(--muted)" }} allowDecimals={false} />
-                <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13 }} />
+                <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13, background: "var(--card)", color: "var(--text)", boxShadow: "var(--shadow-md)" }}
+                  itemStyle={{ color: "var(--text)" }}
+                  labelStyle={{ color: "var(--muted)" }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Line type="monotone" dataKey="created" stroke={accent} strokeWidth={2.4} dot={false} name="Created" />
                 <Line type="monotone" dataKey="won" stroke="#10b981" strokeWidth={2.4} dot={false} name="Won" />
@@ -160,7 +162,9 @@ export function Reports() {
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                   <XAxis dataKey="name" tick={{ fontSize: 10.5, fill: "var(--muted)" }} interval={0} angle={-20} textAnchor="end" height={64} />
                   <YAxis tick={{ fontSize: 11, fill: "var(--muted)" }} allowDecimals={false} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13 }} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13, background: "var(--card)", color: "var(--text)", boxShadow: "var(--shadow-md)" }}
+                  itemStyle={{ color: "var(--text)" }}
+                  labelStyle={{ color: "var(--muted)" }} />
                   <Bar dataKey="count" fill={accent} radius={[7, 7, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -172,7 +176,9 @@ export function Reports() {
                   <Pie data={bySource} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={88} label={{ fontSize: 11 }}>
                     {bySource.map((_, i) => <Cell key={i} fill={PIE[i % PIE.length]} />)}
                   </Pie>
-                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13 }} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid var(--border)", fontSize: 13, background: "var(--card)", color: "var(--text)", boxShadow: "var(--shadow-md)" }}
+                  itemStyle={{ color: "var(--text)" }}
+                  labelStyle={{ color: "var(--muted)" }} />
                 </PieChart>
               </ResponsiveContainer>
             </Card>

@@ -12,6 +12,7 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState("");
   const [editing, setEditing] = useState(false);
+  const [tagging, setTagging] = useState(false);
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -27,11 +28,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
 
   useEffect(() => { void load(); }, [load]);
 
+  // Every write surfaces its error. A save that silently fails while the UI
+  // says it worked is worse than an error message — the user walks away
+  // believing the record is updated.
   const log = async (type: Activity["type"], content: string) => {
     if (!lead || !org) return;
-    await supabase.from("activities").insert({
+    const { error } = await supabase.from("activities").insert({
       org_id: org.id, lead_id: lead.id, user_id: profile?.id ?? null, type, content,
     });
+    if (error) { toast.error(error.message); return; }
     await supabase.from("leads").update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id);
     await load();
   };
@@ -39,11 +44,46 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const moveStage = async (key: string) => {
     if (!lead) return;
     const label = stages.find((s) => s.key === key)?.label ?? key;
-    // stage_key is the new source of truth; the DB trigger mirrors it back to
-    // the legacy enum so the old frontend stays consistent.
-    await supabase.from("leads").update({ stage_key: key, updated_at: new Date().toISOString() }).eq("id", lead.id);
+    const previous = lead;
+
+    // Optimistic — the pill should move the instant you choose, not after a
+    // round trip. Rolled back below if the write is rejected.
+    setLead({ ...lead, stage_key: key });
+
+    // stage_key is the source of truth; the DB trigger mirrors it back to the
+    // legacy enum so the old frontend stays consistent.
+    const { error } = await supabase
+      .from("leads")
+      .update({ stage_key: key, updated_at: new Date().toISOString() })
+      .eq("id", lead.id);
+
+    if (error) {
+      setLead(previous);
+      toast.error(error.message);
+      return;
+    }
     await log("stage_change", `Moved to ${label}.`);
     toast.show(`Moved to ${label}`);
+  };
+
+  const addTag = async (tag: string) => {
+    if (!lead || !tag.trim()) return;
+    const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
+    const clean = tag.trim().toLowerCase();
+    if (tags.includes(clean)) return;
+    const next = [...tags, clean];
+    setLead({ ...lead, tags: next });
+    const { error } = await supabase.from("leads").update({ tags: next }).eq("id", lead.id);
+    if (error) { setLead({ ...lead, tags }); toast.error(error.message); }
+  };
+
+  const removeTag = async (tag: string) => {
+    if (!lead) return;
+    const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
+    const next = tags.filter((t) => t !== tag);
+    setLead({ ...lead, tags: next });
+    const { error } = await supabase.from("leads").update({ tags: next }).eq("id", lead.id);
+    if (error) { setLead({ ...lead, tags }); toast.error(error.message); }
   };
 
   const addNote = async () => {
@@ -71,6 +111,33 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
             <ScoreChip score={lead.score} />
             <span className="pill pill-muted">via {lead.source}</span>
             {lead.nurture_opted_out && <span className="pill pill-red">Unsubscribed</span>}
+
+            {(Array.isArray(lead.tags) ? lead.tags : []).map((t) => (
+              <button
+                key={t}
+                className="pill pill-interactive"
+                title="Remove tag"
+                onClick={() => void removeTag(t)}
+              >
+                {t} <span style={{ opacity: 0.55 }}>✕</span>
+              </button>
+            ))}
+
+            {tagging ? (
+              <input
+                className="input"
+                style={{ maxWidth: 150, padding: "3px 10px", borderRadius: 999, fontSize: 12 }}
+                autoFocus
+                placeholder="tag name"
+                onBlur={(e) => { void addTag(e.target.value); setTagging(false); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { void addTag((e.target as HTMLInputElement).value); setTagging(false); }
+                  if (e.key === "Escape") setTagging(false);
+                }}
+              />
+            ) : (
+              <button className="pill pill-muted pill-interactive" onClick={() => setTagging(true)}>+ tag</button>
+            )}
           </div>
         </div>
         <div className="spacer" />
@@ -133,9 +200,11 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
                   def={f}
                   value={lead.custom?.[f.key]}
                   onChange={async (v) => {
-                    const next = { ...(lead.custom ?? {}), [f.key]: v };
+                    const before = lead.custom ?? {};
+                    const next = { ...before, [f.key]: v };
                     setLead({ ...lead, custom: next });
-                    await supabase.from("leads").update({ custom: next }).eq("id", lead.id);
+                    const { error } = await supabase.from("leads").update({ custom: next }).eq("id", lead.id);
+                    if (error) { setLead({ ...lead, custom: before }); toast.error(error.message); }
                   }}
                 />
               </div>
