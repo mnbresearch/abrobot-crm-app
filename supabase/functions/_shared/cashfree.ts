@@ -148,8 +148,24 @@ export async function fetchOrder(orderId: string): Promise<Record<string, unknow
 
 // ── webhook verification ────────────────────────────────────────────────────
 
-/** Reject webhooks older than this — limits replay of a captured request. */
-const MAX_WEBHOOK_AGE_SECONDS = 5 * 60;
+/**
+ * Reject webhooks older than this.
+ *
+ * 15 minutes, not the more common 5.
+ *
+ * Cashfree reuses the ORIGINAL timestamp when it retries a failed delivery.
+ * Observed on order abcrm_abrobot_starter_1787812523559: event_time 12:06:10,
+ * retries at 12:06, 12:07, 12:09 and 12:14 — all carrying the 12:06 timestamp.
+ * A 5-minute window silently rejects the later retries, so a transient failure
+ * (a brief outage, a secret mid-rotation) becomes a permanently lost payment
+ * even after the underlying problem is fixed.
+ *
+ * Widening this does not weaken us much: replay protection here is really
+ * provided by idempotency — an order already marked 'paid' is never granted
+ * twice, regardless of how many times a captured request is replayed. The
+ * timestamp check is a second line of defence, not the only one.
+ */
+const MAX_WEBHOOK_AGE_SECONDS = 15 * 60;
 
 export type Verification =
   | { ok: true; event: Record<string, any> }   // deno-lint-ignore no-explicit-any
@@ -188,9 +204,23 @@ export async function verifyWebhook(
   if (!signature) return { ok: false, reason: "Missing x-webhook-signature" };
   if (!timestamp) return { ok: false, reason: "Missing x-webhook-timestamp" };
 
-  const ts = Number(timestamp);
-  if (!Number.isFinite(ts)) return { ok: false, reason: "Malformed timestamp" };
-  if (Math.abs(Date.now() / 1000 - ts) > MAX_WEBHOOK_AGE_SECONDS) {
+  const tsRaw = Number(timestamp);
+  if (!Number.isFinite(tsRaw)) return { ok: false, reason: "Malformed timestamp" };
+
+  // Cashfree sends x-webhook-timestamp in epoch MILLISECONDS (13 digits),
+  // e.g. "1787814895250" — not seconds.
+  //
+  // Comparing that against Date.now()/1000 made every real webhook look ~1.79
+  // trillion seconds old, so all of them were rejected on the age check before
+  // the signature was ever compared. Live payments 401'd while hand-built test
+  // requests passed, because those were generated with `date +%s` — seconds.
+  // The test harness was hiding the bug.
+  //
+  // Normalise by magnitude rather than assuming a unit: anything past ~1973 in
+  // seconds (1e11) must be milliseconds.
+  const tsSeconds = Math.abs(tsRaw) > 1e11 ? tsRaw / 1000 : tsRaw;
+
+  if (Math.abs(Date.now() / 1000 - tsSeconds) > MAX_WEBHOOK_AGE_SECONDS) {
     return { ok: false, reason: `Timestamp outside the ${MAX_WEBHOOK_AGE_SECONDS}s window` };
   }
 

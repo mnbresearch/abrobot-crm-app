@@ -193,12 +193,18 @@ function UpgradeCard({ current }: { current: string }) {
                   {p.whatsapp ? "✓ WhatsApp included" : "— WhatsApp not included"}
                 </div>
                 <button
-                  className="btn btn-primary"
+                  className={`btn btn-primary${busy === p.plan ? " btn-busy" : ""}`}
                   style={{ width: "100%", marginTop: 13 }}
+                  // Other plans are still disabled while one checkout is open —
+                  // two payment windows is a good way to get charged twice.
                   disabled={isCurrent || !isAdmin || busy !== null}
                   onClick={() => void checkout(p.plan)}
                 >
-                  {isCurrent ? "Your plan" : busy === p.plan ? "Opening checkout…" : `Upgrade to ${p.label}`}
+                  {isCurrent
+                    ? "Your plan"
+                    : busy === p.plan
+                      ? "Opening secure checkout…"
+                      : `Upgrade to ${p.label}`}
                 </button>
               </div>
             );

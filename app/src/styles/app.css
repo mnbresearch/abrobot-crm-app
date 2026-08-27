@@ -165,6 +165,23 @@
 .btn:active:not(:disabled) { transform: translateY(0) scale(0.97); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 
+/* A button that is WORKING is not a button that is unavailable.
+   Fading the one you just pressed — while it opens a payment window — reads
+   as "this broke". Keep it solid, show motion, and say what it is doing. */
+.btn-busy, .btn-busy:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+.btn-busy::after {
+  content: "";
+  width: 13px; height: 13px;
+  border: 2px solid rgba(255, 255, 255, .4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+  flex: 0 0 auto;
+}
+
 .btn-primary { background: var(--grad); color: #fff; border-color: transparent; box-shadow: var(--shadow); }
 .btn-primary:hover:not(:disabled) { box-shadow: var(--shadow-md); filter: brightness(1.06); }
 .btn-ghost { background: transparent; border-color: transparent; }
