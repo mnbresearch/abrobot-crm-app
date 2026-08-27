@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../lib/store";
-import { supabase } from "../lib/supabase";
+import { supabase, callFunction } from "../lib/supabase";
 import { getIndustry } from "../lib/industries";
 import { Card, Empty, Modal, useToast } from "../components/ui";
 import type { AgentConfig, FieldDef, FieldType, PipelineStage } from "../lib/types";
@@ -87,6 +87,8 @@ function UsageTab() {
           </span>
         </div>
       </Card>
+      <UpgradeCard current={snap.plan} />
+
       <Card title="How limits work">
         <p className="sub" style={{ marginTop: -8 }}>
           Limits are enforced on the server, inside the edge functions — not in this browser. When the AI
@@ -95,6 +97,124 @@ function UsageTab() {
         </p>
       </Card>
     </div>
+  );
+}
+
+interface PlanRow {
+  plan: string; label: string; price_inr: number | null;
+  max_seats: number | null; max_leads: number | null; max_ai_messages: number | null;
+  whatsapp: boolean; position: number;
+}
+
+function UpgradeCard({ current }: { current: string }) {
+  const { isAdmin } = useApp();
+  const [plans, setPlans] = useState<PlanRow[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [months, setMonths] = useState<1 | 12>(1);
+  const toast = useToast();
+
+  useEffect(() => {
+    void supabase.from("plan_limits").select("*").order("position")
+      .then(({ data }) => setPlans((data as PlanRow[]) ?? []));
+  }, []);
+
+  const paid = plans.filter((p) => p.price_inr && p.price_inr > 0);
+  if (!paid.length) return null;
+
+  const checkout = async (plan: string) => {
+    setBusy(plan);
+    try {
+      const r = await callFunction<{ payment_session_id: string; env: string; order_id: string }>(
+        "billing-checkout", { plan, months },
+      );
+
+      // The Cashfree SDK is loaded on demand rather than from index.html —
+      // no reason to ship a payment script to every visitor who never upgrades.
+      const sdkUrl = "https://sdk.cashfree.com/js/v3/cashfree.js";
+      if (!document.querySelector(`script[src="${sdkUrl}"]`)) {
+        await new Promise<void>((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = sdkUrl;
+          s.onload = () => resolve();
+          s.onerror = () => reject(new Error("Could not load the payment SDK"));
+          document.head.appendChild(s);
+        });
+      }
+
+      const CF = (window as unknown as { Cashfree?: (o: unknown) => { checkout: (o: unknown) => Promise<void> } }).Cashfree;
+      if (!CF) throw new Error("Payment SDK unavailable");
+      const cf = CF({ mode: r.env === "production" ? "production" : "sandbox" });
+      await cf.checkout({ paymentSessionId: r.payment_session_id, redirectTarget: "_self" });
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+    setBusy(null);
+  };
+
+  return (
+    <>
+      <Card
+        title="Upgrade"
+        action={
+          <div className="row">
+            <button className={`btn btn-sm${months === 1 ? " btn-primary" : ""}`} onClick={() => setMonths(1)}>
+              Monthly
+            </button>
+            <button className={`btn btn-sm${months === 12 ? " btn-primary" : ""}`} onClick={() => setMonths(12)}>
+              Yearly · 2 months free
+            </button>
+          </div>
+        }
+      >
+        <div className="grid grid-2 stagger">
+          {paid.map((p) => {
+            const isCurrent = p.plan === current;
+            const price = months === 12 ? (p.price_inr ?? 0) * 10 : p.price_inr ?? 0;
+            return (
+              <div
+                key={p.plan}
+                className="card card-interactive"
+                style={{ background: "var(--bg)", borderColor: isCurrent ? "var(--industry)" : undefined }}
+              >
+                <div className="row">
+                  <h3>{p.label}</h3>
+                  {isCurrent && <span className="pill">Current</span>}
+                </div>
+                <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.03em", marginTop: 6 }}>
+                  ₹{price.toLocaleString("en-IN")}
+                  <span className="sub" style={{ fontSize: 13, fontWeight: 500 }}>
+                    {" "}/{months === 12 ? "year" : "month"}
+                  </span>
+                </div>
+                <div className="sub" style={{ fontSize: 12.5, marginTop: 9, lineHeight: 1.9 }}>
+                  {p.max_seats ? `${p.max_seats} team members` : "Unlimited members"}<br />
+                  {p.max_leads ? `${p.max_leads.toLocaleString("en-IN")} records` : "Unlimited records"}<br />
+                  {p.max_ai_messages ? `${p.max_ai_messages.toLocaleString("en-IN")} AI messages / month` : "Unlimited AI"}<br />
+                  {p.whatsapp ? "✓ WhatsApp included" : "— WhatsApp not included"}
+                </div>
+                <button
+                  className="btn btn-primary"
+                  style={{ width: "100%", marginTop: 13 }}
+                  disabled={isCurrent || !isAdmin || busy !== null}
+                  onClick={() => void checkout(p.plan)}
+                >
+                  {isCurrent ? "Your plan" : busy === p.plan ? "Opening checkout…" : `Upgrade to ${p.label}`}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {!isAdmin && (
+          <p className="sub" style={{ fontSize: 12, marginTop: 12 }}>Only an admin can change the plan.</p>
+        )}
+        <p className="sub" style={{ fontSize: 12, marginTop: 12 }}>
+          Payments are processed by Cashfree. Your plan upgrades only after Cashfree confirms the payment to
+          our server — never from the page you land on afterwards.
+        </p>
+      </Card>
+      {toast.node}
+    </>
   );
 }
 
