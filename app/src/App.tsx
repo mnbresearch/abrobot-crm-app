@@ -17,6 +17,7 @@ import { Templates } from "./routes/Templates";
 import { Import } from "./routes/Import";
 import { Automations } from "./routes/Automations";
 import { CommandPalette } from "./components/CommandPalette";
+import { CreateOrg } from "./routes/CreateOrg";
 import { ShortcutsHelp } from "./components/ShortcutsHelp";
 import { useTheme } from "./lib/theme";
 
@@ -56,18 +57,11 @@ export default function App() {
   if (loading) return <Spinner />;
   if (!session) return <Login />;
 
+  // No organisation yet → self-serve signup. CreateOrg first checks for a
+  // pending invite, so an invited teammate joins their team rather than
+  // accidentally creating a second, empty organisation.
   if (!profile?.org_id) {
-    return (
-      <div className="auth-wrap">
-        <div className="card auth-card">
-          <h2>No workspace yet</h2>
-          <p className="sub" style={{ marginTop: 7 }}>
-            Your account isn't linked to an organisation. Ask an admin to invite you, or contact support.
-          </p>
-          <button className="btn" style={{ marginTop: 14 }} onClick={signOut}>Sign out</button>
-        </div>
-      </div>
-    );
+    return <CreateOrg onDone={() => { void refresh(); navigate("/"); }} />;
   }
 
   if (needsOnboarding) return <Onboarding onDone={() => { void refresh(); navigate("/"); }} />;

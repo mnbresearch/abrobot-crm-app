@@ -49,49 +49,21 @@ Deno.serve(async (req) => {
 
   if (!verified.ok) {
     // 401, not 200: this did not come from Cashfree, or the secret is wrong.
-    console.error("webhook rejected:", verified.reason);
-
-    // Temporary diagnostics, echoed in the response body so they show up in
-    // Cashfree's own delivery log — the Supabase function logs are awkward to
-    // reach on a Vercel-managed org.
     //
-    // Deliberately leaks NOTHING usable: the secret's length and the first 6
-    // characters of two base64 digests. You cannot reverse a key from that,
-    // but it is enough to tell "wrong key" (digests differ) from "wrong
-    // timestamp" (age is large) from "no key at all" (length 0).
+    // The reason is logged (visible in the function logs) but NOT returned in
+    // the body beyond a short label. A temporary diagnostic block lived here
+    // while debugging the millisecond-timestamp bug; it reported the secret's
+    // length and digest prefixes, which is fine for an afternoon and wrong to
+    // leave in a public endpoint's response.
     //
-    // Remove this block once payments are confirmed working.
-    const sec = (Deno.env.get("CASHFREE_SECRET_KEY") ?? "");
-    const ts = req.headers.get("x-webhook-timestamp");
-    const recv = req.headers.get("x-webhook-signature") ?? "";
-    let expectedPrefix = "n/a";
-    try {
-      if (sec && ts) {
-        const key = await crypto.subtle.importKey(
-          "raw", new TextEncoder().encode(sec.trim()),
-          { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
-        );
-        const s = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(ts + rawBody));
-        expectedPrefix = btoa(String.fromCharCode(...new Uint8Array(s))).slice(0, 6);
-      }
-    } catch (_e) { expectedPrefix = "error"; }
-
-    const diag = {
-      secret_len: sec.length,
-      secret_trimmed_len: sec.trim().length,
-      has_quotes: sec.startsWith('"') || sec.startsWith("'"),
-      ts_header: ts,
-      ts_age_seconds: ts && Number.isFinite(Number(ts))
-        ? Math.round(Math.abs(Date.now() / 1000 - Number(ts)))
-        : null,
-      received_sig_prefix: recv.slice(0, 6),
-      expected_sig_prefix: expectedPrefix,
-      body_bytes: rawBody.length,
-      env: Deno.env.get("CASHFREE_ENV") ?? "unset",
-    };
-    console.error("diag:", JSON.stringify(diag));
-
-    return json({ error: "unauthorised", reason: verified.reason, diag }, 401);
+    // If this ever needs debugging again: read the logged line below rather
+    // than widening the response.
+    console.error(
+      "webhook rejected:", verified.reason,
+      "| ts:", req.headers.get("x-webhook-timestamp"),
+      "| body_bytes:", rawBody.length,
+    );
+    return json({ error: "unauthorised" }, 401);
   }
 
   const event = verified.event;

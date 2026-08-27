@@ -7,6 +7,111 @@ import type { MemberStatus, Profile, UserRole } from "../lib/types";
 const ROLES: UserRole[] = ["counsellor", "org_admin", "super_admin"];
 const STATUSES: MemberStatus[] = ["pending", "active", "disabled"];
 
+interface Invite {
+  id: string;
+  email: string;
+  role: UserRole;
+  accepted_at: string | null;
+  created_at: string;
+}
+
+/**
+ * Invites.
+ *
+ * An admin cannot create someone else's login — only Supabase Auth can. So an
+ * invite records intent: when that email signs in, accept_invite() attaches
+ * them to this org with the role chosen here. That keeps identity with the
+ * auth provider and authorisation with us, which is the right split.
+ */
+function InviteCard({ onChanged }: { onChanged: () => void }) {
+  const { org, profile } = useApp();
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<UserRole>("counsellor");
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  const load = async () => {
+    if (!org) return;
+    const { data } = await supabase.from("invites").select("*").eq("org_id", org.id).order("created_at", { ascending: false });
+    setInvites((data as Invite[]) ?? []);
+  };
+
+  useEffect(() => { void load(); /* eslint-disable-next-line */ }, [org]);
+
+  const invite = async () => {
+    const clean = email.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(clean)) { toast.error("Enter a valid email address"); return; }
+    if (!org) return;
+    setBusy(true);
+    const { error } = await supabase.from("invites").upsert(
+      { org_id: org.id, email: clean, role, invited_by: profile?.id ?? null, accepted_at: null },
+      { onConflict: "org_id,email" },
+    );
+    setBusy(false);
+    if (error) { toast.error(error.message); return; }
+    setEmail("");
+    await load();
+    onChanged();
+    toast.show("Invite created");
+  };
+
+  const revoke = async (id: string) => {
+    const { error } = await supabase.from("invites").delete().eq("id", id);
+    if (error) { toast.error(error.message); return; }
+    await load();
+    toast.show("Invite revoked");
+  };
+
+  const pending = invites.filter((i) => !i.accepted_at);
+
+  return (
+    <>
+      <Card title="Invite a teammate">
+        <div className="row row-wrap" style={{ marginBottom: 6 }}>
+          <input
+            className="input"
+            style={{ maxWidth: 300 }}
+            type="email"
+            placeholder="colleague@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void invite(); }}
+          />
+          <select className="select" style={{ maxWidth: 170 }} value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
+            <option value="counsellor">Counsellor</option>
+            <option value="org_admin">Admin</option>
+          </select>
+          <button className={`btn btn-primary${busy ? " btn-busy" : ""}`} onClick={invite} disabled={busy}>
+            {busy ? "Inviting…" : "Send invite"}
+          </button>
+        </div>
+
+        <p className="sub" style={{ fontSize: 12.5, marginTop: 10 }}>
+          They sign in at <b>{window.location.host}</b> with this exact email and join automatically —
+          no admin step afterwards. Send them the link yourself; we don't email it for you yet.
+        </p>
+
+        {pending.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div className="label">Waiting to join</div>
+            {pending.map((i) => (
+              <div key={i.id} className="row" style={{ justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid var(--border)" }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{i.email}</div>
+                  <div className="sub" style={{ fontSize: 12 }}>as {i.role.replace("_", " ")} · {timeAgo(i.created_at)}</div>
+                </div>
+                <button className="btn btn-sm btn-danger" onClick={() => void revoke(i.id)}>Revoke</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+      {toast.node}
+    </>
+  );
+}
+
 export function Team() {
   const { org, profile, isAdmin } = useApp();
   const [members, setMembers] = useState<Profile[]>([]);
@@ -104,19 +209,7 @@ export function Team() {
         </div>
       )}
 
-      {isAdmin && (
-        <Card title="Adding people">
-          <p className="sub" style={{ marginTop: -8 }}>
-            A new member signs in with their email on the login screen, which creates their account. Their
-            profile then appears here as <b>pending</b> — set the role and switch them to <b>active</b> to
-            grant access.
-          </p>
-          <p className="sub" style={{ marginTop: 10, fontSize: 12 }}>
-            ⚠️ Before you activate your first <b>counsellor</b>, close the <code>agent_config</code> credential
-            gap documented in RECOVERED-SCHEMA.md — active members can currently read the org's API keys.
-          </p>
-        </Card>
-      )}
+      {isAdmin && <InviteCard onChanged={load} />}
       {toast.node}
     </div>
   );
