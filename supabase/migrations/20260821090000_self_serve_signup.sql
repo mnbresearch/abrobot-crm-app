@@ -226,10 +226,11 @@ begin
   end if;
 
   -- Seat limit applies to invites too, or the limit is trivially bypassed.
-  select pl.max_seats into seat_cap
-    from public.organizations o
-    join public.plan_limits pl on pl.plan = o.plan
-   where o.id = inv.org_id;
+  -- Read through plan_seat_cap (20260821080000) rather than joining on
+  -- organizations.plan: that column records what was PURCHASED, which is not
+  -- the same as what is currently live. A lapsed org would otherwise keep
+  -- inviting people on a plan it stopped paying for.
+  seat_cap := public.plan_seat_cap(inv.org_id);
 
   if seat_cap is not null then
     select count(*) into active_now

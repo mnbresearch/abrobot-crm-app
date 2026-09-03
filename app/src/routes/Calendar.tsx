@@ -9,7 +9,31 @@ import type { Lead } from "../lib/types";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-const iso = (d: Date) => d.toISOString().slice(0, 10);
+/**
+ * Local calendar day, NOT the UTC day.
+ *
+ * This was `d.toISOString().slice(0,10)`, which is a UTC date string — and the
+ * grid cells are built from LOCAL midnights. In IST (UTC+5:30) those disagree
+ * by a day for the first 5h30m of every date: `new Date(2026, 8, 15)` is
+ * 2026-09-14T18:30Z, so the cell displaying "15" was keyed "2026-09-14".
+ *
+ * Net effect for an Indian user — which is every user — **every follow-up
+ * appeared one day late**, "today" highlighted tomorrow's box, and the day
+ * list actually spanned 05:30 today to 05:29 tomorrow, dropping anything due
+ * early in the morning and stealing anything due after midnight.
+ *
+ * On the screen whose entire job is "who am I calling today".
+ */
+const iso = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// Parse a "YYYY-MM-DD" key back to a LOCAL midnight. `new Date("2026-09-02")`
+// parses as UTC midnight, which renders as the previous evening in IST — the
+// same off-by-one arriving through the back door.
+const fromIso = (s: string) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, (m ?? 1) - 1, d ?? 1);
+};
 
 export function Calendar({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
@@ -26,7 +50,13 @@ export function Calendar({ navigate }: { navigate: (to: string) => void }) {
   const byDay = useMemo(() => {
     const m: Record<string, Lead[]> = {};
     openLeads.forEach((l) => {
-      const k = iso(new Date(l.next_follow_up_at!));
+      // A malformed date makes toISOString throw RangeError — which, inside a
+      // useMemo with no error boundary, used to take the whole app down.
+      // next_follow_up_at is written by the CSV importer, the lead webhook and
+      // automations, none of which validate it here.
+      const t = new Date(l.next_follow_up_at!);
+      if (Number.isNaN(t.getTime())) return;
+      const k = iso(t);
       (m[k] ??= []).push(l);
     });
     return m;
@@ -118,7 +148,7 @@ export function Calendar({ navigate }: { navigate: (to: string) => void }) {
         </div>
       </Card>
 
-      <Card title={new Date(selected).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}>
+      <Card title={fromIso(selected).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}>
         {dayList.length === 0 ? (
           <Empty icon="📅" title="Nothing scheduled" hint="Pick another day, or set a follow-up from a record." />
         ) : (

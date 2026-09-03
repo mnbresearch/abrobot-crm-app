@@ -78,14 +78,27 @@ Deno.serve(async (req) => {
     return json({ ok: true, deduped: true }); // already known — no second welcome
   }
 
-  // create the lead (source "app"); start nurture at step 1 so the daily engine's
-  // "this week" email follows a few days after this welcome (no duplicate intro).
-  const { data: lead } = await supabase.from("leads").insert({
-    org_id: org.id, name, email, source: "app", stage: "new",
+  // Start nurture at step 1 so the daily engine's "this week" email follows a
+  // few days after this welcome (no duplicate intro).
+  //
+  // source was "app", which is NOT a member of the lead_source enum
+  // (whatsapp, chatbase, email, website, csv_import, pdf_import, manual,
+  // referral, other). Every insert here failed with 22P02 — and because the
+  // error was discarded and the code then did `if (lead)`, it failed silently:
+  // the endpoint returned ok:true while recording nothing. Signups from the
+  // app have been dropping on the floor. Marked "other" so they land; the
+  // activity row below still says where they came from.
+  const { data: lead, error: leadErr } = await supabase.from("leads").insert({
+    org_id: org.id, name, email, source: "other", stage: "new",
     target_country: body.country || null, course: body.course || null,
     nurture_step: 1, nurture_last_sent_at: new Date().toISOString(),
     next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
   }).select("id, nurture_token").single();
+
+  if (leadErr) {
+    console.error("app-signup: lead insert failed", leadErr);
+    return json({ ok: false, error: leadErr.message }, 500);
+  }
 
   if (lead) {
     await supabase.from("activities").insert({

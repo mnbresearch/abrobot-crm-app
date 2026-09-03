@@ -18,7 +18,8 @@ const TABS: { key: Tab; label: string; icon: string }[] = [
 
 interface UsageMetric { used: number; limit: number | null }
 interface UsageSnapshot {
-  plan: string; label: string; period: string;
+  plan: string; purchased_plan: string; label: string; period: string;
+  is_expired: boolean; access_until: string | null; days_left: number | null;
   ai_messages: UsageMetric; leads: UsageMetric;
   seats: UsageMetric; automations: UsageMetric;
   whatsapp: boolean;
@@ -71,11 +72,55 @@ function UsageTab() {
     );
   };
 
+  // Warn a week ahead. Someone finding out they've lapsed by watching a send
+  // fail is a support ticket and a bad memory; someone who saw it coming for
+  // seven days just renews.
+  const expiringSoon = !snap.is_expired && snap.days_left !== null && snap.days_left <= 7;
+  const until = snap.access_until
+    ? new Date(snap.access_until).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
+    : null;
+
   return (
     <div className="stack">
+      {snap.is_expired && (
+        <Card>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <span style={{ fontSize: 22 }}>⏳</span>
+            <div>
+              <div style={{ fontWeight: 700 }}>
+                Your {snap.purchased_plan} plan ended{until ? ` on ${until}` : ""}
+              </div>
+              <p className="sub" style={{ marginTop: 4 }}>
+                All of your data is safe and you can still read and export it. New records, AI replies,
+                WhatsApp and automations are paused until you renew below.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {expiringSoon && (
+        <Card>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <span style={{ fontSize: 22 }}>🔔</span>
+            <div>
+              <div style={{ fontWeight: 700 }}>
+                {snap.days_left === 0
+                  ? "Your plan renews today"
+                  : `${snap.days_left} day${snap.days_left === 1 ? "" : "s"} left on your ${snap.label} plan`}
+              </div>
+              <p className="sub" style={{ marginTop: 4 }}>
+                {until && `Access runs until ${until}. `}Renew below to keep everything running.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       <Card title={`Plan — ${snap.label}`}>
         <p className="sub" style={{ marginTop: -8, marginBottom: 15 }}>
           AI messages reset monthly. Current period {snap.period}.
+          {until && !snap.is_expired && ` Access until ${until}.`}
         </p>
         <Meter label="AI chat messages" m={snap.ai_messages} />
         <Meter label="Records" m={snap.leads} />

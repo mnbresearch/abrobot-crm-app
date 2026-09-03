@@ -70,7 +70,13 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
   const [mapping, setMapping] = useState<string[]>([]);
   const [filename, setFilename] = useState("");
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ inserted: number; duplicates: number; failed: number } | null>(null);
+  const [result, setResult] = useState<{
+    inserted: number;
+    duplicates: number;
+    failed: number;               // rows we skipped: no email and no phone
+    rejected: number;             // rows the database refused — a different thing
+    rejectReason: string | null;
+  } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
@@ -134,22 +140,36 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
       });
     }
 
+    // A rejected batch used to be counted into `failed`, which is rendered as
+    // "Rows with no contact" — so hitting the plan limit told the user their
+    // CSV was malformed. They would go and edit a perfectly good file.
+    // Rejections are now counted and explained separately; guard_lead_limit's
+    // message is written to be shown to a person.
+    let rejected = 0;
+    let rejectReason: string | null = null;
+
     // chunked so a large file doesn't hit request limits
     for (let i = 0; i < batch.length; i += 200) {
+      const chunk = batch.slice(i, i + 200);
       const { error, count } = await supabase
         .from("leads")
-        .insert(batch.slice(i, i + 200), { count: "exact" });
-      if (error) failed += Math.min(200, batch.length - i);
-      else inserted += count ?? batch.slice(i, i + 200).length;
+        .insert(chunk, { count: "exact" });
+      if (error) {
+        rejected += chunk.length;
+        rejectReason ??= error.message;
+      } else {
+        inserted += count ?? chunk.length;
+      }
     }
 
-    await supabase.from("imports").insert({
+    const { error: importLogErr } = await supabase.from("imports").insert({
       org_id: org.id, user_id: profile?.id ?? null, filename,
       kind: "csv", total: body.length, inserted, duplicates,
     });
+    if (importLogErr) console.error("import history row not saved:", importLogErr.message);
 
     setBusy(false);
-    setResult({ inserted, duplicates, failed });
+    setResult({ inserted, duplicates, failed, rejected, rejectReason });
   };
 
   if (busy) return <Spinner />;
@@ -176,7 +196,28 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
               <div className="kpi-label"><span>⚠️</span><span>Rows with no contact</span></div>
               <div className="kpi-value" style={{ color: result.failed ? "var(--red)" : undefined }}>{result.failed}</div>
             </div>
+            {result.rejected > 0 && (
+              <div className="kpi">
+                <div className="kpi-label"><span>⛔</span><span>Rejected</span></div>
+                <div className="kpi-value" style={{ color: "var(--red)" }}>{result.rejected}</div>
+              </div>
+            )}
           </div>
+
+          {result.rejected > 0 && (
+            <div
+              className="card"
+              style={{ marginTop: 14, background: "var(--bg)", borderColor: "var(--red)" }}
+            >
+              <div style={{ fontWeight: 700 }}>
+                {result.rejected} {result.rejected === 1 ? "row was" : "rows were"} refused by the server
+              </div>
+              <p className="sub" style={{ marginTop: 4 }}>
+                This is not a problem with your file — those rows had contact details.
+                {result.rejectReason ? ` The server said: “${result.rejectReason}”` : ""}
+              </p>
+            </div>
+          )}
           <div className="row" style={{ marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => navigate("/leads")}>View {ui.leadNounPlural} →</button>
             <button className="btn" onClick={() => { setRows([]); setResult(null); setFilename(""); }}>Import another</button>

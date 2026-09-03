@@ -77,8 +77,18 @@ Deno.serve(async (req) => {
     return json({ received: true, ignored: "no order_id" });
   }
 
-  const { data: row } = await admin.from("payments")
+  const { data: row, error: lookupErr } = await admin.from("payments")
     .select("id, org_id, plan, status, period_months").eq("order_id", orderId).maybeSingle();
+
+  // A failed lookup is NOT an unknown order. The error used to be discarded,
+  // so one transient database blip fell through to the 200 below — Cashfree
+  // marks the webhook delivered, stops retrying, and the customer has paid for
+  // a plan that will never be granted, permanently and silently.
+  // 500 keeps the retry alive, which is the entire safety net here.
+  if (lookupErr) {
+    console.error("billing-webhook: payments lookup failed for", orderId, lookupErr.message);
+    return json({ error: "lookup failed, please retry" }, 500);
+  }
 
   if (!row) {
     // An order we never created. Acknowledge so Cashfree stops retrying, but

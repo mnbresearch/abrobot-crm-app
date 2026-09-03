@@ -3,8 +3,7 @@ import { useApp, useLeads } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import {
   Card, Empty, FieldInput, Modal, ScoreChip, Skeleton, StagePill,
-  cellValue, humanize, useToast,
-} from "../components/ui";
+  cellValue, humanize, useToast, LoadError } from "../components/ui";
 import type { Lead } from "../lib/types";
 
 // Columns are resolved at runtime: the industry registry proposes defaults and
@@ -15,7 +14,7 @@ type SortKey = "created" | "score" | "name" | "follow_up";
 
 export function Leads({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages, fields, profile } = useApp();
-  const { leads, loading, reload } = useLeads(org?.id);
+  const { leads, loading, error: leadsError, reload } = useLeads(org?.id);
   const [q, setQ] = useState("");
   const [stageFilter, setStageFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
@@ -100,6 +99,7 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
   };
 
   if (loading) return <Skeleton kind="table" />;
+  if (leadsError) return <LoadError message={leadsError} onRetry={() => void reload()} />;
 
   return (
     <div className="stack">

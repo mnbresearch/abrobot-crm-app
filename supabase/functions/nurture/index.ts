@@ -111,10 +111,50 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const unsub = url.searchParams.get("unsub");
   if (unsub) {
-    await supabase.from("leads").update({ nurture_opted_out: true }).eq("nurture_token", unsub);
-    return new Response(
-      `<html><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>You're unsubscribed</h2><p>You won't receive more nurture emails from AbroBot. You can still reach us anytime at contact@mnbresearch.com.</p></body></html>`,
-      { status: 200, headers: { "Content-Type": "text/html" } },
+    // Telling someone they are unsubscribed when they are not is the one bug
+    // here with legal weight, not just product cost. The error was discarded
+    // AND no row count was checked, so a failed update or a stale token both
+    // rendered "You're unsubscribed" while the mail kept coming.
+    //
+    // .select() makes the update report which rows it actually changed.
+    const { data: optedOut, error: unsubErr } = await supabase
+      .from("leads")
+      .update({ nurture_opted_out: true })
+      .eq("nurture_token", unsub)
+      .select("id");
+
+    const page = (title: string, body: string, status: number) =>
+      new Response(
+        `<html><body style="font-family:sans-serif;text-align:center;padding:60px">` +
+        `<h2>${title}</h2><p>${body}</p></body></html>`,
+        { status, headers: { "Content-Type": "text/html" } },
+      );
+
+    if (unsubErr) {
+      console.error("nurture: unsubscribe FAILED for token", unsub, unsubErr.message);
+      return page(
+        "We couldn't process that just now",
+        "Please email contact@mnbresearch.com and we will remove you straight away. " +
+        "We are sorry for the trouble.",
+        500,
+      );
+    }
+
+    if (!optedOut?.length) {
+      // Already opted out, or a token that no longer matches. Say so honestly
+      // rather than implying we just actioned something we did not.
+      return page(
+        "You're not on this list",
+        "That link has already been used, or the address is no longer subscribed. " +
+        "If you are still receiving email, contact us at contact@mnbresearch.com.",
+        200,
+      );
+    }
+
+    return page(
+      "You're unsubscribed",
+      "You won't receive more nurture emails. You can still reach us anytime at contact@mnbresearch.com.",
+      200,
     );
   }
 

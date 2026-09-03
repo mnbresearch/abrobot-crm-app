@@ -117,24 +117,52 @@ export function useApp(): AppState {
 
 // ── leads ───────────────────────────────────────────────────────────────────
 
+// `error` is returned, not swallowed. It used to be dropped, so `data` came
+// back null, `?? []` turned it into an empty array, and a single failed
+// request rendered as "No leads yet" on the Dashboard, Leads, Pipeline,
+// Calendar and Reports simultaneously — a customer with 4,000 records being
+// told, convincingly, that they have none. Callers should show `error` rather
+// than an empty state.
+//
+// `truncated` exists because the limit is real: the Business plan sells 50,000
+// records and this reads 2,000, so past that every chart is computed on the
+// newest slice with nothing on screen admitting it.
+const LEAD_PAGE_LIMIT = 2000;
+
 export function useLeads(orgId: string | undefined) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!orgId) return;
     setLoading(true);
-    const { data } = await supabase
+    const { data, error: err } = await supabase
       .from("leads")
       .select("*")
       .eq("org_id", orgId)
       .order("created_at", { ascending: false })
-      .limit(2000);
-    setLeads((data as Lead[]) ?? []);
+      .limit(LEAD_PAGE_LIMIT);
+
+    if (err) {
+      // Keep whatever we already had on screen rather than blanking it.
+      console.error("useLeads: load failed —", err.message);
+      setError(err.message);
+    } else {
+      setError(null);
+      setLeads((data as Lead[]) ?? []);
+    }
     setLoading(false);
   }, [orgId]);
 
   useEffect(() => { void load(); }, [load]);
 
-  return { leads, loading, reload: load, setLeads };
+  return {
+    leads,
+    loading,
+    error,
+    truncated: leads.length >= LEAD_PAGE_LIMIT,
+    reload: load,
+    setLeads,
+  };
 }

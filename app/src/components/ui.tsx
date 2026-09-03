@@ -129,6 +129,33 @@ export function Empty({ icon = "📭", title, hint, action }: { icon?: string; t
   );
 }
 
+/**
+ * Shown when data could not be loaded — never an <Empty>.
+ *
+ * The distinction matters more than it looks. "You have no records" and "we
+ * could not reach the server" look identical to a user, but one of them means
+ * their data is gone. Rendering a failed request as a tidy empty state is how
+ * a customer with 4,000 leads gets told they have none, believes it, and
+ * calls support.
+ */
+export function LoadError({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="card" style={{ borderColor: "var(--red)" }}>
+      <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+        <span style={{ fontSize: 22 }}>⚠️</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700 }}>Couldn't load your data</div>
+          <p className="sub" style={{ marginTop: 4 }}>
+            Nothing has been lost — this screen just can't reach the server right now.
+            {message ? ` (${message})` : ""}
+          </p>
+        </div>
+        {onRetry && <button className="btn btn-sm btn-primary" onClick={onRetry}>Retry</button>}
+      </div>
+    </div>
+  );
+}
+
 export function Toast({ msg, err, onDone }: { msg: string; err?: boolean; onDone: () => void }) {
   useEffect(() => {
     const t = setTimeout(onDone, 3200);

@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, PieChart, Pie, Cell } from "recharts";
 import { useApp, useLeads } from "../lib/store";
 import { computeKpi } from "../lib/industries";
-import { AnimatedNumber, Card, Empty, ScoreChip, Skeleton, StagePill, timeAgo } from "../components/ui";
+import { AnimatedNumber, Card, Empty, ScoreChip, Skeleton, StagePill, timeAgo, LoadError } from "../components/ui";
 import { HealthCard } from "../components/HealthCard";
 import { SetupChecklist } from "../components/SetupChecklist";
 import type { Lead } from "../lib/types";
@@ -13,7 +13,7 @@ import type { Lead } from "../lib/types";
 
 export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
-  const { leads, loading } = useLeads(org?.id);
+  const { leads, loading, error: leadsError, reload } = useLeads(org?.id);
 
   const stageMeta = useMemo(
     () => stages.map((s) => ({ key: s.key, is_won: s.is_won, is_lost: s.is_lost })),
@@ -54,6 +54,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
   }, [leads, stages]);
 
   if (loading) return <Skeleton kind="page" />;
+  if (leadsError) return <LoadError message={leadsError} onRetry={() => void reload()} />;
 
   const accent = ui.accent ?? "#b45309";
   const PIE = [accent, "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ef4444", "#78716c"];

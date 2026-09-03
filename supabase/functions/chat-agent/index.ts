@@ -16,6 +16,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
 import { scoreLead } from "../_shared/score.ts";
+import { firstStageKey } from "../_shared/stage.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -58,6 +59,37 @@ function normPhone(p?: string | null): string | null {
 function grabName(t: string): string | null {
   const m = t.match(/\b(?:my name is|i am|i'm|this is|name[:\-]?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
   return m ? m[1].trim().slice(0, 60) : null;
+}
+
+/**
+ * Strip chain-of-thought before it reaches a visitor.
+ *
+ * Reasoning-capable models emit their scratchpad in <think> tags, and Groq
+ * passes it straight through in message.content. Measured on the live abrobot
+ * org: 2 of 4 replies to an ordinary question ("which universities suit a 7.0
+ * IELTS?") began with a full "Here's a thinking process:" block. Visitors on
+ * the highest-traffic site were seeing the model deliberate about them.
+ *
+ * Three cases, because the failure modes differ:
+ *   1. well-formed <think>...</think>  -> drop the block
+ *   2. an opening <think> that never closes (hit the token limit mid-thought)
+ *      -> everything after it is scratchpad, so drop to the end
+ *   3. a stray closing </think> with no opener (the model started reasoning
+ *      before the first token we captured) -> keep only what follows
+ *
+ * Returns "" when the reply was ENTIRELY scratchpad. That is deliberate: the
+ * caller treats empty as "no content" and falls through to the next model in
+ * the chain, which is the right outcome — the generation genuinely failed.
+ * Returning the raw text instead would print the model's reasoning to the
+ * visitor, which is the exact bug this function exists to prevent.
+ */
+function stripReasoning(raw: string): string {
+  let t = raw;
+  t = t.replace(/<think>[\s\S]*?<\/think>/gi, "");   // 1
+  t = t.replace(/<think>[\s\S]*$/i, "");             // 2
+  t = t.replace(/^[\s\S]*?<\/think>/i, "");          // 3
+  t = t.replace(/<\/?think>/gi, "").trim();
+  return t;
 }
 
 // quick_replies text -> [{label, prompt}]
@@ -131,11 +163,21 @@ function buildSystemPrompt(cfg: any, brand: string, bookingUrl: string): string 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const url = new URL(req.url);
-  const slug = (url.searchParams.get("org") || "abrobot").toLowerCase();
+  // The org came only from ?org=. widget.js sends it there, so production was
+  // fine — but the widget ALSO puts org in the POST body, and that copy was
+  // silently ignored. Anyone integrating from the body alone (as I did while
+  // testing) got served AbroBot's agent and knowledge base under someone
+  // else's brand, with no error. Defaulting a tenant identifier is the
+  // dangerous part; read the body as a fallback and keep the default only for
+  // the legacy embeds that rely on it.
+  let slug = (url.searchParams.get("org") || "").toLowerCase().trim();
 
   // ---------- public widget config (GET) ----------
   if (req.method === "GET") {
-    const { data: org } = await supabase.from("organizations").select("id, name, active").eq("slug", slug).single();
+    // GET has no body, so the legacy "abrobot" default is preserved here or
+    // any old embed without ?org= would silently render nothing.
+    const gslug = slug || "abrobot";
+    const { data: org } = await supabase.from("organizations").select("id, name, active").eq("slug", gslug).single();
     if (!org?.active) return json({ enabled: false });
     const { data: cfg } = await supabase.from("agent_config").select(
       "agent_name, enabled, greeting, teaser, header_title, header_subtitle, quick_replies, cta_text, widget_color, widget_position, booking_url, contact_url, whatsapp, brand_name, logo_url, away_message",
@@ -149,6 +191,9 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
   const message = (body.message ?? "").toString().slice(0, 2000).trim();
   if (!message) return json({ error: "empty message" }, 400);
+
+  // Query string wins; body is the fallback; "abrobot" only if neither is given.
+  slug = slug || (body.org ?? "").toString().toLowerCase().trim() || "abrobot";
 
   // `plan` is selected for the usage-limit check further down.
   const { data: org } = await supabase.from("organizations").select("id, name, active, plan").eq("slug", slug).single();
@@ -186,6 +231,11 @@ Deno.serve(async (req) => {
   await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "user", content: message });
 
   // --- capture contact details ---
+  // Declared out here so the final response can report a failed capture.
+  // Silence is the bug: the visitor gets a normal reply either way, so if we
+  // do not say so, nobody ever learns the enquiry was lost.
+  let captureFailed: string | null = null;
+
   const convText = (history ?? []).map((h) => h.content).join("\n") + "\n" + message;
   const email = (convText.match(EMAIL_RE) || [])[0]?.toLowerCase() || null;
   const phone = normPhone((convText.match(PHONE_RE) || [])[0] || null);
@@ -204,11 +254,32 @@ Deno.serve(async (req) => {
         email, phone, stage: "new",
         engagement_count: Math.ceil(((history?.length ?? 0) + 1) / 2),
       });
-      const { data: lead } = await supabase.from("leads").insert({
+      // This is the whole point of the widget: a visitor just gave us their
+      // contact details. The error used to be discarded, so a rejected insert
+      // (plan limit, expired plan, RLS, a bad enum) produced a perfectly
+      // normal-looking reply, HTTP 200, no alert, no activity, and no trace
+      // anywhere that a real enquiry had been dropped. Exactly the shape of
+      // the app-signup bug that silently binned every signup for two months.
+      // See _shared/stage.ts — defaulting to 'new' hid widget-captured leads
+      // from the Pipeline board for every non-study-abroad tenant.
+      const stageKey = await firstStageKey(supabase, org.id);
+
+      const { data: lead, error: leadErr } = await supabase.from("leads").insert({
         org_id: org.id, name: leadName,
-        email, phone, source: "website", score,
+        email, phone, source: "website", score, stage_key: stageKey,
         next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
       }).select("id").single();
+
+      if (leadErr) {
+        // Loud, and visible to system-health, which already watches this org.
+        console.error(
+          `chat-agent: LEAD CAPTURE FAILED for org ${org.id} (${org.name}) — ` +
+          `${leadErr.code ?? "?"} ${leadErr.message}. Contact was: ` +
+          `${email ?? "no email"} / ${phone ?? "no phone"}`,
+        );
+        captureFailed = leadErr.message;
+      }
+
       leadId = lead?.id;
       if (leadId) {
         await supabase.from("activities").insert({
@@ -234,16 +305,14 @@ Deno.serve(async (req) => {
   // consume_usage() increments and checks atomically, so two concurrent chats
   // cannot both slip past the last credit.
   try {
-    const { data: limits } = await supabase
-      .from("plan_limits")
-      .select("max_ai_messages")
-      .eq("plan", (org.plan ?? "trial"))
-      .maybeSingle();
-
+    // Reading plan_limits by org.plan here was subtly wrong: organizations.plan
+    // records what was PURCHASED, not whether it is still live. An org whose
+    // subscription lapsed six months ago still has plan='growth' and would keep
+    // its 5,000 monthly messages. consume_usage now resolves the limit itself
+    // via plan_of(), which accounts for trial and subscription expiry.
     const { data: usage } = await supabase.rpc("consume_usage", {
       p_org_id: org.id,
       p_metric: "ai_messages",
-      p_limit: limits?.max_ai_messages ?? null,
       p_amount: 1,
     });
 
@@ -309,8 +378,14 @@ Deno.serve(async (req) => {
         if (r.ok) {
           const data = await r.json();
           const text = data?.choices?.[0]?.message?.content;
-          if (text) { reply = text.trim(); got = true; break outer; }
-          console.error(`groq ${model}: ok but no content:`, JSON.stringify(data).slice(0, 300));
+          // An all-scratchpad reply strips to "" and is treated as no content,
+          // so the loop tries the next model rather than printing reasoning.
+          const clean = text ? stripReasoning(text) : "";
+          if (clean) { reply = clean; got = true; break outer; }
+          console.error(
+            `groq ${model}: ok but no usable content${text ? " (reasoning only)" : ""}:`,
+            JSON.stringify(data).slice(0, 300),
+          );
         } else {
           const body = await r.text();
           console.error(`groq ${model} -> ${r.status} (attempt ${attempt}): ${body.slice(0, 300)}`);
@@ -338,5 +413,10 @@ Deno.serve(async (req) => {
     message_count: ((history?.length ?? 0) + 2),
   }).eq("id", convId);
 
-  return json({ reply, conversation_id: convId });
+  // capture_failed is surfaced deliberately. The widget ignores it, so the
+  // visitor's experience is unchanged — but it turns a silent loss into
+  // something system-health and the function logs can both see.
+  return json(captureFailed
+    ? { reply, conversation_id: convId, capture_failed: captureFailed }
+    : { reply, conversation_id: convId });
 });

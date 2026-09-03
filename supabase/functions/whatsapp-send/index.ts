@@ -57,6 +57,19 @@ Deno.serve(async (req) => {
   if (!lead) return json({ error: "lead not found in your org" }, 404);
   if (!lead.phone) return json({ error: "lead has no phone number" }, 422);
 
+  // Plan gate. WhatsApp is the headline Growth/Business feature AND carries a
+  // real per-conversation cost from Meta, so it is the one limit where "shown
+  // in the pricing table but never checked" costs money twice: margin on the
+  // sends, and the reason anyone upgrades.
+  const { data: allowed } = await admin.rpc("plan_allows_whatsapp", { p_org_id: profile.org_id });
+  if (allowed !== true) {
+    return json({
+      error: "WhatsApp is not included on your current plan",
+      code: "PLAN_UPGRADE_REQUIRED",
+      upgrade_to: "growth",
+    }, 402); // Payment Required — the honest status for this
+  }
+
   const cfg = await getWhatsAppConfig(admin, profile.org_id);
   const result = await sendWhatsAppText(cfg, lead.phone, text);
 

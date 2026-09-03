@@ -6,8 +6,42 @@
    is controlled from the CRM → Settings → AI Agent. This script just renders it.
    ============================================================ */
 (function () {
+  // Loading twice must not build two widgets. The `built` flag further down is
+  // a closure variable, so a second <script> tag gets its own closure and its
+  // own `built = false` — producing two buttons, two panels, two config
+  // fetches and two separate chat sessions. That is not hypothetical: a
+  // duplicated GTM tag, or a theme that includes the snippet alongside a
+  // manual paste, is the normal way this happens.
+  if (window.__abxLoaded) return;
+  window.__abxLoaded = true;
+
   var s = document.currentScript;
-  var ORG = (s && s.getAttribute("data-org")) || "abrobot";
+
+  // document.currentScript is NULL when a script is injected programmatically
+  // — which is exactly what Google Tag Manager, Shopify's script-tag API,
+  // Segment and most "add custom JS" site builders do.
+  //
+  // The old fallback was the literal string "abrobot". So a hospital
+  // installing via GTM did not get an error: they got a working widget wired
+  // to AbroBot's organisation — AbroBot's greeting, AbroBot's knowledge base,
+  // and their own visitors' enquiries filed into AbroBot's CRM. A silent
+  // cross-tenant leak caused by an install method we recommend.
+  //
+  // Look the tag up by src instead, and if the org still cannot be resolved,
+  // refuse to render. A missing widget is a support ticket; the wrong tenant's
+  // widget is a data-protection incident.
+  if (!s || !s.getAttribute("data-org")) {
+    s = document.querySelector('script[src*="widget.js"][data-org]');
+  }
+  var ORG = s && s.getAttribute("data-org");
+  if (!ORG) {
+    console.error(
+      "[AbroBot widget] No data-org found. Add data-org=\"your-org-slug\" to the " +
+      "script tag. Refusing to load rather than guess which business this is.",
+    );
+    return;
+  }
+
   var API = "https://pomsltnrxvbcafwtbtlc.supabase.co/functions/v1/chat-agent";
 
   // sensible fallbacks if the config call fails
@@ -133,9 +167,30 @@
       if (!open && !sessionStorage.getItem("abxTeaser")) { teaser.classList.add("on"); sessionStorage.setItem("abxTeaser", "1"); }
     }, 1000);
 
+    // Renders an assistant message. LLMs emit markdown whether or not you ask
+    // them to, and this used to pass it through untouched — so every reply
+    // containing emphasis showed literal "**Core documents**" to the visitor
+    // on every tenant's site. Handling the two constructs the model actually
+    // produces (bold, and "- " bullets) is enough; a full markdown parser is
+    // not worth the bytes in an embedded widget.
+    //
+    // ORDER MATTERS: escaping happens FIRST, so by the time the tags below are
+    // inserted, any < > & in the model's output is already inert. Never move a
+    // replace() that emits HTML above the escape step.
     function linkify(t) {
       var esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      return esc.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+      esc = esc.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+      // **bold** — non-greedy, and refuses to span a blank line so an unclosed
+      // ** cannot swallow the rest of the message.
+      esc = esc.replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>");
+
+      // Leading "- " or "* " becomes a real bullet. Cheaper than a <ul> and it
+      // keeps the existing line-break behaviour intact.
+      esc = esc.replace(/^[ \t]*[-*][ \t]+/gm, "• ");
+
+      return esc;
     }
     function add(role, text) {
       var d = document.createElement("div");
@@ -227,13 +282,30 @@
   };
   if (PRESETS[ORG]) { var p = PRESETS[ORG]; for (var pk in p) CFG[pk] = p[pk]; }
 
-  // Load live config from the CRM, then render. Render with fallbacks even if it fails.
+  // Load live config from the CRM, then render.
+  //
+  // boot() used to be reachable ONLY from .then() or .catch(). A rejected
+  // promise was handled; a promise that never settles was not. A cold-start
+  // stall, a Supabase incident, or a captive-portal Wi-Fi that black-holes the
+  // request meant the customer's site showed NO chat button at all,
+  // indefinitely, with nothing logged anywhere.
+  //
+  // The button should never wait on a network round-trip. Render with the
+  // presets after a short grace period; if config arrives later, boot() is
+  // idempotent via the `built` flag, and the styling is already applied.
+  var booted = false;
+  function bootOnce() { if (!booted) { booted = true; boot(); } }
+  var fallbackTimer = setTimeout(bootOnce, 2500);
+
   fetch(API + "?org=" + encodeURIComponent(ORG) + "&config=1")
     .then(function (r) { return r.json(); })
     .then(function (c) {
-      if (c && c.enabled === false) return; // agent turned off in CRM → don't render
+      clearTimeout(fallbackTimer);
+      // Agent turned off in the CRM → don't render. Only honour this when the
+      // response actually arrived; a failed fetch must not hide the widget.
+      if (c && c.enabled === false) { booted = true; return; }
       if (c && typeof c === "object") { for (var k in c) if (c[k] != null) CFG[k] = c[k]; }
-      boot();
+      bootOnce();
     })
-    .catch(function () { boot(); });
+    .catch(function () { clearTimeout(fallbackTimer); bootOnce(); });
 })();

@@ -4,6 +4,7 @@ import { notifyNewLead } from "../_shared/notify.ts";
 import { scoreLead } from "../_shared/score.ts";
 import { getWhatsAppConfig, sendWhatsAppText } from "../_shared/whatsapp.ts";
 import { fireEventAutomations } from "../_shared/run-actions.ts";
+import { firstStageKey } from "../_shared/stage.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -132,8 +133,14 @@ Deno.serve(async (req) => {
     stage: "new", engagement_count: lead.message ? 1 : 0,
   });
 
+  // Land the record in the org's ACTUAL first stage. Omitting this let the
+  // column default ('new') apply, and 11 of 13 industry packs have no stage
+  // keyed 'new' — so the lead vanished from the Pipeline board. See _shared/stage.ts.
+  const stageKey = await firstStageKey(supabase, wk.org_id);
+
   const { data: inserted, error } = await supabase.from("leads").insert({
     org_id: wk.org_id, name: lead.name, email: lead.email, phone: lead.phone,
+    stage_key: stageKey,
     source: lead.source, target_country: lead.target_country, course: lead.course,
     course_level: lead.course_level, intake: lead.intake, raw: body, assigned_to: assignTo,
     score,
@@ -160,8 +167,12 @@ Deno.serve(async (req) => {
   // We are inside the 24h window by definition here: they just messaged us.
   let autoreply: unknown = undefined;
   if (wk.source === "whatsapp" && lead.phone) {
+    // Same plan gate as whatsapp-send — the autoreply is an outbound WhatsApp
+    // message and costs the same as any other, so it cannot be the back door
+    // around the paid feature.
+    const { data: waAllowed } = await supabase.rpc("plan_allows_whatsapp", { p_org_id: wk.org_id });
     const waCfg = await getWhatsAppConfig(supabase, wk.org_id);
-    if (waCfg.whatsapp_autoreply) {
+    if (waAllowed === true && waCfg.whatsapp_autoreply) {
       const { data: orgRow } = await supabase.from("organizations")
         .select("name").eq("id", wk.org_id).single();
       const brand = orgRow?.name || "AbroBot";

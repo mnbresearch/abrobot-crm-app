@@ -25,13 +25,45 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
   useEffect(() => {
     if (!org || !isAdmin) return;
     void (async () => {
+      // These were `{ count: "exact", head: true }` queries, and all four
+      // returned 503 on every dashboard load while the ordinary GETs beside
+      // them returned 200. The cause was never pinned down — free-tier
+      // connection limits under five parallel queries and a PostgREST quirk on
+      // HEAD+count were both consistent with what I could observe.
+      //
+      // Rather than guess, the fix removes the need for the count at all.
+      // Every question here is "are there ANY?" or "is there MORE THAN ONE?",
+      // never "how many exactly" — so a plain GET with limit(2) answers all of
+      // them, uses the request shape that already works, and moves less data.
       const [agent, leads, team, autos, templates] = await Promise.all([
         supabase.from("agent_config").select("enabled, knowledge, notify_new_leads").eq("org_id", org.id).maybeSingle(),
-        supabase.from("leads").select("id", { count: "exact", head: true }).eq("org_id", org.id),
-        supabase.from("profiles").select("id", { count: "exact", head: true }).eq("org_id", org.id).eq("status", "active"),
-        supabase.from("automations").select("id", { count: "exact", head: true }).eq("org_id", org.id).eq("enabled", true),
-        supabase.from("message_templates").select("id", { count: "exact", head: true }).eq("org_id", org.id),
+        supabase.from("leads").select("id").eq("org_id", org.id).limit(2),
+        supabase.from("profiles").select("id").eq("org_id", org.id).eq("status", "active").limit(2),
+        supabase.from("automations").select("id").eq("org_id", org.id).eq("enabled", true).limit(2),
+        supabase.from("message_templates").select("id").eq("org_id", org.id).limit(2),
       ]);
+
+      // A failed check is NOT the same as an unfinished step. Treating an
+      // error as "not done" is what made this silently under-report setup
+      // progress: the request 503'd, `count` came back null, `?? 0` turned it
+      // into zero, and the user was told to redo work they had already done.
+      // `has()` returns undefined on error so the step can be left alone.
+      const has = (r: { data: unknown[] | null; error: unknown }, min = 1) =>
+        r.error ? undefined : (r.data?.length ?? 0) >= min;
+
+      const anyLeads = has(leads);
+      const teamInvited = has(team, 2);
+      const anyAutos = has(autos);
+      const anyTemplates = has(templates);
+
+      const failed = [
+        leads.error && "records", team.error && "team",
+        autos.error && "automations", templates.error && "templates",
+      ].filter(Boolean);
+      if (failed.length) {
+        console.warn("SetupChecklist: could not check " + failed.join(", ") +
+          " — those steps are shown as complete rather than nagging you to redo them.");
+      }
 
       setSteps([
         {
@@ -52,7 +84,7 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
           key: "widget",
           label: "Put the chat widget on your website",
           why: "One line of HTML. This is what turns visitors into records automatically.",
-          done: (leads.count ?? 0) > 0,
+          done: anyLeads ?? true,
           action: { label: "Get the snippet", path: "/settings" },
         },
         {
@@ -66,21 +98,21 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
           key: "team",
           label: "Invite your team",
           why: `So ${ui.leadNounPlural.toLowerCase()} can be assigned and nothing sits unowned.`,
-          done: (team.count ?? 0) > 1,
+          done: teamInvited ?? true,
           action: { label: "Manage team", path: "/team" },
         },
         {
           key: "template",
           label: "Write your first message template",
           why: "The reply your team sends most, ready to reuse.",
-          done: (templates.count ?? 0) > 0,
+          done: anyTemplates ?? true,
           action: { label: "Add template", path: "/templates" },
         },
         {
           key: "automation",
           label: "Switch on one automation",
           why: "Let the CRM chase the things people forget.",
-          done: (autos.count ?? 0) > 0,
+          done: anyAutos ?? true,
           action: { label: "See recipes", path: "/automations" },
         },
       ]);
