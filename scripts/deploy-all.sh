@@ -62,8 +62,25 @@ npm run build
 cd "$ROOT"
 
 echo "==> Copying the build to the repo root"
-cp -R app/dist/assets/. assets/
+
+# Source maps are deliberately NOT copied.
+#
+# vite.config.ts sets sourcemap: "hidden", which strips the
+# //# sourceMappingURL comment so a browser will not fetch a map on its own.
+# That is not the same as not publishing them: the files were still copied
+# here, committed, and served by Cloudflare at a completely guessable URL
+# (foo.js -> foo.js.map). 8.4 MB of fully commented TypeScript — including
+# every incident post-mortem written in these comments — was one request away.
+#
+# The maps stay in app/dist/ where they are useful for symbolicating a stack
+# trace locally. They just do not go to the CDN.
+find app/dist/assets -type f ! -name '*.map' -exec cp {} assets/ \;
 cp app/dist/index.html index.html
+
+# Old builds are never removed by this script (deliberately — widget.js and the
+# policy pages live at the root and must survive). But maps that earlier
+# deploys copied here are still being served, so clear those out.
+rm -f assets/*.map
 echo
 
 # ── 4. Ship ─────────────────────────────────────────────────────────────────
