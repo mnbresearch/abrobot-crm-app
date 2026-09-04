@@ -1,0 +1,152 @@
+name: Nightly database backup
+
+# Supabase's free tier has no point-in-time recovery and no restorable
+# backups. That means an accidental mass delete, a bad migration, or a
+# corrupted organisation is currently permanent — for five tenants' live data.
+#
+# This is the free replacement: pg_dump on a schedule, gzipped, encrypted, and
+# stored as a GitHub Actions artifact off the Supabase platform. It is not as
+# good as PITR (you lose up to 24 hours rather than 60 seconds), but the gap
+# between "24 hours of loss" and "everything, permanently" is the one that
+# matters.
+#
+# Cost: free. Public repos get unlimited Actions minutes; private repos get
+# 2,000/month and this job takes about one.
+#
+# ── Setup, once ─────────────────────────────────────────────────────────────
+# Add two repository secrets under Settings -> Secrets and variables -> Actions:
+#
+#   SUPABASE_DB_URL    Supabase dashboard -> Project Settings -> Database ->
+#                      Connection string -> URI. Use the SESSION pooler string
+#                      (port 5432), not the transaction pooler (6543) —
+#                      pg_dump needs prepared statements.
+#
+#   BACKUP_PASSPHRASE  Any long random string. Generate one with:
+#                        openssl rand -base64 32
+#                      STORE IT SOMEWHERE THAT IS NOT THIS REPO. Without it the
+#                      backups are unreadable, which is the entire point.
+#
+# ── Restoring ───────────────────────────────────────────────────────────────
+#   gunzip -c backup.sql.gz.enc | openssl enc -d -aes-256-cbc -pbkdf2 \
+#     -pass pass:"$BACKUP_PASSPHRASE" > backup.sql
+#   psql "$SUPABASE_DB_URL" -f backup.sql
+#
+# Rehearse that on a scratch project BEFORE you need it. An untested backup is
+# a hope, not a backup.
+
+on:
+  schedule:
+    # 19:30 UTC = 01:00 IST — after the day's work, before the morning's.
+    - cron: "30 19 * * *"
+  workflow_dispatch: {}   # so you can trigger one by hand before a risky migration
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Install postgresql-client 17
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Fail early if secrets are missing
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          # A backup job that "succeeds" while doing nothing is worse than none,
+          # because it buys false confidence. Fail loudly instead.
+          if [ -z "$DB_URL" ]; then
+            echo "::error::SUPABASE_DB_URL is not set. See the header of this file."
+            exit 1
+          fi
+          if [ -z "$PASSPHRASE" ]; then
+            echo "::error::BACKUP_PASSPHRASE is not set. See the header of this file."
+            exit 1
+          fi
+
+      - name: Dump, compress, encrypt
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y-%m-%d)
+
+          # --no-owner / --no-privileges so the dump restores into a fresh
+          # project without needing Supabase's internal roles to exist first.
+          # Schemas: public is the app. auth is included because without it you
+          # restore the data but nobody can log in to reach it.
+          pg_dump "$DB_URL" \
+            --no-owner --no-privileges \
+            --schema=public --schema=auth \
+            --file=backup.sql
+
+          echo "Uncompressed: $(du -h backup.sql | cut -f1)"
+
+          gzip -9 backup.sql
+          openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -in backup.sql.gz \
+            -out "abrobot-crm-${STAMP}.sql.gz.enc" \
+            -pass pass:"$PASSPHRASE"
+          rm -f backup.sql.gz
+
+          echo "Encrypted:    $(du -h abrobot-crm-${STAMP}.sql.gz.enc | cut -f1)"
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+
+      - name: Sanity-check the dump is not empty or truncated
+        env:
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # A 200-byte "backup" that is really an auth error would sit here
+          # unnoticed until the day it is needed. Decrypt it back and look.
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in "abrobot-crm-${STAMP}.sql.gz.enc" \
+            -pass pass:"$PASSPHRASE" | gunzip -c > verify.sql
+
+          BYTES=$(wc -c < verify.sql)
+          echo "Round-tripped $BYTES bytes"
+          if [ "$BYTES" -lt 10000 ]; then
+            echo "::error::Dump is only $BYTES bytes — almost certainly failed."
+            exit 1
+          fi
+          for t in organizations leads profiles agent_config; do
+            grep -q "CREATE TABLE public.$t" verify.sql \
+              || { echo "::error::public.$t missing from the dump"; exit 1; }
+          done
+          # PostgreSQL writes this as the last line only on a clean finish.
+          tail -5 verify.sql | grep -q "PostgreSQL database dump complete" \
+            || { echo "::error::Dump is truncated — no completion marker"; exit 1; }
+          rm -f verify.sql
+          echo "Backup verified: restorable, complete, contains the core tables."
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ env.STAMP }}
+          path: abrobot-crm-*.sql.gz.enc
+          retention-days: 90         # the maximum GitHub allows
+          if-no-files-found: error
+
+      - name: Tell someone it worked
+        if: always()
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.OPS_TELEGRAM_CHAT_ID }}
+        run: |
+          # Optional. Silence is the enemy: a backup job that has been failing
+          # for three weeks looks exactly like one that has been working.
+          if [ -n "${BOT:-}" ] && [ -n "${CHAT:-}" ]; then
+            if [ "${{ job.status }}" = "success" ]; then
+              MSG="Backup OK — abrobot-crm ${STAMP}"
+            else
+              MSG="BACKUP FAILED — abrobot-crm ${STAMP}. There is no other copy of this data."
+            fi
+            curl -sS -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
+              -d chat_id="${CHAT}" -d text="$MSG" > /dev/null || true
+          fi

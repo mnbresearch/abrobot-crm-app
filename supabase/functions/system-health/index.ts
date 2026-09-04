@@ -21,6 +21,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
 
+import { requireCronSecret } from "../_shared/cron-auth.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -181,6 +182,11 @@ async function checkSecurity(orgId: string): Promise<Check> {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+
+  // Scheduled endpoint. Deployed --no-verify-jwt because pg_cron carries no
+  // Supabase JWT, so a shared secret is the boundary. See _shared/cron-auth.ts.
+  const cronAuth = requireCronSecret(req, CORS);
+  if (!cronAuth.ok) return cronAuth.response!;
 
   const url = new URL(req.url);
   const slug = url.searchParams.get("org");

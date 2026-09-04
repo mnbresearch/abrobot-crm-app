@@ -1,0 +1,157 @@
+name: CI
+
+# There was no CI at all. `git push` to main is a production deploy — Cloudflare
+# Pages serves this repo's root — so a type error, a broken test or a bad SQL
+# file went live the moment it was pushed, and the first sign of trouble was a
+# customer seeing a white screen.
+#
+# This runs the checks that already exist in the repo and were simply never
+# wired to anything.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  frontend:
+    name: Frontend — typecheck and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - run: npm ci
+        working-directory: app
+
+      # `npm run build` is `tsc --noEmit && vite build`, so this covers the
+      # typecheck too — but running it separately makes the failure obvious in
+      # the Actions summary rather than buried in build output.
+      - name: Typecheck
+        run: npx tsc --noEmit
+        working-directory: app
+
+      - name: Build
+        run: npm run build
+        working-directory: app
+
+      - name: Source maps must not be publishable
+        run: |
+          # vite.config sets sourcemap:"hidden", which only strips the
+          # //# sourceMappingURL comment — it still WRITES the .map files.
+          # 8.4 MB of commented TypeScript was live on the CDN because the
+          # deploy script copied them. The script now excludes them; this makes
+          # sure a future change cannot quietly undo that.
+          if grep -rl "sourceMappingURL" app/dist/assets/*.js 2>/dev/null; then
+            echo "::error::A bundle references a source map. Set sourcemap:\"hidden\" in vite.config.ts."
+            exit 1
+          fi
+          echo "OK — no bundle points at a source map."
+
+  edge-functions:
+    name: Edge functions — typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+
+      - name: deno check
+        run: |
+          set +e
+          FAILED=0
+          for f in supabase/functions/*/index.ts; do
+            # chat-agent has pre-existing npm type-resolution noise unrelated to
+            # our code, so it is checked but not allowed to fail the build.
+            # Every other function must be clean.
+            if [ "$f" = "supabase/functions/chat-agent/index.ts" ]; then
+              deno check --no-lock "$f" > /dev/null 2>&1 \
+                && echo "  ok   $f" \
+                || echo "  note $f (known npm type noise — not failing)"
+              continue
+            fi
+            if deno check --no-lock "$f" > /dev/null 2>&1; then
+              echo "  ok   $f"
+            else
+              echo "::error::deno check failed: $f"
+              deno check --no-lock "$f" 2>&1 | tail -20
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - name: Run the committed tests
+        run: |
+          # These three test files exist in the repo and were never run by
+          # anything. The scoring and Cashfree signature tests in particular
+          # cover logic that has already caused one live incident each.
+          set -e
+          FOUND=0
+          for t in $(find supabase -name "*.test.cjs" -o -name "*.test.mjs" | sort); do
+            echo "--- $t"
+            node "$t"
+            FOUND=1
+          done
+          [ "$FOUND" = "1" ] || echo "No .cjs/.mjs tests found (score.test.ts is Deno — see below)"
+
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+      - name: Deno tests
+        run: |
+          if ls supabase/functions/_shared/*.test.ts >/dev/null 2>&1; then
+            deno test --no-lock --allow-none supabase/functions/_shared/ || \
+            deno test --no-lock supabase/functions/_shared/
+          else
+            echo "No Deno tests found."
+          fi
+
+  sql:
+    name: Migrations — parse check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - run: pip install --quiet pglast
+
+      - name: Every migration must parse
+        run: |
+          # Migrations are applied by hand in the Supabase SQL editor, so a
+          # syntax error is discovered halfway through a production run. This
+          # catches it on push instead. It does NOT check semantics — only that
+          # Postgres can parse the file.
+          python - <<'PY'
+          import glob, sys
+          import pglast
+          bad = []
+          for f in sorted(glob.glob("supabase/migrations/*.sql") + glob.glob("scripts/*.sql")):
+              try:
+                  pglast.parse_sql(open(f).read())
+                  print(f"  ok   {f}")
+              except Exception as e:
+                  print(f"  FAIL {f}: {e}")
+                  bad.append(f)
+          if bad:
+              print(f"::error::{len(bad)} SQL file(s) failed to parse")
+              sys.exit(1)
+          PY

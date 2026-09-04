@@ -153,4 +153,21 @@ export interface AgentConfig {
   telegram_chat_id: string | null;
   nurture_enabled: boolean;
   onboarded: boolean;
+
+  // Both exist in the database and always have. They were missing from this
+  // interface, which is why the Settings screen could not offer them: TypeScript
+  // rejected any attempt to read or write them.
+  //
+  // logo_url is the widget's icon. Left null, every customer's widget shows
+  // AbroBot's logo — so a law firm's site carried another company's brand.
+  logo_url: string | null;
+  // guardrails are the hard rules in the system prompt ("never quote a price
+  // that is not listed", "never give medical advice"). Read-only in the UI for
+  // now, but shown so an admin can see whether any are set.
+  guardrails: string | null;
+
+  // Deliberately NOT in this interface: groq_api_key, resend_api_key,
+  // whatsapp_token, telegram_bot_token, app_secret. They are columns on the
+  // same table, and the type omitting them is one of the things stopping them
+  // being selected into the browser by accident.
 }

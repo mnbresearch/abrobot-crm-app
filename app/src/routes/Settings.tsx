@@ -590,7 +590,14 @@ function AgentTab() {
       // Deliberately NOT selecting the credential columns. This screen has no
       // reason to read them, and not selecting them means they never reach the
       // browser. See RECOVERED-SCHEMA.md on the agent_config exposure.
-      .select("org_id, enabled, agent_name, greeting, welcome_message, knowledge, persona, tone, quick_replies, cta_text, widget_color, widget_position, away_message, notify_new_leads, nurture_enabled")
+      // Added: header_subtitle, logo_url, contact_url, booking_url, model.
+      // These existed in the database and drove what visitors actually saw —
+      // the widget's subtitle, its icon, where "Talk to expert" went, and which
+      // LLM answered — but none of them were readable or editable here. So a
+      // law firm's widget said "Study-abroad assistant · online" under AbroBot's
+      // logo, linking to AbroBot's contact page, and the only way to change any
+      // of it was to write SQL.
+      .select("org_id, enabled, agent_name, greeting, welcome_message, knowledge, persona, tone, quick_replies, cta_text, widget_color, widget_position, away_message, notify_new_leads, nurture_enabled, header_subtitle, logo_url, contact_url, booking_url, model, max_tokens, guardrails")
       .eq("org_id", org.id)
       .single()
       .then(({ data }) => setCfg((data as Partial<AgentConfig>) ?? { org_id: org.id, enabled: true }));
@@ -643,6 +650,50 @@ function AgentTab() {
             <label className="label">Quick replies (comma separated)</label>
             <input className="input" value={cfg.quick_replies ?? ""} onChange={(e) => set({ quick_replies: e.target.value })} />
           </div>
+
+          <div className="field">
+            <label className="label" htmlFor="agent-subtitle">Subtitle under the widget title</label>
+            <input
+              id="agent-subtitle"
+              className="input"
+              value={cfg.header_subtitle ?? ""}
+              onChange={(e) => set({ header_subtitle: e.target.value })}
+              placeholder="Study-abroad assistant · online"
+            />
+            <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+              Leave blank and every widget falls back to <b>“Study-abroad assistant · online”</b> —
+              which is wrong for a clinic, a law firm or a gym. Worth setting.
+            </p>
+          </div>
+
+          <div className="field">
+            <label className="label" htmlFor="agent-contact">“Talk to expert” link</label>
+            <input
+              id="agent-contact"
+              className="input"
+              type="url"
+              value={cfg.contact_url ?? ""}
+              onChange={(e) => set({ contact_url: e.target.value })}
+              placeholder="https://yoursite.com/contact"
+            />
+          </div>
+
+          <div className="field">
+            <label className="label" htmlFor="agent-booking">Booking / call-to-action link</label>
+            <input
+              id="agent-booking"
+              className="input"
+              type="url"
+              value={cfg.booking_url ?? ""}
+              onChange={(e) => set({ booking_url: e.target.value })}
+              placeholder="https://yoursite.com/book"
+            />
+            <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+              Both fall back to AbroBot’s own pages if left blank, so your visitors
+              would be sent to a different company.
+            </p>
+          </div>
+
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
           </div>
@@ -671,8 +722,93 @@ function AgentTab() {
               <span>Automated follow-up emails</span>
             </label>
           </div>
+
+          {/* Each business needs its own icon. Without this the widget falls
+              back to AbroBot's logo on every customer's site. */}
+          <div className="field">
+            <label className="label" htmlFor="agent-logo">Widget icon</label>
+            <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+              <div
+                style={{
+                  width: 52, height: 52, borderRadius: 14, flexShrink: 0,
+                  border: "1px solid var(--border)", overflow: "hidden",
+                  background: cfg.widget_color || (ui.accent ?? "#b45309"),
+                  display: "grid", placeItems: "center",
+                }}
+              >
+                {cfg.logo_url ? (
+                  <img
+                    src={cfg.logo_url}
+                    alt=""
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    // A broken URL should say so, not sit there looking like a
+                    // styling bug the user cannot diagnose.
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                  />
+                ) : (
+                  <span style={{ fontSize: 22 }}>{ui.icon}</span>
+                )}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <input
+                  id="agent-logo"
+                  className="input"
+                  type="url"
+                  value={cfg.logo_url ?? ""}
+                  onChange={(e) => set({ logo_url: e.target.value })}
+                  placeholder="https://yoursite.com/logo.png"
+                />
+                <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+                  Paste any public image URL — square works best, around 128×128.
+                  Your site’s favicon is usually the quickest:{" "}
+                  <code>yoursite.com/favicon.ico</code>. Blank shows AbroBot’s logo.
+                </p>
+              </div>
+            </div>
+          </div>
         </Card>
       </div>
+
+      {/* Answers "what is this actually running on?", which previously required
+          reading the edge function source. */}
+      <Card title="What the assistant runs on">
+        <div className="field">
+          <label className="label" htmlFor="agent-model">Model</label>
+          <select
+            id="agent-model"
+            className="select"
+            value={cfg.model ?? ""}
+            onChange={(e) => set({ model: e.target.value || null })}
+          >
+            <option value="">Platform default — recommended</option>
+            <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (default)</option>
+            <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (fallback)</option>
+            <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (fastest, least capable)</option>
+          </select>
+          <p className="sub" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
+            Leave on the default unless you have a reason. If a model is retired by
+            the provider, the assistant automatically falls through to the next one
+            in the list rather than going down — which is what happened in August
+            2026, when a hardcoded model was withdrawn and every agent broke at once.
+          </p>
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, marginTop: 4 }}>
+          <div className="sub" style={{ fontSize: 12.5, lineHeight: 1.9 }}>
+            <div><b>Provider:</b> Groq</div>
+            <div><b>Reply length:</b> capped at {cfg.max_tokens ?? 900} tokens, 2–3 sentences by design</div>
+            <div><b>Knowledge:</b> {(cfg.knowledge ?? "").length.toLocaleString("en-IN")} characters</div>
+            <div><b>Guardrails:</b> {cfg.guardrails ? "custom rules set" : "none set — the model will answer anything in scope"}</div>
+            <div>
+              <b>Chat widget:</b>{" "}
+              {cfg.enabled === false
+                ? "off — nothing renders on your site"
+                : "live on any page carrying your embed snippet"}
+            </div>
+          </div>
+        </div>
+      </Card>
+
       {toast.node}
     </>
   );
