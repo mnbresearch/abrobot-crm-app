@@ -68,16 +68,14 @@ jobs:
         run: |
           set +e
           FAILED=0
+          # chat-agent used to be exempted here, on my own diagnosis that its
+          # failures were "npm type-resolution noise". That was wrong: the
+          # select string is concatenated across two lines, so supabase-js
+          # could not infer the row type and fell back to a union containing
+          # GenericStringError, making every property access an error. It is a
+          # real defect and it is fixed, so the exemption is gone. No function
+          # is allowed to fail — an exemption is how the next real error hides.
           for f in supabase/functions/*/index.ts; do
-            # chat-agent has pre-existing npm type-resolution noise unrelated to
-            # our code, so it is checked but not allowed to fail the build.
-            # Every other function must be clean.
-            if [ "$f" = "supabase/functions/chat-agent/index.ts" ]; then
-              deno check --no-lock "$f" > /dev/null 2>&1 \
-                && echo "  ok   $f" \
-                || echo "  note $f (known npm type noise — not failing)"
-              continue
-            fi
             if deno check --no-lock "$f" > /dev/null 2>&1; then
               echo "  ok   $f"
             else

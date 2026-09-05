@@ -21,7 +21,8 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { shouldRun, type Automation } from "../_shared/automations.ts";
 import { notifyNewLead } from "../_shared/notify.ts";
 
-import { requireCronSecret } from "../_shared/cron-auth.ts";
+import { requireCronOrMember } from "../_shared/cron-auth.ts";
+import { fireEventAutomations } from "../_shared/run-actions.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -42,8 +43,11 @@ Deno.serve(async (req) => {
 
   // Scheduled endpoint. Deployed --no-verify-jwt because pg_cron carries no
   // Supabase JWT, so a shared secret is the boundary. See _shared/cron-auth.ts.
-  const cronAuth = requireCronSecret(req, CORS);
+  const cronAuth = await requireCronOrMember(req, CORS, supabase, { adminOnly: true });
   if (!cronAuth.ok) return cronAuth.response!;
+  // When a person called this, they may only act on their OWN org —
+  // the org is taken from their token, never from the request body.
+  const callerOrgId: string | undefined = cronAuth.orgId;
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
   // deno-lint-ignore no-explicit-any
@@ -51,8 +55,49 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { /* empty body is the cron case */ }
   const dryRun = body?.dry_run === true;
 
+  // ── Event mode ─────────────────────────────────────────────────────────────
+  // The database trigger on leads posts {event, lead_id, org_id} here whenever
+  // a record is created or changes stage. That is what makes "when a record is
+  // created" rules fire for ALL five intake paths (webhook, chat widget, CSV
+  // import, manual add, API) instead of just the webhook, and what makes
+  // "when the stage changes" fire at all — nothing dispatched it before.
+  //
+  // Handled before the time-based sweep because it is a different question:
+  // "react to this one record now", not "scan everything for anything due".
+  if (body?.event && body?.lead_id) {
+    const { data: lead, error: leadErr } = await supabase
+      .from("leads").select("*").eq("id", body.lead_id).maybeSingle();
+
+    if (leadErr || !lead) {
+      return json({ ok: false, error: leadErr?.message ?? "lead not found" }, 404);
+    }
+    // A member-authenticated caller may only touch their own org. The trigger
+    // runs as the service role, so callerOrgId is undefined for it.
+    if (callerOrgId && lead.org_id !== callerOrgId) {
+      return json({ error: "not your record" }, 403);
+    }
+
+    // Validate rather than cast. body.event arrives over HTTP, and an
+    // unrecognised value should be a clear 400, not an event type the
+    // automation engine silently matches nothing against.
+    const EVENTS = ["lead_created", "stage_changed"] as const;
+    type EventName = typeof EVENTS[number];
+    const evt = String(body.event) as EventName;
+    if (!EVENTS.includes(evt)) {
+      return json({ error: `unknown event "${body.event}"`, valid: EVENTS }, 400);
+    }
+
+    const result = await fireEventAutomations(supabase, lead.org_id, lead, evt);
+    return json({ ok: true, mode: "event", event: body.event, lead_id: body.lead_id, result });
+  }
+
   let orgQuery = supabase.from("organizations").select("id, slug, name").eq("active", true);
-  if (body?.org) orgQuery = orgQuery.eq("slug", body.org);
+  // A signed-in caller is pinned to their own org. body.org is only honoured
+  // for the scheduler (callerOrgId undefined), which is trusted. Without this
+  // pin, an admin of org A could POST {"org":"org-b"} and run automations
+  // against another tenant's records — the exact hole the cron secret closed.
+  if (callerOrgId) orgQuery = orgQuery.eq("id", callerOrgId);
+  else if (body?.org) orgQuery = orgQuery.eq("slug", body.org);
   const { data: orgs } = await orgQuery;
 
   const now = new Date();

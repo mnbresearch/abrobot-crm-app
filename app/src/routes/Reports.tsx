@@ -89,23 +89,124 @@ export function Reports() {
       .sort((a, b) => b.won - a.won || b.total - a.total);
   }, [team, scoped, wonKeys, lostKeys]);
 
-  const exportCsv = () => {
-    const cols = ["name", "email", "phone", "source", "stage_key", "score", "created_at", "next_follow_up_at"];
-    const esc = (v: unknown) => {
-      const s = v === null || v === undefined ? "" : String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const rows = [cols.join(",")].concat(
-      scoped.map((l) => cols.map((c) => esc((l as unknown as Record<string, unknown>)[c])).join(",")),
-    );
-    const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${org?.slug ?? "leads"}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.show(`Exported ${scoped.length} rows`);
+  // Export used to emit eight columns and call it a record. Everything that
+  // makes a record worth keeping — the custom fields the industry pack defines,
+  // the tags, who owns it, why it was lost, the notes people wrote on it — was
+  // dropped on the floor. A customer exporting "their data" got a contact list.
+  //
+  // Three things this now does that the old one didn't:
+  //  * resolves stage_key and assigned_to to the names shown on screen, and
+  //    keeps the raw ids alongside so the file can be re-imported;
+  //  * discovers custom-field keys from the data rather than a fixed list, so
+  //    a dental clinic and a law firm each get their own columns;
+  //  * fetches notes, in chunks, because ids go in the URL and a 10,000-record
+  //    export would otherwise produce a request no server will accept.
+  const [exporting, setExporting] = useState(false);
+
+  const exportCsv = async () => {
+    if (exporting || scoped.length === 0) return;
+    setExporting(true);
+    try {
+      const stageLabel = new Map(stages.map((s) => [s.key, s.label]));
+      const owner = new Map(team.map((p) => [p.id, p.full_name || p.email || p.id]));
+
+      // Notes live in activities, one-to-many. Chunked at 100 ids: PostgREST
+      // puts in.(...) in the query string and URLs have practical length
+      // limits, so a single .in() over a large export is a request that fails
+      // at the proxy rather than an error we can show.
+      const notes = new Map<string, string[]>();
+      let notesFailed = false;
+      const ids = scoped.map((l) => l.id);
+      for (let i = 0; i < ids.length; i += 100) {
+        const { data, error } = await supabase
+          .from("activities")
+          .select("lead_id, type, content, created_at")
+          .in("lead_id", ids.slice(i, i + 100))
+          .eq("type", "note")
+          .order("created_at", { ascending: true });
+        if (error) { notesFailed = true; break; }
+        for (const a of (data ?? []) as { lead_id: string; content: string }[]) {
+          const list = notes.get(a.lead_id) ?? [];
+          list.push(a.content);
+          notes.set(a.lead_id, list);
+        }
+      }
+
+      // Union of custom keys across the rows being exported, in first-seen
+      // order so the columns are stable between exports of the same data.
+      const customKeys: string[] = [];
+      for (const l of scoped) {
+        for (const k of Object.keys(l.custom ?? {})) {
+          if (!customKeys.includes(k)) customKeys.push(k);
+        }
+      }
+
+      const base: { header: string; get: (l: Lead) => unknown }[] = [
+        { header: "id", get: (l) => l.id },
+        { header: "name", get: (l) => l.name },
+        { header: "email", get: (l) => l.email },
+        { header: "phone", get: (l) => l.phone },
+        { header: "source", get: (l) => l.source },
+        { header: "stage", get: (l) => stageLabel.get(l.stage_key ?? "") ?? l.stage_key },
+        { header: "stage_key", get: (l) => l.stage_key },
+        { header: "score", get: (l) => l.score },
+        { header: "owner", get: (l) => (l.assigned_to ? owner.get(l.assigned_to) ?? "(removed user)" : "") },
+        { header: "assigned_to", get: (l) => l.assigned_to },
+        { header: "tags", get: (l) => (l.tags ?? []).join("; ") },
+        { header: "target_country", get: (l) => l.target_country },
+        { header: "course", get: (l) => l.course },
+        { header: "course_level", get: (l) => l.course_level },
+        { header: "intake", get: (l) => l.intake },
+        { header: "budget_inr", get: (l) => l.budget_inr },
+        { header: "test_status", get: (l) => l.test_status },
+        { header: "lost_reason", get: (l) => l.lost_reason },
+        { header: "next_follow_up_at", get: (l) => l.next_follow_up_at },
+        { header: "last_contacted_at", get: (l) => l.last_contacted_at },
+        { header: "created_at", get: (l) => l.created_at },
+        { header: "updated_at", get: (l) => l.updated_at },
+        { header: "notes", get: (l) => (notes.get(l.id) ?? []).join("\n---\n") },
+      ];
+
+      const cols = base.concat(
+        customKeys.map((k) => ({
+          header: `custom.${k}`,
+          get: (l: Lead) => {
+            const v = (l.custom ?? {})[k];
+            return v !== null && typeof v === "object" ? JSON.stringify(v) : v;
+          },
+        })),
+      );
+
+      const esc = (v: unknown) => {
+        const s = v === null || v === undefined ? "" : String(v);
+        // \r matters as much as \n: Excel writes CRLF, and a bare CR inside an
+        // unquoted field splits the row on some readers and not others.
+        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+
+      const rows = [cols.map((c) => c.header).join(",")].concat(
+        scoped.map((l) => cols.map((c) => esc(c.get(l))).join(",")),
+      );
+
+      // BOM so Excel on Windows reads it as UTF-8. Without it, every name with
+      // a Devanagari or accented character arrives as mojibake — which is most
+      // of the point of the file for an Indian customer.
+      const blob = new Blob(["﻿" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${org?.slug ?? "leads"}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      toast.show(
+        notesFailed
+          ? `Exported ${scoped.length} rows — notes could not be read, so that column is empty`
+          : `Exported ${scoped.length} rows, ${cols.length} columns`,
+      );
+    } finally {
+      setExporting(false);
+    }
   };
 
   if (loading) return <Spinner />;
@@ -131,7 +232,9 @@ export function Reports() {
               {r.label}
             </button>
           ))}
-          <button className="btn btn-sm" onClick={exportCsv}>⬇ Export CSV</button>
+          <button className="btn btn-sm" onClick={() => void exportCsv()} disabled={exporting}>
+            {exporting ? "Exporting…" : "⬇ Export CSV"}
+          </button>
         </div>
       </div>
 

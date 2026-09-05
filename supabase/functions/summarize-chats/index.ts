@@ -11,7 +11,7 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-import { requireCronSecret } from "../_shared/cron-auth.ts";
+import { requireCronOrMember } from "../_shared/cron-auth.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -75,8 +75,11 @@ Deno.serve(async (req) => {
 
   // Scheduled endpoint. Deployed --no-verify-jwt because pg_cron carries no
   // Supabase JWT, so a shared secret is the boundary. See _shared/cron-auth.ts.
-  const cronAuth = requireCronSecret(req, CORS);
+  const cronAuth = await requireCronOrMember(req, CORS, supabase);
   if (!cronAuth.ok) return cronAuth.response!;
+  // When a person called this, they may only act on their OWN org —
+  // the org is taken from their token, never from the request body.
+  const callerOrgId: string | undefined = cronAuth.orgId;
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!GROQ_KEY) return json({ error: "summariser not configured" }, 503);
 
@@ -84,7 +87,11 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
 
   const { data: org } = await supabase.from("organizations")
-    .select("id, active").eq("slug", body.org ?? "abrobot").single();
+    .select("id, active")
+    // Same pin as run-automations: the token decides the org for a person,
+    // the body only decides it for the scheduler.
+    .eq(callerOrgId ? "id" : "slug", callerOrgId ?? (body.org ?? "abrobot"))
+    .single();
   if (!org?.active) return json({ error: "org unavailable" }, 404);
 
   const ids: string[] = Array.isArray(body.conversation_ids)

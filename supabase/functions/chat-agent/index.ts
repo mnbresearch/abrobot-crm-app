@@ -199,10 +199,28 @@ Deno.serve(async (req) => {
   const { data: org } = await supabase.from("organizations").select("id, name, active, plan").eq("slug", slug).single();
   if (!org?.active) return json({ error: "agent unavailable" }, 404);
 
+  // The cast is load-bearing for the typechecker, not cosmetic. supabase-js
+  // parses the select string at the *type* level to build the row type, and it
+  // can only do that for a string literal — this one is concatenated across two
+  // lines, so inference falls back to a union containing GenericStringError and
+  // every property access below becomes a compile error. Deno check runs in CI,
+  // so that is a broken build, not a squiggle.
+  //
+  // Splitting it into one long literal would also work and is uglier; naming
+  // the shape here at least documents what this function actually needs.
   const { data: cfg } = await supabase.from("agent_config").select(
     "agent_name, knowledge, enabled, groq_api_key, booking_url, brand_name, whatsapp, contact_url, " +
     "persona, tone, temperature, model, max_tokens, capture_fields, languages, guardrails, away_message",
-  ).eq("org_id", org.id).single();
+  ).eq("org_id", org.id).single() as {
+    data: {
+      agent_name: string | null; knowledge: string | null; enabled: boolean | null;
+      groq_api_key: string | null; booking_url: string | null; brand_name: string | null;
+      whatsapp: string | null; contact_url: string | null; persona: string | null;
+      tone: string | null; temperature: number | null; model: string | null;
+      max_tokens: number | null; capture_fields: unknown; languages: unknown;
+      guardrails: string | null; away_message: string | null;
+    } | null;
+  };
 
   const brand = cfg?.brand_name || cfg?.agent_name || org.name || "our team";
   const bookingUrl = cfg?.booking_url || BOOKING_URL;
@@ -360,19 +378,68 @@ Deno.serve(async (req) => {
   const ATTEMPTS = 2;
   let got = false;
 
+  // Reasoning models spend tokens thinking BEFORE they answer, and that
+  // thinking comes out of the same max_tokens budget as the reply.
+  //
+  // Observed live on 2026-09-03: abrobot's system prompt is ~14,600 characters
+  // and "What does AbroBot cost?" is a question worth deliberating over. The
+  // model used its entire 900-token budget on the <think> block and emitted no
+  // answer at all. stripReasoning() correctly reduced that to "", the loop
+  // treated it as no content, every model in the chain did the same thing, and
+  // the visitor got the apology. A simple "Hi" on the same org still worked,
+  // which is what made it look intermittent.
+  //
+  // So: give reasoning models headroom to think AND answer. The visible reply
+  // is still bounded by the prompt's "2-3 short sentences" instruction — this
+  // only stops the scratchpad from eating the answer.
+  const REASONING_MODELS = ["gpt-oss", "qwen3", "deepseek-r1", "o1", "o3"];
+  const isReasoning = (m: string) =>
+    REASONING_MODELS.some((r) => m.toLowerCase().includes(r));
+  const baseTokens = cfg?.max_tokens || 350;
+  const tokensFor = (m: string) => (isReasoning(m) ? baseTokens + 900 : baseTokens);
+
+  // Latency. Giving the model room to think fixed the empty replies but pushed
+  // responses to ~7s, and a visitor deciding between us and a competitor does
+  // not wait 7 seconds for a chat bubble.
+  //
+  // The cost is the thinking, not the model — so turn the thinking down rather
+  // than dropping to a weaker model. Groq exposes two parameters on gpt-oss:
+  //   reasoning_effort: "low"   — think briefly instead of exhaustively
+  //   reasoning_format: "hidden" — keep the scratchpad OUT of message.content
+  //
+  // The second one is the proper fix for the <think> leak. stripReasoning()
+  // stays as a belt-and-braces guard for any model that ignores the parameter,
+  // but with "hidden" the reasoning should never reach us in the first place.
+  //
+  // Only sent to gpt-oss, which documents support. If Groq ever rejects them
+  // the request 400s, and the retry below re-sends without them rather than
+  // burning the primary model.
+  const supportsReasoningParams = (m: string) => m.toLowerCase().includes("gpt-oss");
+
   outer:
   for (const model of chain) {
+    // Dropped to false if Groq rejects the reasoning parameters, so the same
+    // model gets a second chance plainly instead of being abandoned.
+    let useReasoningParams = supportsReasoningParams(model);
+
     for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
       try {
+        const payload: Record<string, unknown> = {
+          model,
+          temperature: typeof cfg?.temperature === "number" ? cfg.temperature : 0.5,
+          // Reasoning models need room for the <think> block AND the answer.
+          max_tokens: tokensFor(model),
+          messages,
+        };
+        if (useReasoningParams) {
+          payload.reasoning_effort = "low";
+          payload.reasoning_format = "hidden";
+        }
+
         const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
-          body: JSON.stringify({
-            model,
-            temperature: typeof cfg?.temperature === "number" ? cfg.temperature : 0.5,
-            max_tokens: cfg?.max_tokens || 350,
-            messages,
-          }),
+          body: JSON.stringify(payload),
         });
 
         if (r.ok) {
@@ -389,6 +456,19 @@ Deno.serve(async (req) => {
         } else {
           const body = await r.text();
           console.error(`groq ${model} -> ${r.status} (attempt ${attempt}): ${body.slice(0, 300)}`);
+
+          // A 400 while we are sending reasoning_effort / reasoning_format is
+          // most likely the parameters, not the model. Drop them and give this
+          // model one more go before writing it off — otherwise a parameter
+          // Groq renames some Tuesday would silently demote every org to the
+          // weakest model in the chain, and the only symptom would be worse
+          // answers that nobody can explain.
+          if (r.status === 400 && useReasoningParams) {
+            console.error(`groq ${model}: retrying without reasoning parameters`);
+            useReasoningParams = false;
+            continue;
+          }
+
           // 400/404 = model gone or bad request: move to the next model
           // rather than retrying something that will never work.
           // 401/403 = the key itself is wrong; no model will help.

@@ -40,6 +40,9 @@ export interface CronAuthResult {
   ok: boolean;
   /** A ready-to-return 401 when ok is false. */
   response?: Response;
+  /** Set when the caller was a signed-in user rather than the scheduler. */
+  orgId?: string;
+  userId?: string;
 }
 
 /**
@@ -74,4 +77,59 @@ export function requireCronSecret(req: Request, corsHeaders: HeadersInit): CronA
   }
 
   return { ok: true };
+}
+
+/**
+ * Cron secret OR a signed-in member of the org being acted on.
+ *
+ * Adding the cron secret closed four endpoints that anyone could hit — but two
+ * of them also back buttons in the CRM: "▶ Test run" on Automations and
+ * "✨ AI summary" on Conversations. The browser sends the user's JWT and
+ * cannot send a server-side secret, so both buttons became permanent red
+ * toasts the moment the secret went in. That was my regression.
+ *
+ * A scheduler and a logged-in admin are both legitimate callers; they just
+ * prove it differently. The important part is that the JWT path derives the
+ * org from the TOKEN, never from the request body — otherwise it would
+ * reintroduce exactly the cross-tenant hole the secret was added to close.
+ */
+export async function requireCronOrMember(
+  req: Request,
+  corsHeaders: HeadersInit,
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  opts: { adminOnly?: boolean } = {},
+): Promise<CronAuthResult> {
+  const deny = (msg: string, status = 401) => ({
+    ok: false,
+    response: new Response(JSON.stringify({ error: msg }), { status, headers: corsHeaders }),
+  });
+
+  // 1. The scheduler.
+  const provided = req.headers.get("x-cron-secret") ?? "";
+  if (provided && CRON_SECRET && safeEqual(provided, CRON_SECRET)) {
+    return { ok: true };
+  }
+
+  // 2. A signed-in member.
+  const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  if (!token) return deny("unauthorized");
+
+  const { data: userData, error: uErr } = await admin.auth.getUser(token);
+  if (uErr || !userData?.user) return deny("invalid session");
+
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("org_id, status, role")
+    .eq("id", userData.user.id)
+    .single();
+
+  if (!profile || profile.status !== "active" || !profile.org_id) {
+    return deny("not an active member", 403);
+  }
+  if (opts.adminOnly && !["org_admin", "super_admin"].includes(profile.role)) {
+    return deny("admins only", 403);
+  }
+
+  return { ok: true, orgId: profile.org_id, userId: userData.user.id };
 }

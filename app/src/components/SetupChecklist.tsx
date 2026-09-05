@@ -35,12 +35,17 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
       // Every question here is "are there ANY?" or "is there MORE THAN ONE?",
       // never "how many exactly" — so a plain GET with limit(2) answers all of
       // them, uses the request shape that already works, and moves less data.
-      const [agent, leads, team, autos, templates] = await Promise.all([
+      const [agent, leads, team, autos, templates, integrations] = await Promise.all([
         supabase.from("agent_config").select("enabled, knowledge, notify_new_leads").eq("org_id", org.id).maybeSingle(),
         supabase.from("leads").select("id").eq("org_id", org.id).limit(2),
         supabase.from("profiles").select("id").eq("org_id", org.id).eq("status", "active").limit(2),
         supabase.from("automations").select("id").eq("org_id", org.id).eq("enabled", true).limit(2),
         supabase.from("message_templates").select("id").eq("org_id", org.id).limit(2),
+        // Booleans only — see integration_status() in
+        // 20260905120000_credential_columns_and_status.sql. The browser is not
+        // allowed to read a credential, so it asks the database whether one
+        // exists instead of inferring it from a toggle.
+        supabase.rpc("integration_status"),
       ]);
 
       // A failed check is NOT the same as an unfinished step. Treating an
@@ -50,6 +55,23 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
       // `has()` returns undefined on error so the step can be left alone.
       const has = (r: { data: unknown[] | null; error: unknown }, min = 1) =>
         r.error ? undefined : (r.data?.length ?? 0) >= min;
+
+      // A toggle is a statement of intent; credentials are what make alerts
+      // arrive. Ticking this step off the toggle alone told customers their
+      // alerts were set up when no bot token existed — and a ticked box is
+      // worse than an empty one, because it stops them looking.
+      //
+      // If the RPC is missing (migration not applied yet) we fall back to the
+      // toggle rather than showing every existing customer an unticked box for
+      // work they have already done.
+      const intg = integrations.error
+        ? null
+        : (integrations.data as {
+            telegram?: { configured?: boolean; alerts_on?: boolean };
+          } | null);
+      const alertsReady = intg?.telegram
+        ? !!(intg.telegram.configured && intg.telegram.alerts_on)
+        : !!agent.data?.notify_new_leads;
 
       const anyLeads = has(leads);
       const teamInvited = has(team, 2);
@@ -90,9 +112,11 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
         {
           key: "alerts",
           label: "Turn on new-record alerts",
-          why: "A record you hear about in an hour is worth far more than one you find next week.",
-          done: !!agent.data?.notify_new_leads,
-          action: { label: "Set up alerts", path: "/settings" },
+          why: intg?.telegram?.alerts_on && !intg.telegram.configured
+            ? "Alerts are switched on but there is no Telegram bot token or chat ID saved, so nothing can be delivered. Add them to finish this."
+            : "A record you hear about in an hour is worth far more than one you find next week.",
+          done: alertsReady,
+          action: { label: "Set up alerts", path: "/integrations" },
         },
         {
           key: "team",

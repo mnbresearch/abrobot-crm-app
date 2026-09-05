@@ -16,6 +16,7 @@ import { Calendar } from "./routes/Calendar";
 import { Templates } from "./routes/Templates";
 import { Import } from "./routes/Import";
 import { Automations } from "./routes/Automations";
+import { Integrations } from "./routes/Integrations";
 import { CommandPalette } from "./components/CommandPalette";
 import { CreateOrg } from "./routes/CreateOrg";
 import { ShortcutsHelp } from "./components/ShortcutsHelp";
@@ -46,6 +47,7 @@ const NAV: NavItem[] = [
   { path: "/activity", label: "Activity", icon: "🗂️", group: "Insight" },
   { path: "/team", label: "Team", icon: "🧑‍🤝‍🧑", group: "Manage" },
   { path: "/import", label: "Import", icon: "📥", group: "Manage", adminOnly: true },
+  { path: "/integrations", label: "Integrations", icon: "🔌", group: "Manage", adminOnly: true },
   { path: "/settings", label: "Settings", icon: "⚙️", group: "Manage", adminOnly: true },
 ];
 
@@ -151,6 +153,7 @@ export default function App() {
           {path === "/activity" && <Activity navigate={navigate} />}
           {path === "/team" && <Team />}
           {path === "/import" && <Import navigate={navigate} />}
+          {path === "/integrations" && <Integrations />}
           {path === "/settings" && <Settings />}
 
           {!isKnown(path) && (
@@ -171,7 +174,7 @@ export default function App() {
 
 const KNOWN = [
   "/", "/leads", "/pipeline", "/calendar", "/conversations",
-  "/templates", "/automations", "/reports", "/activity", "/team", "/import", "/settings",
+  "/templates", "/automations", "/reports", "/activity", "/team", "/import", "/integrations", "/settings",
 ];
 
 function isKnown(path: string): boolean {

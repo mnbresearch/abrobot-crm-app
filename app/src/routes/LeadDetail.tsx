@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApp } from "../lib/store";
-import { supabase } from "../lib/supabase";
-import { Card, FieldInput, ScoreChip, Spinner, StagePill, cellValue, humanize, timeAgo, useToast } from "../components/ui";
+import { supabase, callFunction } from "../lib/supabase";
+import { Card, FieldInput, Modal, ScoreChip, Spinner, StagePill, cellValue, humanize, timeAgo, useToast } from "../components/ui";
 import { IndustryTool } from "../components/IndustryTool";
 import type { Activity, Lead } from "../lib/types";
 
@@ -13,6 +13,16 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [note, setNote] = useState("");
   const [editing, setEditing] = useState(false);
   const [tagging, setTagging] = useState(false);
+  const [waOpen, setWaOpen] = useState(false);
+  const [waText, setWaText] = useState("");
+  const [waSending, setWaSending] = useState(false);
+  const [templates, setTemplates] = useState<
+    { id: string; name: string; body: string; channel: string; subject: string | null }[]
+  >([]);
+  const [emOpen, setEmOpen] = useState(false);
+  const [emSubject, setEmSubject] = useState("");
+  const [emText, setEmText] = useState("");
+  const [emSending, setEmSending] = useState(false);
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -27,6 +37,71 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Templates were pure CRUD with no consumer anywhere — the merge tokens the
+  // editor documents were substituted by no code path in the repo. This is
+  // the first thing that actually uses them.
+  useEffect(() => {
+    if (!org) return;
+    void supabase.from("message_templates")
+      .select("id, name, body, channel, subject").eq("org_id", org.id).order("name")
+      .then(({ data }) => setTemplates(data ?? []));
+  }, [org]);
+
+  // Preview-only substitution. The server does this again on send, from
+  // _shared/template.ts, and that copy is authoritative — this one exists so
+  // the person sees the real message before they commit to it.
+  const merge = (body: string) => {
+    if (!lead) return body;
+    return body
+      .replace(/\{\{\s*name\s*\}\}/gi, lead.name ?? "")
+      .replace(/\{\{\s*first_name\s*\}\}/gi, (lead.name ?? "").split(" ")[0])
+      .replace(/\{\{\s*country\s*\}\}/gi, lead.target_country ?? "")
+      .replace(/\{\{\s*course\s*\}\}/gi, lead.course ?? lead.course_level ?? "")
+      .replace(/\{\{\s*brand\s*\}\}/gi, org?.name ?? "");
+  };
+
+  const applyTemplate = (body: string) => setWaText(merge(body));
+
+  const sendEmail = async () => {
+    if (!lead || !emSubject.trim() || !emText.trim()) return;
+    setEmSending(true);
+    try {
+      // lead_ids rather than an audience filter: this is one person, and the
+      // audience path could quietly widen if a filter were ever mis-set.
+      await callFunction("send-campaign", {
+        subject: emSubject.trim(),
+        body: emText.trim(),
+        lead_ids: [lead.id],
+      });
+      setEmOpen(false);
+      setEmText("");
+      setEmSubject("");
+      toast.show("Email sent");
+      await load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+    setEmSending(false);
+  };
+
+  const sendWhatsApp = async () => {
+    if (!lead || !waText.trim()) return;
+    setWaSending(true);
+    try {
+      await callFunction("whatsapp-send", { lead_id: lead.id, text: waText.trim() });
+      setWaOpen(false);
+      setWaText("");
+      toast.show("WhatsApp sent");
+      await load();   // the send logs an activity; show it
+    } catch (e) {
+      // Meta's real errors matter here: 131047 means the 24-hour window has
+      // closed and you need an approved template. Saying "failed" would send
+      // someone hunting for a bug that isn't there.
+      toast.error((e as Error).message);
+    }
+    setWaSending(false);
+  };
 
   // Every write surfaces its error. A save that silently fails while the UI
   // says it worked is worse than an error message — the user walks away
@@ -97,8 +172,135 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
 
   const stageKey = lead.stage_key ?? lead.stage;
 
+  const waModal = waOpen && (
+    <Modal title={`WhatsApp ${lead.name}`} onClose={() => setWaOpen(false)}>
+      <p className="sub" style={{ marginTop: -6 }}>
+        Sent from your business number and logged against this record — unlike the
+        deep link, which opens WhatsApp on your phone and leaves no trace here.
+      </p>
+
+      {templates.filter((t) => t.channel !== "email").length > 0 && (
+        <div className="field">
+          <label className="label">Start from a template</label>
+          <div className="row row-wrap">
+            {templates.filter((t) => t.channel !== "email").map((t) => (
+              <button key={t.id} className="btn btn-sm" onClick={() => applyTemplate(t.body)}>
+                {t.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="field">
+        <label className="label" htmlFor="wa-body">Message</label>
+        <textarea
+          id="wa-body"
+          className="textarea"
+          autoFocus
+          value={waText}
+          onChange={(e) => setWaText(e.target.value)}
+          placeholder={`Hi ${(lead.name ?? "").split(" ")[0]}, …`}
+          style={{ minHeight: 130 }}
+        />
+        <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+          Meta only allows free-form messages within 24 hours of their last message
+          to you. Outside that window this will be refused with Meta's own reason,
+          and you'll need an approved template.
+        </p>
+      </div>
+
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn" onClick={() => setWaOpen(false)}>Cancel</button>
+        <button
+          className={`btn btn-primary${waSending ? " btn-busy" : ""}`}
+          onClick={() => void sendWhatsApp()}
+          disabled={waSending || !waText.trim()}
+        >
+          {waSending ? "Sending…" : "Send"}
+        </button>
+      </div>
+    </Modal>
+  );
+
+  // Email from the record itself. Before this, the product could not send an
+  // email at all: Templates was a notepad and send-campaign had no callers.
+  const emailModal = emOpen && (
+    <Modal title={`Email ${lead.name}`} onClose={() => setEmOpen(false)} wide>
+      <p className="sub" style={{ marginTop: -6 }}>
+        Sent in your business's name, with replies going to your address, and logged against this
+        record.
+      </p>
+
+      {lead.nurture_opted_out && (
+        <p className="pill pill-red" style={{ display: "inline-block", margin: "4px 0 10px" }}>
+          This person has unsubscribed — the send will be refused.
+        </p>
+      )}
+
+      {templates.filter((t) => t.channel === "email").length > 0 && (
+        <div className="field">
+          <label className="label">Start from a template</label>
+          <div className="row row-wrap">
+            {templates.filter((t) => t.channel === "email").map((t) => (
+              <button
+                key={t.id}
+                className="btn btn-sm"
+                onClick={() => {
+                  setEmSubject(merge(t.subject || t.name));
+                  setEmText(merge(t.body));
+                }}
+              >
+                {t.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="field">
+        <label className="label" htmlFor="em-subject">Subject</label>
+        <input
+          id="em-subject"
+          className="input"
+          value={emSubject}
+          onChange={(e) => setEmSubject(e.target.value)}
+          placeholder={`Following up, ${(lead.name ?? "").split(" ")[0]}`}
+        />
+      </div>
+
+      <div className="field">
+        <label className="label" htmlFor="em-body">Message</label>
+        <textarea
+          id="em-body"
+          className="textarea"
+          value={emText}
+          onChange={(e) => setEmText(e.target.value)}
+          style={{ minHeight: 180 }}
+        />
+        <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+          Plain text. Blank lines become paragraphs and links are made clickable — an unsubscribe
+          footer is added automatically, because bulk senders without one get filtered as spam.
+        </p>
+      </div>
+
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn" onClick={() => setEmOpen(false)}>Cancel</button>
+        <button
+          className={`btn btn-primary${emSending ? " btn-busy" : ""}`}
+          onClick={() => void sendEmail()}
+          disabled={emSending || !emSubject.trim() || !emText.trim() || lead.nurture_opted_out}
+        >
+          {emSending ? "Sending…" : "Send email"}
+        </button>
+      </div>
+    </Modal>
+  );
+
   return (
     <div className="stack">
+      {waModal}
+      {emailModal}
       <div className="row">
         <button className="btn btn-ghost btn-sm" onClick={() => navigate("/leads")}>← {ui.leadNounPlural}</button>
       </div>
@@ -143,9 +345,23 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
         <div className="spacer" />
         <div className="row row-wrap" style={{ justifyContent: "flex-end" }}>
           {lead.phone && <a className="btn btn-sm" href={`tel:${lead.phone}`}>📞 Call</a>}
+          {lead.email && (
+            <button className="btn btn-sm btn-primary" onClick={() => setEmOpen(true)}>
+              ✉️ Email
+            </button>
+          )}
           {lead.phone && (
-            <a className="btn btn-sm" href={`https://wa.me/${lead.phone.replace(/[^\d]/g, "")}`} target="_blank" rel="noreferrer">
+            <button className="btn btn-sm btn-primary" onClick={() => setWaOpen(true)}>
               💬 WhatsApp
+            </button>
+          )}
+          {/* The deep link stays, as a second option. It opens WhatsApp on the
+              user's own phone and logs nothing — useful when they want a real
+              conversation, useless as the only option, which is what it was. */}
+          {lead.phone && (
+            <a className="btn btn-sm" href={`https://wa.me/${lead.phone.replace(/[^\d]/g, "")}`}
+               target="_blank" rel="noreferrer" title="Open in WhatsApp on this device (not logged)">
+              ↗
             </a>
           )}
           {lead.email && <a className="btn btn-sm" href={`mailto:${lead.email}`}>✉️ Email</a>}
