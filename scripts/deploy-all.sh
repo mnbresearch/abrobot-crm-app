@@ -37,6 +37,14 @@ echo
 # counsellor from the CRM, and that check is what stops another org sending
 # WhatsApp messages billed to your account.
 
+# This list used to hold four functions, and the other six were left to a long
+# one-off command pasted from a document. On 6 September that is exactly what
+# went wrong: the migrations were applied, but `api` and `save-integration` were
+# never deployed at all, and `nurture` was still serving the old single-tenant
+# build — while everything looked done.
+#
+# So every function is listed here now. One script, no memory required.
+
 echo "==> chat-agent  (strips <think> chain-of-thought; JWT off)"
 $SUPA functions deploy chat-agent --no-verify-jwt
 
@@ -46,8 +54,60 @@ $SUPA functions deploy app-signup --no-verify-jwt
 echo "==> lead-webhook  (WhatsApp autoreply plan gate; JWT off)"
 $SUPA functions deploy lead-webhook --no-verify-jwt
 
-echo "==> whatsapp-send  (plan gate; JWT ON, deliberately)"
+echo "==> api  (customer REST API; JWT off — the AbroBot key IS the auth)"
+$SUPA functions deploy api --no-verify-jwt
+
+# These three are called by pg_cron, which carries no Supabase JWT, so the
+# platform gate has to be off and the shared secret in _shared/cron-auth.ts is
+# the real boundary. That code fails CLOSED when CRON_SECRET is unset — so if
+# you have not set the secret yet, set it BEFORE deploying these, or the
+# scheduled jobs will start refusing themselves.
+echo "==> nurture  (per-tenant follow-up; JWT off, cron secret enforced)"
+$SUPA functions deploy nurture --no-verify-jwt
+
+echo "==> run-automations  (JWT off, cron secret or member)"
+$SUPA functions deploy run-automations --no-verify-jwt
+
+echo "==> summarize-chats  (JWT off, cron secret or member)"
+$SUPA functions deploy summarize-chats --no-verify-jwt
+
+# JWT ON, deliberately: each of these acts as a specific signed-in member, and
+# that check is what stops one organisation spending another's money or reading
+# another's records.
+echo "==> whatsapp-send  (plan gate; JWT ON)"
 $SUPA functions deploy whatsapp-send
+
+echo "==> send-campaign  (email; JWT ON)"
+$SUPA functions deploy send-campaign
+
+echo "==> save-integration  (write-only credentials; JWT ON)"
+$SUPA functions deploy save-integration
+echo
+
+# ── 2b. Prove they are actually there ───────────────────────────────────────
+# `functions deploy` can succeed for some and fail for others in a long chain,
+# and the failure scrolls past. This asks the platform what it is really
+# serving. A missing function answers NOT_FOUND; a deployed one answers
+# something else, whatever that something is.
+echo "==> Verifying what is live"
+BASE="https://${PROJECT_REF}.supabase.co/functions/v1"
+MISSING=0
+for f in chat-agent app-signup lead-webhook api nurture run-automations \
+         summarize-chats whatsapp-send send-campaign save-integration; do
+  code=$(curl -sS --max-time 20 -o /tmp/abx-deploy-check -w '%{http_code}' \
+         -X OPTIONS "$BASE/$f" 2>/dev/null || echo 000)
+  if grep -q NOT_FOUND /tmp/abx-deploy-check 2>/dev/null; then
+    echo "    MISSING  $f"; MISSING=1
+  else
+    echo "    live     $f  (HTTP $code)"
+  fi
+done
+rm -f /tmp/abx-deploy-check
+if [ "$MISSING" -ne 0 ]; then
+  echo
+  echo "One or more functions are not deployed. Scroll up for the error." >&2
+  exit 1
+fi
 echo
 
 # ── 3. Frontend ─────────────────────────────────────────────────────────────

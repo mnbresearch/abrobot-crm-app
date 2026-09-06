@@ -8,13 +8,23 @@ blunt. It is now the record of closing that gap.
 
 ## Apply, in this order
 
-Order matters in two places: the cron secret must exist before the functions
-that require it go live, and the nurture migration must land before the new
-nurture function runs, or it will look for a column that isn't there.
+Deploy first, then the migrations. One command — it deploys all ten edge
+functions and then asks the platform which ones are actually live, because a
+long `&&` chain can fail in the middle and scroll the error away:
 
 ```bash
-cd ~/Projects/mnb-recovery/repos/abrobot-crm-app && npx -y supabase@latest functions deploy api --no-verify-jwt && npx -y supabase@latest functions deploy run-automations --no-verify-jwt && npx -y supabase@latest functions deploy summarize-chats --no-verify-jwt && npx -y supabase@latest functions deploy nurture --no-verify-jwt && npx -y supabase@latest functions deploy send-campaign && npx -y supabase@latest functions deploy save-integration && bash scripts/deploy-all.sh
+cd ~/Projects/mnb-recovery/repos/abrobot-crm-app && bash scripts/deploy-all.sh
 ```
+
+That verification step exists because of what happened on 6 September: the
+migrations were applied and everything looked finished, but `api` and
+`save-integration` had never been deployed at all, and `nurture` was still
+serving the old single-tenant build. The deploy list lived in a document
+instead of in the script. It lives in the script now.
+
+**Set `CRON_SECRET` before deploying**, in Supabase → Edge Functions →
+Secrets. `_shared/cron-auth.ts` fails closed when it is unset, so deploying
+first means the scheduled jobs start refusing themselves.
 
 Then run these migrations in the SQL editor, in this order:
 
@@ -144,6 +154,43 @@ production. `GET /conversations` and `GET /conversations/:id` now exist.
 
 ---
 
+## Verified, not argued
+
+Run on the live database on 6 September 2026.
+
+**Schema and privileges — 16/16 pass** (`scripts/verify-all.sql`). The one that
+mattered most was the credential lockdown, because my first attempt at it would
+have failed *silently*: PostgreSQL warns rather than errors when you revoke a
+column privilege that a table-level grant still covers, so the migration would
+have reported success and changed nothing. The check uses
+`has_column_privilege()` rather than `information_schema.column_privileges`
+precisely because the latter cannot see that case.
+
+**Tenant isolation — 16/16 pass** (`scripts/tenant-isolation-test.sql`). A
+throwaway user in a throwaway organisation, running as `authenticated` with a
+real JWT claim, could read **zero** rows of every other tenant's `leads`,
+`activities`, `conversations`, `chat_messages`, `agent_config`, `api_keys`,
+`webhook_endpoints`, `message_templates`, `automations`, `profiles`,
+`pipeline_stages` and `organizations`.
+
+The three write attempts were real, not simulated:
+
+| Attempt | Result |
+|---|---|
+| `INSERT` a record into another org | refused — *new row violates row-level security policy for table "leads"* |
+| `UPDATE` another org's record | 0 rows |
+| `DELETE` another org's record | 0 rows |
+
+Those last two are evidence rather than vacuous truth: the script only runs
+them when it has found a genuine foreign record to aim at, and it reported
+row counts rather than skipping. Each was wrapped in a sentinel raise that
+unwound it either way, so the delete was safe to run against production.
+
+`integration_status()` — `SECURITY DEFINER`, so RLS cannot protect it — answered
+for the caller's own organisation.
+
+---
+
 ## Published claims, corrected
 
 | Was | Now | Why |
@@ -164,12 +211,12 @@ The last three were consumer-law exposure, not product gaps.
 
 ## Still open
 
-**1. Tenant isolation has never been tested with two real orgs.** The policies
-read correctly and `api` resolves the org from the key rather than the request,
-but "reads correctly" is not evidence. Create a second org, put a record in
-each, and try to reach one from the other's key and session. This is the one
-item I would not launch without: an hour's work, and the only claim in this
-document resting on reading code rather than running it.
+**1. Tenant isolation — the API-key half.** The database half is **verified**,
+not argued: see below. What is still untested is whether two *API keys* stay
+apart. Create a key in each of two orgs and confirm each `GET /leads` returns
+only its own records. The code resolves the org from the key rather than the
+request, so there is no parameter to tamper with, but that is a reading of the
+code and the point of this section is that readings are not evidence.
 
 **2. Activities and notes are not exposed through the API.** Transcripts are;
 the human-written notes and call logs on a record are not. Stated in API.md so
@@ -229,5 +276,7 @@ own systems, send email and WhatsApp from the record, and run an automatic
 follow-up sequence in their own words. Every line on the pricing page now
 describes something that exists.
 
-Two items remain open and neither is a refund conversation. Item 1 is the one
-worth doing before you take a second customer.
+Two items remain open and neither is a refund conversation. Isolation — the
+thing that actually matters when you sell this to businesses who compete with
+each other — has now been measured rather than asserted, on the live database,
+including the write paths.
