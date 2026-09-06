@@ -36,6 +36,7 @@ Then run these migrations in the SQL editor, in this order:
 | 4 | `20260905120000_credential_columns_and_status.sql` | browser loses read access to credentials; `integration_status()` |
 | 5 | `20260905130000_tenant_nurture.sql` | follow-up sequence becomes the tenant's own content, opt-in |
 | 6 | `20260905140000_email_limits.sql` | monthly email allowance per plan, metered like AI replies |
+| 7 | `20260906080000_fix_pgcrypto_search_path.sql` | lets the API and webhook functions find pgcrypto |
 
 `--no-verify-jwt` on `api` is correct: callers authenticate with an AbroBot API
 key, not a Supabase JWT. The key check *is* the authentication. `send-campaign`
@@ -158,13 +159,30 @@ production. `GET /conversations` and `GET /conversations/:id` now exist.
 
 Run on the live database on 6 September 2026.
 
-**Schema and privileges — 16/16 pass** (`scripts/verify-all.sql`). The one that
-mattered most was the credential lockdown, because my first attempt at it would
-have failed *silently*: PostgreSQL warns rather than errors when you revoke a
-column privilege that a table-level grant still covers, so the migration would
-have reported success and changed nothing. The check uses
-`has_column_privilege()` rather than `information_schema.column_privileges`
-precisely because the latter cannot see that case.
+**Schema and privileges — 18/18 pass** (`scripts/verify-all.sql`).
+
+Checks 1–16 ask whether things exist. **17 and 18 call them**, and that
+distinction is not academic: this file passed 16/16 while every single API
+request was returning `500`. `digest()`, `gen_random_bytes()` and `hmac()` are
+pgcrypto, which Supabase installs into the `extensions` schema, and three
+functions pinned `search_path = public`. Pinning it is right — an unpinned
+`search_path` on a `SECURITY DEFINER` function is a privilege-escalation hole —
+it was simply one schema too tight. PostgreSQL does not resolve calls inside a
+plpgsql body at `CREATE` time, so all three were created without complaint and
+failed only when used: no API request could authenticate, no key could be
+created, and no webhook signature could be computed. A check that only looks
+something up cannot tell working from merely present.
+
+The credential lockdown (check 7) had the same shape of trap for a different
+reason: PostgreSQL *warns* rather than errors when you revoke a column
+privilege that a table-level grant still covers, so my first attempt would have
+reported success and changed nothing. That check uses `has_column_privilege()`
+rather than `information_schema.column_privileges`, because the latter cannot
+see that case.
+
+Confirmed against the live API afterwards: a malformed key returns
+`401 Invalid or revoked API key`, a missing one `401 Missing API key`, and an
+unknown route still `401` rather than disclosing that the route exists.
 
 **Tenant isolation — 16/16 pass** (`scripts/tenant-isolation-test.sql`). A
 throwaway user in a throwaway organisation, running as `authenticated` with a

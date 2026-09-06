@@ -74,7 +74,11 @@ create or replace function public.create_api_key(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+-- search_path includes `extensions` because digest/gen_random_bytes/hmac are
+-- pgcrypto, which Supabase installs there. Pinning it to `public` alone (the
+-- original) creates cleanly — plpgsql does not resolve bodies at CREATE time —
+-- and then fails on every call. See 20260906080000.
+set search_path = public, extensions
 as $$
 declare
   v_org    uuid := public.my_org();
@@ -124,7 +128,11 @@ create or replace function public.resolve_api_key(p_raw text)
 returns table (org_id uuid, key_id uuid, scopes text[])
 language plpgsql
 security definer
-set search_path = public
+-- search_path includes `extensions` because digest/gen_random_bytes/hmac are
+-- pgcrypto, which Supabase installs there. Pinning it to `public` alone (the
+-- original) creates cleanly — plpgsql does not resolve bodies at CREATE time —
+-- and then fails on every call. See 20260906080000.
+set search_path = public, extensions
 as $$
 declare v_hash text;
 begin
@@ -215,7 +223,11 @@ create or replace function public.fire_webhooks(
 returns integer
 language plpgsql
 security definer
-set search_path = public, net
+-- search_path includes `extensions` because digest/gen_random_bytes/hmac are
+-- pgcrypto, which Supabase installs there. Pinning it to `public` alone (the
+-- original) creates cleanly — plpgsql does not resolve bodies at CREATE time —
+-- and then fails on every call. See 20260906080000.
+set search_path = public, extensions, net
 as $$
 declare
   ep  record;

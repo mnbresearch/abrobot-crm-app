@@ -1,5 +1,11 @@
 -- One query, one result set: Supabase's editor only shows the last one.
 -- Every row should read PASS. Anything else names what is missing.
+--
+-- Checks 1-16 ask whether things EXIST. Checks 17-18 CALL them, which is the
+-- distinction that matters: the first version of this file passed 16/16 while
+-- the API was returning 500 on every request. If a function is broken, those
+-- last two raise and the whole query errors — which is the point. An error
+-- here is a failure, not a flaky script.
 with cred as (
   select count(*) n from information_schema.columns c
    where c.table_schema='public' and c.table_name='agent_config'
@@ -61,4 +67,18 @@ select * from (
   union all select 16, '16. email_allowance not callable by strangers',
          case when has_function_privilege('anon','public.email_allowance(uuid)','EXECUTE')
               then 'FAIL — anon can read any org''s usage' else 'PASS' end
+
+  -- Checks 17-18 CALL the functions instead of asking whether they exist.
+  -- Existence was all this script checked at first, and it passed 16/16 while
+  -- resolve_api_key raised on every single request: pgcrypto lives in the
+  -- `extensions` schema and those functions pinned search_path to `public`,
+  -- which plpgsql does not catch at CREATE time. A check that only looks the
+  -- thing up cannot tell working from merely present.
+  union all select 17, '17. resolve_api_key actually runs (pgcrypto reachable)',
+         (select case when count(*) = 0 then 'PASS' else 'PASS (matched, oddly)' end
+            from public.resolve_api_key('not-a-real-key'))
+  union all select 18, '18. fire_webhooks actually runs (hmac reachable)',
+         case when public.fire_webhooks('00000000-0000-0000-0000-000000000000'::uuid,
+                                        'lead.created', '{}'::jsonb) = 0
+              then 'PASS' else 'PASS (fired, unexpectedly)' end
 ) x order by ord;
