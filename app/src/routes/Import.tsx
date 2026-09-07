@@ -102,7 +102,19 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
 
     // Pull existing contacts once — cheaper and more reliable than a query
     // per row, and it lets us report duplicates honestly.
-    const { data: existing } = await supabase.from("leads").select("email, phone").eq("org_id", org.id);
+    // Two bugs here, both silent. The error was discarded, so on failure
+    // `existing` was null, both dedupe sets came out empty, and EVERY row was
+    // imported as new while the result card confidently reported "0 duplicates
+    // skipped". And there was no .limit(), so PostgREST's default 1,000-row cap
+    // truncated the comparison set for any org past a thousand records —
+    // useLeads sets an explicit limit precisely because of that cap.
+    const { data: existing, error: dupeErr } = await supabase
+      .from("leads").select("email, phone").eq("org_id", org.id).limit(50000);
+    if (dupeErr) {
+      setBusy(false);
+      toast.error(`Could not check for duplicates: ${dupeErr.message}. Nothing was imported.`);
+      return;
+    }
     const seenEmail = new Set((existing ?? []).map((e) => (e.email ?? "").toLowerCase()).filter(Boolean));
     const seenPhone = new Set((existing ?? []).map((e) => e.phone ?? "").filter(Boolean));
 

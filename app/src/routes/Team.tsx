@@ -4,7 +4,10 @@ import { supabase } from "../lib/supabase";
 import { Card, Empty, Spinner, timeAgo, useToast } from "../components/ui";
 import type { MemberStatus, Profile, UserRole } from "../lib/types";
 
-const ROLES: UserRole[] = ["counsellor", "org_admin", "super_admin"];
+// super_admin is a PLATFORM role, not a tenant one. Offering it in this
+// dropdown invited an org admin to promote their own user to it. Whether
+// or not RLS refuses the write, it should never be selectable here.
+const ROLES: UserRole[] = ["counsellor", "org_admin"];
 const STATUSES: MemberStatus[] = ["pending", "active", "disabled"];
 
 interface Invite {
@@ -119,9 +122,16 @@ export function Team() {
   const toast = useToast();
 
   const load = async () => {
-    if (!org) return;
-    const { data } = await supabase.from("profiles").select("*").eq("org_id", org.id).order("created_at");
-    setMembers((data as Profile[]) ?? []);
+    // Returning here without clearing `loading` left the spinner up forever,
+    // because `load` only re-runs when `org` changes and `org` is what is
+    // missing. Same shape as the bug in useLeads.
+    if (!org) { setLoading(false); return; }
+    const { data, error } = await supabase.from("profiles").select("*").eq("org_id", org.id).order("created_at");
+    // An unread error rendered "No members yet" to an organisation that has a
+    // team — and the obvious response to that screen is to re-invite people
+    // who are already there.
+    if (error) toast.error(`Could not load your team: ${error.message}`);
+    else setMembers((data as Profile[]) ?? []);
     setLoading(false);
   };
 

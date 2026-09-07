@@ -35,9 +35,10 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
       // Every question here is "are there ANY?" or "is there MORE THAN ONE?",
       // never "how many exactly" — so a plain GET with limit(2) answers all of
       // them, uses the request shape that already works, and moves less data.
-      const [agent, leads, team, autos, templates, integrations] = await Promise.all([
+      const [agent, leads, widget, team, autos, templates, integrations] = await Promise.all([
         supabase.from("agent_config").select("enabled, knowledge, notify_new_leads").eq("org_id", org.id).maybeSingle(),
         supabase.from("leads").select("id").eq("org_id", org.id).limit(2),
+        supabase.from("leads").select("id").eq("org_id", org.id).eq("source", "website").limit(1),
         supabase.from("profiles").select("id").eq("org_id", org.id).eq("status", "active").limit(2),
         supabase.from("automations").select("id").eq("org_id", org.id).eq("enabled", true).limit(2),
         supabase.from("message_templates").select("id").eq("org_id", org.id).limit(2),
@@ -73,7 +74,7 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
         ? !!(intg.telegram.configured && intg.telegram.alerts_on)
         : !!agent.data?.notify_new_leads;
 
-      const anyLeads = has(leads);
+      const widgetLeads = has(widget);
       const teamInvited = has(team, 2);
       const anyAutos = has(autos);
       const anyTemplates = has(templates);
@@ -93,21 +94,24 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
           label: "Choose your industry",
           why: "Sets your pipeline, fields and AI persona in one go.",
           done: !!org.industry_slug,
-          action: { label: "Choose", path: "/settings" },
+          action: { label: "Choose", path: "/settings?tab=industry" },
         },
         {
           key: "knowledge",
           label: "Teach the AI assistant about your business",
           why: "Services, pricing, timings. Without this it can only answer in generalities.",
           done: !!(agent.data?.knowledge && agent.data.knowledge.trim().length > 40),
-          action: { label: "Add knowledge", path: "/settings" },
+          action: { label: "Add knowledge", path: "/settings?tab=agent" },
         },
         {
           key: "widget",
           label: "Put the chat widget on your website",
           why: "One line of HTML. This is what turns visitors into records automatically.",
-          done: anyLeads ?? true,
-          action: { label: "Get the snippet", path: "/settings" },
+          // "any lead exists" ticked this off for CSV-imported records too, so
+          // the customer was told they had installed something they hadn't.
+          // Only a record that actually came from the widget proves it is live.
+          done: widgetLeads ?? true,
+          action: { label: "Get the snippet", path: "/settings?tab=install" },
         },
         {
           key: "alerts",

@@ -102,9 +102,12 @@ export function Automations() {
   const toast = useToast();
 
   const load = async () => {
-    if (!org) return;
-    const { data } = await supabase.from("automations").select("*").eq("org_id", org.id).order("created_at");
+    if (!org) { setLoading(false); return; }   // never leave the spinner up forever
+    const { data, error: loadErr } = await supabase.from("automations").select("*").eq("org_id", org.id).order("created_at");
     setRows((data as Automation[]) ?? []);
+    // An unread error rendered an empty state, which reads as "you have
+    // none" rather than "we could not check".
+    if (loadErr) toast.error(`Could not load automations: ${loadErr.message}`);
     setLoading(false);
   };
 
@@ -153,6 +156,7 @@ export function Automations() {
   };
 
   const remove = async (id: string) => {
+    if (!confirm("Delete this automation? This cannot be undone.")) return;
     const { error } = await supabase.from("automations").delete().eq("id", id);
     if (error) { toast.error(error.message); return; }
     await load();

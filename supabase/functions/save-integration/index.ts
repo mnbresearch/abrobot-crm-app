@@ -17,6 +17,7 @@
 // POST { action: "save_whatsapp" | "save_telegram" | "test_whatsapp" | "test_telegram" | "status", ... }
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { fetchWithTimeout } from "../_shared/http.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -29,6 +30,16 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Content-Type": "application/json",
 };
+
+// Deno puts the full request URL into fetch's TypeError message, and the
+// Telegram bot token lives IN that URL. So a network-level failure hands the
+// token to whatever renders the error — a webhook caller's response body, a
+// browser toast, a log aggregator. Never let the raw message through.
+function scrubToken(msg: string): string {
+  return (msg || "").replace(/\/bot[0-9]+:[A-Za-z0-9_-]+/g, "/bot<redacted>")
+                    .replace(/[0-9]{8,10}:[A-Za-z0-9_-]{30,}/g, "<redacted>");
+}
+
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: CORS });
 
 Deno.serve(async (req) => {
@@ -124,7 +135,7 @@ Deno.serve(async (req) => {
         }
 
         const digits = to.replace(/[^\d]/g, "");
-        const r = await fetch(
+        const r = await fetchWithTimeout(
           `https://graph.facebook.com/v21.0/${cfg.whatsapp_phone_id}/messages`,
           {
             method: "POST",
@@ -180,7 +191,7 @@ Deno.serve(async (req) => {
           return json({ ok: false, error: "Save your Chat ID first" }, 400);
         }
 
-        const r = await fetch(`https://api.telegram.org/bot${bot}/sendMessage`, {
+        const r = await fetchWithTimeout(`https://api.telegram.org/bot${bot}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -228,7 +239,7 @@ Deno.serve(async (req) => {
         const brand = (cfg?.brand_name || org?.name || "Your team").replace(/["<>\\]/g, "");
         const from = Deno.env.get("NURTURE_FROM") || "hello@updates.mnbresearch.com";
 
-        const r = await fetch("https://api.resend.com/emails", {
+        const r = await fetchWithTimeout("https://api.resend.com/emails", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
           body: JSON.stringify({
@@ -251,7 +262,11 @@ Deno.serve(async (req) => {
         return json({ error: `unknown action: ${body.action}` }, 400);
     }
   } catch (e) {
-    console.error("save-integration:", e);
-    return json({ error: (e as Error).message }, 500);
+    // scrubToken: the Telegram bot token is IN the URL, and Deno puts the URL
+    // into fetch's TypeError message. Without this, a network blip hands the
+    // token straight to the browser and to the logs.
+    const msg = scrubToken((e as Error).message);
+    console.error("save-integration:", msg);
+    return json({ error: msg }, 500);
   }
 });

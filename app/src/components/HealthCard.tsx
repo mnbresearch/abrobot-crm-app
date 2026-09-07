@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../lib/store";
-import { FUNCTIONS_BASE } from "../lib/supabase";
+import { FUNCTIONS_BASE, supabase } from "../lib/supabase";
 
 // Surfaces the system-health probe in the app.
 //
@@ -26,10 +26,30 @@ export function HealthCard() {
     let cancelled = false;
     void (async () => {
       try {
-        const r = await fetch(`${FUNCTIONS_BASE}/system-health?org=${encodeURIComponent(org.slug)}`);
+        // This fetch carried NO headers, and system-health requires either a
+        // cron secret or a signed-in member — so it 401'd every single time,
+        // set `unavailable`, and rendered null. The card that exists precisely
+        // so a three-day silent outage is never repeated was itself silent, in
+        // a way indistinguishable from "everything is healthy".
+        //
+        // (The function has been changed to accept a member JWT, which is what
+        // makes sending one work at all.)
+        const { data: sess } = await supabase.auth.getSession();
+        const token = sess.session?.access_token;
+        const r = await fetch(
+          `${FUNCTIONS_BASE}/system-health?org=${encodeURIComponent(org.slug)}`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+        );
         if (!r.ok) { setUnavailable(true); return; }
         const j = await r.json();
-        if (!cancelled) setResult(j.orgs?.[0] ?? null);
+        const first = j?.orgs?.[0];
+        // Shape-check before trusting it. `result.checks.filter(...)` below is
+        // unguarded, so a response without `checks` throws during render and
+        // the ErrorBoundary takes out the whole dashboard — over a health
+        // widget.
+        if (!cancelled) {
+          setResult(first && Array.isArray(first.checks) ? first : null);
+        }
       } catch {
         if (!cancelled) setUnavailable(true);
       }

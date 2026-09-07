@@ -17,6 +17,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
 import { scoreLead } from "../_shared/score.ts";
 import { firstStageKey } from "../_shared/stage.ts";
+import { fetchWithTimeout } from "../_shared/http.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -313,6 +314,31 @@ Deno.serve(async (req) => {
     if (leadId) await supabase.from("conversations").update({ lead_id: leadId }).eq("id", convId);
   }
 
+  // --- rate limit ---
+  //
+  // This endpoint has to stay open: the widget runs on a visitor's browser and
+  // the org comes from the page, so there is no key to require. But org slugs
+  // are public — they are in the embed snippet — and there was no limit of any
+  // kind. Anyone could drain a competitor's monthly AI allowance to zero, at
+  // which point their widget starts telling real prospects it is "taking a
+  // short break", and burn the Groq key they pay for.
+  //
+  // Per org+IP+minute. Not a defence against a distributed attacker, but it
+  // turns "one script, one afternoon" into something requiring real effort.
+  {
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+    const { data: rl } = await supabase.rpc("hit_rate_limit", {
+      p_key: `chat:${org.id}:${ip}`, p_limit: 20, p_window_seconds: 60,
+    });
+    if (rl && rl.allowed === false) {
+      return json({
+        reply: "You're sending messages very quickly — give me a moment and try again.",
+        conversation_id: convId,
+        rate_limited: true,
+      }, 429);
+    }
+  }
+
   // --- plan limit enforcement ---
   //
   // Until now nothing checked credits outside the browser, which meant the
@@ -328,11 +354,29 @@ Deno.serve(async (req) => {
     // subscription lapsed six months ago still has plan='growth' and would keep
     // its 5,000 monthly messages. consume_usage now resolves the limit itself
     // via plan_of(), which accounts for trial and subscription expiry.
-    const { data: usage } = await supabase.rpc("consume_usage", {
+    // supabase-js RESOLVES with { error } rather than throwing, so the catch
+    // below never fired for an RPC failure — only `data` was read, `usage` came
+    // back null, `usage.allowed === false` was false, and the request sailed
+    // through. "A limit enforced only in the client is not a limit" was still
+    // true whenever this RPC erred.
+    const { data: usage, error: usageErr } = await supabase.rpc("consume_usage", {
       p_org_id: org.id,
       p_metric: "ai_messages",
       p_amount: 1,
     });
+
+    if (usageErr) {
+      // Fail closed, but warmly — the reader is a visitor on our customer's
+      // website, not an operator. We still capture their details below.
+      console.error("chat-agent: consume_usage failed, refusing:", usageErr.message);
+      const msg = cfg?.away_message?.trim() ||
+        `Thanks for reaching out! Our assistant is briefly unavailable. ` +
+        `Leave your phone or email and the ${brand} team will get straight back to you.`;
+      await supabase.from("chat_messages").insert({
+        conversation_id: convId, org_id: org.id, role: "assistant", content: msg,
+      });
+      return json({ reply: msg, conversation_id: convId, limited: true });
+    }
 
     if (usage && usage.allowed === false) {
       // Deliberately warm rather than a raw 429: this message is read by a
@@ -346,8 +390,8 @@ Deno.serve(async (req) => {
       return json({ reply: overMsg, conversation_id: convId, limited: true });
     }
   } catch (e) {
-    // Never block a real conversation because metering failed.
-    console.error("usage check failed, allowing through:", (e as Error).message);
+    // Reaches here only for a genuine throw (network, not a Postgres error).
+    console.error("usage check threw:", (e as Error).message);
   }
 
   // --- build Groq request from full config ---
@@ -436,11 +480,13 @@ Deno.serve(async (req) => {
           payload.reasoning_format = "hidden";
         }
 
-        const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        const r = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
           body: JSON.stringify(payload),
-        });
+        },
+    // a reasoning model on the free tier can legitimately take 20s+; the fallback chain below handles a real failure
+    25000,);
 
         if (r.ok) {
           const data = await r.json();

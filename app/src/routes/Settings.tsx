@@ -20,7 +20,7 @@ interface UsageMetric { used: number; limit: number | null }
 interface UsageSnapshot {
   plan: string; purchased_plan: string; label: string; period: string;
   is_expired: boolean; access_until: string | null; days_left: number | null;
-  ai_messages: UsageMetric; leads: UsageMetric;
+  ai_messages: UsageMetric; leads: UsageMetric; emails: UsageMetric;
   seats: UsageMetric; automations: UsageMetric;
   whatsapp: boolean;
 }
@@ -123,6 +123,11 @@ function UsageTab() {
           {until && !snap.is_expired && ` Access until ${until}.`}
         </p>
         <Meter label="AI chat messages" m={snap.ai_messages} />
+        {/* The tightest cap in the product — 50/month on trial — and the only
+            one whose limit is other people's deliverability rather than our
+            compute. It was enforced but shown nowhere, so the first a customer
+            knew of it was a refused send. */}
+        {snap.emails && <Meter label="Emails sent" m={snap.emails} />}
         <Meter label="Records" m={snap.leads} />
         <Meter label="Active team members" m={snap.seats} />
         <Meter label="Active automations" m={snap.automations} />
@@ -158,12 +163,30 @@ function UpgradeCard({ current }: { current: string }) {
   const [months, setMonths] = useState<1 | 12>(1);
   const toast = useToast();
 
+  const [plansErr, setPlansErr] = useState<string | null>(null);
+
   useEffect(() => {
     void supabase.from("plan_limits").select("*").order("position")
-      .then(({ data }) => setPlans((data as PlanRow[]) ?? []));
+      .then(({ data, error }) => {
+        if (error) setPlansErr(error.message);
+        else setPlans((data as PlanRow[]) ?? []);
+      });
   }, []);
 
   const paid = plans.filter((p) => p.price_inr && p.price_inr > 0);
+
+  // A failed read used to hit `if (!paid.length) return null` and silently
+  // remove the only path a customer has to paying us. Say what happened.
+  if (plansErr) {
+    return (
+      <Card title="Upgrade">
+        <p className="sub">Couldn't load the plans just now: {plansErr}</p>
+        <p className="sub" style={{ fontSize: 12, marginTop: 6 }}>
+          Reload the page, or email contact@mnbresearch.com and we'll take payment directly.
+        </p>
+      </Card>
+    );
+  }
   if (!paid.length) return null;
 
   const checkout = async (plan: string) => {
@@ -271,7 +294,14 @@ function UpgradeCard({ current }: { current: string }) {
 
 export function Settings() {
   const { isAdmin } = useApp();
-  const [tab, setTab] = useState<Tab>("industry");
+  // Honour ?tab=… so the setup checklist can send someone to the step it is
+  // actually talking about. Every checklist CTA pointed at bare /settings,
+  // which always opened on Industry — so "Get the snippet" and "Add knowledge"
+  // both landed on the wrong screen and the person had to go hunting.
+  const [tab, setTab] = useState<Tab>(() => {
+    const want = new URLSearchParams(window.location.search).get("tab");
+    return TABS.some((t) => t.key === want) ? (want as Tab) : "industry";
+  });
 
   if (!isAdmin) {
     return (
@@ -303,7 +333,7 @@ export function Settings() {
 
 // ── industry ────────────────────────────────────────────────────────────────
 function IndustryTab() {
-  const { industries, org, refresh } = useApp();
+  const { industries, org, refresh, ui } = useApp();
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
   const toast = useToast();
@@ -354,8 +384,12 @@ function IndustryTab() {
             workspace and re-themes the interface.
           </p>
           <p className="sub">
-            Existing {} records keep their current stage. Any stage or field you already have with the same
-            key is left untouched.
+            {/* This read `Existing {} records` — an empty expression container,
+                which compiles fine and renders as "Existing  records" with a
+                double space where the industry's own noun should be, in the
+                confirmation for an action people are already nervous about. */}
+            Existing {ui.leadNounPlural.toLowerCase()} keep their current stage. Any stage or field you
+            already have with the same key is left untouched.
           </p>
           <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
             <button className="btn" onClick={() => setConfirm(null)}>Cancel</button>
@@ -390,10 +424,21 @@ function PipelineTab() {
 
   const save = async () => {
     setSaving(true);
+    // Every other write on this screen checks `error`; this one did not, so a
+    // failed rename still toasted "Pipeline saved" — and the refresh below then
+    // snapped the labels back from the server while the success message was
+    // still on screen. Won/Lost flags failing silently is worse than cosmetic:
+    // conversion rates are computed from them.
     for (const [i, r] of rows.entries()) {
-      await supabase.from("pipeline_stages")
+      const { error } = await supabase.from("pipeline_stages")
         .update({ label: r.label, position: i, is_won: r.is_won, is_lost: r.is_lost })
         .eq("id", r.id);
+      if (error) {
+        setSaving(false);
+        await refresh();
+        toast.error(`Could not save "${r.label}": ${error.message}`);
+        return;
+      }
     }
     setSaving(false);
     await refresh();
@@ -411,6 +456,25 @@ function PipelineTab() {
   };
 
   const remove = async (id: string) => {
+    // Records keep their stage_key after the stage is gone, and Pipeline.tsx
+    // only pushes a lead into a column it recognises — so those records vanish
+    // from the board while the header still counts them. Deleting a stage with
+    // one bare click and no warning is not a fair trade for that.
+    const stage = rows.find((r) => r.id === id);
+    if (!stage || !org) return;
+    // Ask the database how many records are in this stage rather than guessing.
+    // head+count returns no rows, just the number.
+    const { count, error: countErr } = await supabase
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id)
+      .eq("stage_key", stage.key);
+    if (countErr) { toast.error(`Could not check that stage: ${countErr.message}`); return; }
+    const stranded = count ?? 0;
+    const msg = stranded > 0
+      ? `Delete "${stage?.label}"?\n\n${stranded} record(s) are in this stage. They will not be deleted, but they will disappear from the pipeline board until you move them to another stage.`
+      : `Delete "${stage?.label ?? "this stage"}"? This cannot be undone.`;
+    if (!confirm(msg)) return;
     const { error } = await supabase.from("pipeline_stages").delete().eq("id", id);
     if (error) { toast.error(error.message); return; }
     await refresh();

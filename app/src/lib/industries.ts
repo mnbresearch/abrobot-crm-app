@@ -131,7 +131,7 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
       { key: "conv", label: "Conversion", icon: "📈", kind: "conversion" },
     ],
     quickActions: [
-      { key: "quote", label: "Send quote", icon: "💬", toStage: "quote_given", logAs: "email" },
+      { key: "quote", label: "Mark quote sent", icon: "💬", toStage: "quote_given", logAs: "email" },
       { key: "start", label: "Start treatment", icon: "▶️", toStage: "treatment_started", logAs: "note" },
       ...BASE_ACTIONS,
     ],
@@ -239,7 +239,7 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
     ],
     quickActions: [
       { key: "consult", label: "Log consultation", icon: "🗣️", toStage: "consultation", logAs: "meeting" },
-      { key: "proposal", label: "Send proposal", icon: "📜", toStage: "proposal", logAs: "email" },
+      { key: "proposal", label: "Mark proposal sent", icon: "📜", toStage: "proposal", logAs: "email" },
       ...BASE_ACTIONS,
     ],
     tool: "none",
@@ -319,7 +319,7 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
     ],
     quickActions: [
       { key: "drive", label: "Book test drive", icon: "🛞", toStage: "test_drive", logAs: "meeting" },
-      { key: "quote", label: "Send quotation", icon: "🧾", toStage: "quotation", logAs: "email" },
+      { key: "quote", label: "Mark quotation sent", icon: "🧾", toStage: "quotation", logAs: "email" },
       ...BASE_ACTIONS,
     ],
     tool: "emi",
@@ -345,7 +345,7 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
       { key: "conv", label: "Booking Rate", icon: "📈", kind: "conversion" },
     ],
     quickActions: [
-      { key: "itin", label: "Send itinerary", icon: "🗺️", toStage: "itinerary_sent", logAs: "email" },
+      { key: "itin", label: "Mark itinerary sent", icon: "🗺️", toStage: "itinerary_sent", logAs: "email" },
       { key: "book", label: "Mark booked", icon: "🎫", toStage: "booked", logAs: "note" },
       ...BASE_ACTIONS,
     ],
@@ -372,7 +372,7 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
       { key: "conv", label: "Placement Rate", icon: "📈", kind: "conversion" },
     ],
     quickActions: [
-      { key: "submit", label: "Submit to client", icon: "📤", toStage: "submitted", logAs: "email" },
+      { key: "submit", label: "Mark submitted", icon: "📤", toStage: "submitted", logAs: "email" },
       { key: "interview", label: "Schedule interview", icon: "🗣️", toStage: "interview", logAs: "meeting" },
       ...BASE_ACTIONS,
     ],
@@ -400,7 +400,7 @@ export const INDUSTRIES: Record<string, IndustryUi> = {
     ],
     quickActions: [
       { key: "visit", label: "Schedule site visit", icon: "📍", toStage: "site_visit", logAs: "meeting" },
-      { key: "quote", label: "Send quote", icon: "🧾", toStage: "quoted", logAs: "email" },
+      { key: "quote", label: "Mark quote sent", icon: "🧾", toStage: "quoted", logAs: "email" },
       ...BASE_ACTIONS,
     ],
     tool: "quote",

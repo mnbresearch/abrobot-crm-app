@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "./http.ts";
 // AbroBot CRM — outbound WhatsApp via the Meta Cloud API.
 //
 // Config lives on the org's agent_config row (CRM Settings → WhatsApp):
@@ -43,7 +44,7 @@ export async function sendWhatsAppText(
   if (!token || !phoneId || !to) return { sent: false, reason: "not_configured" };
 
   try {
-    const r = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneId}/messages`, {
+    const r = await fetchWithTimeout(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
       body: JSON.stringify({

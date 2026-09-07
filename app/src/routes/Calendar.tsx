@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useApp, useLeads } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Empty, ScoreChip, Spinner, StagePill, useToast } from "../components/ui";
+import { Card, Empty, ScoreChip, Spinner, StagePill, useToast , LoadError } from "../components/ui";
 import type { Lead } from "../lib/types";
 
 // Follow-up calendar. A month grid plus the selected day's list, because the
@@ -37,7 +37,7 @@ const fromIso = (s: string) => {
 
 export function Calendar({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
-  const { leads, loading, reload } = useLeads(org?.id);
+  const { leads, loading, error, reload } = useLeads(org?.id);
   const [cursor, setCursor] = useState(() => new Date());
   const [selected, setSelected] = useState(() => iso(new Date()));
   const toast = useToast();
@@ -88,6 +88,15 @@ export function Calendar({ navigate }: { navigate: (to: string) => void }) {
   };
 
   if (loading) return <Spinner />;
+
+
+  // An unread error here told the customer they have no records. store.tsx
+
+  // documents that exact failure — "a customer with 4,000 records being told,
+
+  // convincingly, that they have none" — and this screen ignored it anyway.
+
+  if (error) return <LoadError message={error} onRetry={reload} />;
 
   const today = iso(new Date());
   const dayList = byDay[selected] ?? [];

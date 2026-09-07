@@ -49,9 +49,19 @@ function extractLead(body: any, source: string) {
   if (!phone && PHONE_RE.test(message)) phone = normPhone(message.match(PHONE_RE)![0]);
   if (!name) name = email?.split("@")[0] ?? phone ?? "Unknown lead";
 
+  // Validate rather than trust. Two separate bugs came from not doing this:
+  // a non-string body.email (a number, or a nested object from a badly mapped
+  // Zapier step) reached .toLowerCase() and threw an unhandled 500; and an
+  // address containing a comma or parenthesis reshaped the PostgREST dedupe
+  // filter below. The message-extraction path already ran EMAIL_RE — the
+  // body-field path was simply never held to the same standard.
+  const cleanEmail = typeof email === "string" && EMAIL_RE.test(email.trim())
+    ? email.trim().toLowerCase()
+    : null;
+
   return {
     name: String(name).slice(0, 200),
-    email: email?.toLowerCase() ?? null,
+    email: cleanEmail,
     phone,
     message: String(message).slice(0, 4000),
     target_country: body.target_country ?? body.country ?? null,
@@ -100,7 +110,15 @@ Deno.serve(async (req) => {
   }
 
   let q = supabase.from("leads").select("id").eq("org_id", wk.org_id);
-  if (lead.email && lead.phone) q = q.or("email.eq." + lead.email + ",phone.eq." + lead.phone);
+  // PostgREST parses or() as a mini-language, so a comma or parenthesis in an
+  // interpolated value reshapes the filter. api/index.ts escapes for exactly
+  // this reason and nurture quotes its stage keys; this call site was missed.
+  // Values are validated above, so this is belt and braces — which is the
+  // right posture for a filter that decides whether a record is a duplicate.
+  const noDelims = (v: string) => v.replace(/[,()"']/g, "");
+  if (lead.email && lead.phone) {
+    q = q.or(`email.eq.${noDelims(lead.email)},phone.eq.${noDelims(lead.phone)}`);
+  }
   else if (lead.email) q = q.eq("email", lead.email);
   else q = q.eq("phone", lead.phone!);
   const { data: existing } = await q.limit(1);
@@ -147,7 +165,17 @@ Deno.serve(async (req) => {
     next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
   }).select("id").single();
 
-  if (error) return json({ ok: false, error: error.message }, 500);
+  if (error) {
+    // api/index.ts gets this right and this function did not: a plan-limit
+    // rejection returned 500, so the integration retried forever against a
+    // condition that only a human can clear — while disclosing raw Postgres
+    // text to a third party.
+    if (/plan includes|subscription has ended|limit/i.test(error.message)) {
+      return json({ ok: false, error: error.message }, 402);
+    }
+    console.error("lead-webhook: insert failed:", error.message);
+    return json({ ok: false, error: "could not save the record" }, 500);
+  }
 
   if (lead.message) {
     await supabase.from("activities").insert({

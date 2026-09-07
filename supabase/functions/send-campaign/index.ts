@@ -30,6 +30,7 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { applyTemplate, escapeHtml, textToHtml } from "../_shared/template.ts";
+import { fetchWithTimeout } from "../_shared/http.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -68,7 +69,7 @@ async function sendEmail(
   key: string, from: string, to: string, replyTo: string | null,
   subject: string, html: string, unsubUrl: string,
 ) {
-  const r = await fetch("https://api.resend.com/emails", {
+  const r = await fetchWithTimeout("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
     body: JSON.stringify({
@@ -98,6 +99,13 @@ Deno.serve(async (req) => {
   if (!profile || profile.status !== "active" || !profile.org_id) {
     return json({ error: "not an active member" }, 403);
   }
+  // Admin only. Sending mail spends the org's allowance, goes out under the
+  // org's name, and rides on a sending reputation shared with every other
+  // tenant — the same reasons billing-checkout and save-integration are
+  // admin-gated. "Active member" let any counsellor mass-mail 2,000 people.
+  if (!["org_admin", "super_admin"].includes(profile.role)) {
+    return json({ error: "only an admin can send email" }, 403);
+  }
   const orgId = profile.org_id as string;
 
   // deno-lint-ignore no-explicit-any
@@ -126,8 +134,34 @@ Deno.serve(async (req) => {
   const from = `${brand.replace(/["<>\\]/g, "")} <${FROM_ADDRESS}>`;
   const replyTo = (profile.email || "").trim() || null;
 
+  // ── the plan's email allowance ────────────────────────────────────────────
+  // Read once, up here, because BOTH paths below need it — the test send and
+  // the real one. It is checked before anything is sent rather than per
+  // message: refusing halfway through a 400-person send leaves the tenant
+  // unable to say who received it and unable to resume without double-sending.
+  //
+  // Fail CLOSED. Destructuring only `data` meant that if this RPC errored,
+  // `remaining` became null — and null is the documented "unlimited" sentinel.
+  // A transient database blip would have silently converted a metered sender
+  // into an unmetered one.
+  const { data: allowance, error: allowErr } = await admin.rpc("email_allowance", { p_org_id: orgId });
+  if (allowErr) {
+    console.error("send-campaign: email_allowance failed:", allowErr.message);
+    return json({ error: "Could not check your email allowance. Nothing was sent — please try again." }, 503);
+  }
+  const remaining: number | null = allowance?.remaining ?? null;
+
   // ── test send: to the composer, personalised against a fake record ────────
   if (body.test_to) {
+    // A test send is still a real email from our domain to an address of the
+    // caller's choosing. Unvalidated, unmetered and unlimited, it was an
+    // arbitrary-recipient mailer that any signup could drive.
+    if (!/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(String(body.test_to))) {
+      return json({ error: "That does not look like an email address" }, 422);
+    }
+    if (remaining !== null && remaining < 1) {
+      return json({ error: "You have used this month's email allowance." }, 402);
+    }
     const sample = {
       name: profile.full_name || "Sample Person",
       email: String(body.test_to),
@@ -139,6 +173,8 @@ Deno.serve(async (req) => {
     );
     await sendEmail(key, from, String(body.test_to), replyTo,
       `[TEST] ${applyTemplate(subjectTpl, sample, brand)}`, html, `${FN_BASE}/nurture?unsub=preview`);
+    // Metered like any other send, so "test" is not an unlimited side door.
+    await admin.rpc("consume_usage", { p_org_id: orgId, p_metric: "emails", p_amount: 1 });
     return json({ ok: true, test: true, to: body.test_to });
   }
 
@@ -166,13 +202,6 @@ Deno.serve(async (req) => {
   if (leadErr) return json({ error: leadErr.message }, 500);
 
   const recipients = leads ?? [];
-
-  // ── the plan's email allowance ────────────────────────────────────────────
-  // Checked BEFORE sending, not per message. Refusing halfway through a
-  // 400-person send leaves the tenant with no idea who received it and no way
-  // to resume without double-sending some of them.
-  const { data: allowance } = await admin.rpc("email_allowance", { p_org_id: orgId });
-  const remaining: number | null = allowance?.remaining ?? null;
 
   // ── count_only: let the UI show the number before anything is sent ────────
   if (body.count_only) {

@@ -38,6 +38,22 @@ const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: 
 
 const TIME_TRIGGERS = ["no_contact_for", "follow_up_overdue", "score_above", "score_below"];
 
+
+// The cron-death detector only works if something actually reports in.
+// record_heartbeat() shipped with zero callers, so job_heartbeats stayed at
+// "never reported" and stale_jobs() flagged every job stale forever — the
+// monitoring was itself the thing that was broken.
+async function heartbeat(status: string, detail?: string) {
+  try {
+    await supabase.rpc("record_heartbeat", {
+      p_job: "run-automations", p_status: status, p_detail: detail ?? null,
+    });
+  } catch (e) {
+    // Never let reporting health break the work whose health is reported.
+    console.warn("heartbeat failed:", (e as Error).message);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
@@ -65,16 +81,21 @@ Deno.serve(async (req) => {
   // Handled before the time-based sweep because it is a different question:
   // "react to this one record now", not "scan everything for anything due".
   if (body?.event && body?.lead_id) {
-    const { data: lead, error: leadErr } = await supabase
-      .from("leads").select("*").eq("id", body.lead_id).maybeSingle();
+    // Scoped IN the query when a person is calling, rather than fetched first
+    // and checked afterwards. The old shape answered 403 for a real record in
+    // another tenant and 404 for one that does not exist — an existence oracle.
+    // UUIDs make that nearly useless in practice, but the filter belongs in
+    // the query and costs nothing to put there.
+    //
+    // callerOrgId is undefined when the database trigger calls this on the
+    // service role, which is why the filter is conditional rather than
+    // unconditional: the trigger legitimately acts for every org.
+    let leadQ = supabase.from("leads").select("*").eq("id", body.lead_id);
+    if (callerOrgId) leadQ = leadQ.eq("org_id", callerOrgId);
+    const { data: lead, error: leadErr } = await leadQ.maybeSingle();
 
     if (leadErr || !lead) {
       return json({ ok: false, error: leadErr?.message ?? "lead not found" }, 404);
-    }
-    // A member-authenticated caller may only touch their own org. The trigger
-    // runs as the service role, so callerOrgId is undefined for it.
-    if (callerOrgId && lead.org_id !== callerOrgId) {
-      return json({ error: "not your record" }, 403);
     }
 
     // Validate rather than cast. body.event arrives over HTTP, and an
@@ -247,5 +268,9 @@ Deno.serve(async (req) => {
     }
   }
 
+  // Only the scheduled sweep reports health — a member clicking "Test run"
+  // is not evidence that cron is alive, and recording it as such would make
+  // the staleness check lie in the reassuring direction.
+  if (!callerOrgId && !dryRun) await heartbeat("ok", `${orgs?.length ?? 0} org(s), ${fired} fired`);
   return json({ ok: true, dry_run: dryRun, orgs: orgs?.length ?? 0, fired, report: report.slice(0, 50) });
 });

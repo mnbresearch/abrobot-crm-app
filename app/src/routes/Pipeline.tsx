@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useApp, useLeads } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Empty, ScoreChip, Spinner, useToast } from "../components/ui";
+import { Card, Empty, ScoreChip, Spinner, useToast , LoadError } from "../components/ui";
 import type { Lead } from "../lib/types";
 
 // Drag-and-drop board over the org's own stages. Uses native HTML5 DnD rather
@@ -9,7 +9,7 @@ import type { Lead } from "../lib/types";
 
 export function Pipeline({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
-  const { leads, loading, setLeads } = useLeads(org?.id);
+  const { leads, loading, error, reload, setLeads } = useLeads(org?.id);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overKey, setOverKey] = useState<string | null>(null);
   const toast = useToast();
@@ -47,13 +47,26 @@ export function Pipeline({ navigate }: { navigate: (to: string) => void }) {
       toast.error(error.message);
       return;
     }
-    await supabase.from("activities").insert({
+    // Secondary to the stage move that already succeeded — so a failure here
+    // must not undo it, but it must not be invisible either: the Activity
+    // feed would quietly stop matching what happened.
+    const { error: actErr } = await supabase.from("activities").insert({
       org_id: lead.org_id, lead_id: id, type: "stage_change", content: `Moved to ${label}.`,
     });
+    if (actErr) console.warn("stage move logged nowhere:", actErr.message);
     toast.show(`Moved to ${label}`);
   };
 
   if (loading) return <Spinner />;
+
+
+  // An unread error here told the customer they have no records. store.tsx
+
+  // documents that exact failure — "a customer with 4,000 records being told,
+
+  // convincingly, that they have none" — and this screen ignored it anyway.
+
+  if (error) return <LoadError message={error} onRetry={reload} />;
 
   if (stages.length === 0) {
     return <Card><Empty icon="🔀" title="No pipeline yet" hint="Pick an industry in Settings and your stages will be created." /></Card>;

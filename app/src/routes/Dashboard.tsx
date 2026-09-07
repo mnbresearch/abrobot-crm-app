@@ -13,7 +13,7 @@ import type { Lead } from "../lib/types";
 
 export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
-  const { leads, loading, error: leadsError, reload } = useLeads(org?.id);
+  const { leads, loading, error: leadsError, reload, truncated } = useLeads(org?.id);
 
   const stageMeta = useMemo(
     () => stages.map((s) => ({ key: s.key, is_won: s.is_won, is_lost: s.is_lost })),
@@ -61,6 +61,25 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
 
   return (
     <div className="stack">
+
+
+    {/* The page limit is 2,000 records but the Business plan sells 50,000.
+
+        Without this, these figures silently describe only the newest 2,000 and
+
+        look complete. */}
+
+    {truncated && (
+
+      <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
+
+        <b>Showing your 2,000 most recent records.</b>{" "}
+
+        <span className="sub">You have more than that, so these figures cover only these. Narrow the date range, or export in batches.</span>
+
+      </div>
+
+    )}
       <div>
         <h1>{ui.icon} {org?.name}</h1>
         <p className="sub" style={{ marginTop: 3 }}>{ui.dashboardNote}</p>

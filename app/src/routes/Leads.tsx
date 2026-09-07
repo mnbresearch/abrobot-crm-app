@@ -14,7 +14,7 @@ type SortKey = "created" | "score" | "name" | "follow_up";
 
 export function Leads({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages, fields, profile } = useApp();
-  const { leads, loading, error: leadsError, reload } = useLeads(org?.id);
+  const { leads, loading, error: leadsError, reload, truncated } = useLeads(org?.id);
   const [q, setQ] = useState("");
   const [stageFilter, setStageFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
@@ -86,12 +86,13 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
     const { error } = await supabase.from("leads").update(patch).in("id", ids);
     if (error) { toast.error(error.message); return; }
     if (org) {
-      await supabase.from("activities").insert(
+      const { error: actErr } = await supabase.from("activities").insert(
         ids.map((id) => ({
           org_id: org.id, lead_id: id, user_id: profile?.id ?? null,
           type: "system" as const, content: `${label} (bulk action).`,
         })),
       );
+      if (actErr) console.warn("bulk action logged nowhere:", actErr.message);
     }
     setSelected(new Set());
     await reload();
@@ -103,6 +104,25 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
 
   return (
     <div className="stack">
+
+
+    {/* The page limit is 2,000 records but the Business plan sells 50,000.
+
+        Without this, this list silently describe only the newest 2,000 and
+
+        look complete. */}
+
+    {truncated && (
+
+      <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
+
+        <b>Showing your 2,000 most recent records.</b>{" "}
+
+        <span className="sub">You have more than that, so this list cover only these. Narrow the date range, or export in batches.</span>
+
+      </div>
+
+    )}
       <div className="row">
         <div>
           <h1>{ui.leadNounPlural}</h1>

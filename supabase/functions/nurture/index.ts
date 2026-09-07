@@ -25,6 +25,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { requireCronSecret } from "../_shared/cron-auth.ts";
 import { applyTemplate, escapeHtml, textToHtml } from "../_shared/template.ts";
+import { fetchWithTimeout } from "../_shared/http.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -82,7 +83,7 @@ async function sendEmail(
   html: string,
   unsubUrl: string,
 ) {
-  const r = await fetch("https://api.resend.com/emails", {
+  const r = await fetchWithTimeout("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
     body: JSON.stringify({
@@ -138,7 +139,14 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
 
   // The plan's monthly email allowance. Unattended sending is exactly where a
   // limit matters most: nobody is watching, and it runs again in an hour.
-  const { data: allowance } = await supabase.rpc("email_allowance", { p_org_id: org.id });
+  // Fail CLOSED — see the same fix in send-campaign. null means "unlimited",
+  // so an errored RPC would have removed the cap on an unattended job that
+  // runs again every hour.
+  const { data: allowance, error: allowErr } = await supabase.rpc("email_allowance", { p_org_id: org.id });
+  if (allowErr) {
+    console.error(`nurture: email_allowance failed for ${org.slug}:`, allowErr.message);
+    return { org: org.slug, skipped: "could not read the email allowance", sent: 0 };
+  }
   let budget: number | null = allowance?.remaining ?? null;
   if (budget === 0) {
     return { org: org.slug, skipped: "monthly email allowance used up", sent: 0 };
@@ -241,6 +249,22 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
   return { org: org.slug, candidates: leads?.length ?? 0, sent, errors };
 }
 
+
+// The cron-death detector only works if something actually reports in.
+// record_heartbeat() shipped with zero callers, so job_heartbeats stayed at
+// "never reported" and stale_jobs() flagged every job stale forever — the
+// monitoring was itself the thing that was broken.
+async function heartbeat(status: string, detail?: string) {
+  try {
+    await supabase.rpc("record_heartbeat", {
+      p_job: "nurture", p_status: status, p_detail: detail ?? null,
+    });
+  } catch (e) {
+    // Never let reporting health break the work whose health is reported.
+    console.warn("heartbeat failed:", (e as Error).message);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
@@ -250,6 +274,29 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const unsub = url.searchParams.get("unsub");
   if (unsub) {
+    // A GET must not change anything.
+    //
+    // Corporate link scanners, spam filters and mail clients prefetch every
+    // URL in a message — including the List-Unsubscribe one — before a human
+    // ever sees it. Acting on GET meant recipients were being unsubscribed by
+    // software they do not control, and we would have had no idea: from our
+    // side it looks exactly like a person choosing to leave.
+    //
+    // RFC 8058 one-click is a POST, so real one-click still works. A human
+    // clicking the link in the footer gets a page with a button.
+    if (req.method === "GET") {
+      return new Response(
+        `<html><body style="font-family:sans-serif;text-align:center;padding:60px">
+           <h2>Unsubscribe?</h2>
+           <p>You will stop receiving follow-up emails. This cannot be undone from this page.</p>
+           <form method="POST">
+             <button type="submit" style="background:#b45309;color:#fff;border:none;padding:12px 26px;
+               border-radius:8px;font-size:15px;cursor:pointer">Yes, unsubscribe me</button>
+           </form>
+         </body></html>`,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      );
+    }
     // Telling someone they are unsubscribed when they are not is the one bug
     // here with legal weight. .select() makes the update report which rows it
     // actually changed, so a stale token cannot render a false confirmation.
@@ -330,5 +377,7 @@ Deno.serve(async (req) => {
   }
 
   const sent = results.reduce((n, r) => n + (r.sent ?? 0), 0);
+  const bad = results.filter((r) => "error" in r).length;
+  await heartbeat(bad ? "warn" : "ok", `${results.length} org(s), ${sent} sent, ${bad} failed`);
   return json({ ok: true, orgs: results.length, sent, results });
 });

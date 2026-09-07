@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "./http.ts";
 // AbroBot CRM — Telegram new-lead alerts.
 //
 // Config lives on the org's agent_config row (set in CRM Settings → Alerts):
@@ -84,7 +85,7 @@ export async function notifyNewLead(
     const chatId = (cfg.telegram_chat_id ?? "").toString().trim();
     if (!token || !chatId) return { sent: false, reason: "not_configured" };
 
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const r = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -102,6 +103,15 @@ export async function notifyNewLead(
     }
     return { sent: true };
   } catch (e) {
-    return { sent: false, reason: "error", detail: (e as Error).message };
+    return { sent: false, reason: "error", detail: scrubToken((e as Error).message) };
   }
+}
+
+// Deno puts the full request URL into fetch's TypeError message, and the
+// Telegram bot token lives IN that URL. So a network-level failure hands the
+// token to whatever renders the error — a webhook caller's response body, a
+// browser toast, a log aggregator. Never let the raw message through.
+export function scrubToken(msg: string): string {
+  return (msg || "").replace(/\/bot[0-9]+:[A-Za-z0-9_-]+/g, "/bot<redacted>")
+                    .replace(/[0-9]{8,10}:[A-Za-z0-9_-]{30,}/g, "<redacted>");
 }

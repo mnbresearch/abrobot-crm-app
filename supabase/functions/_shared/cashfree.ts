@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "./http.ts";
 // AbroBot CRM — Cashfree Payment Gateway client.
 //
 // Ported from the AuditFlow implementation in this workspace, keeping its
@@ -75,7 +76,7 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
   const phone = (input.customer.phone ?? "").replace(/[^\d]/g, "").slice(-10) || "9999999999";
 
   try {
-    const res = await fetch(`${baseUrl()}/orders`, {
+    const res = await fetchWithTimeout(`${baseUrl()}/orders`, {
       method: "POST",
       headers: {
         "x-api-version": API_VERSION,
@@ -132,7 +133,7 @@ export async function fetchOrder(orderId: string): Promise<Record<string, unknow
   const creds = credentials();
   if (!creds) return null;
   try {
-    const res = await fetch(`${baseUrl()}/orders/${encodeURIComponent(orderId)}`, {
+    const res = await fetchWithTimeout(`${baseUrl()}/orders/${encodeURIComponent(orderId)}`, {
       headers: {
         "x-api-version": API_VERSION,
         "x-client-id": creds.appId,

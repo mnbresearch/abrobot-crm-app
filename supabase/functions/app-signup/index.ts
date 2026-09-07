@@ -9,6 +9,7 @@
 //    a returning user never gets a second welcome.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { fetchWithTimeout } from "../_shared/http.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -48,7 +49,7 @@ function welcomeEmail(name: string, unsubUrl: string) {
 }
 
 async function sendEmail(to: string, subject: string, html: string) {
-  const r = await fetch("https://api.resend.com/emails", {
+  const r = await fetchWithTimeout("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
     body: JSON.stringify({ from: FROM, to: [to], reply_to: REPLY_TO, subject, html }),
@@ -60,7 +61,29 @@ async function sendEmail(to: string, subject: string, html: string) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  if (APP_SECRET && req.headers.get("x-app-secret") !== APP_SECRET) return json({ error: "unauthorized" }, 401);
+  // Fails CLOSED. This used to read `if (APP_SECRET && ...)`, so an unset
+  // secret — the deployment default — disabled the check entirely. That made
+  // this an open relay: anyone who knew the URL could POST an arbitrary
+  // address and cause a send from our verified domain, plus insert a lead.
+  // One abuse report on that domain costs every tenant their deliverability,
+  // because nurture and campaign mail go out from the same place.
+  //
+  // _shared/cron-auth.ts already fails closed for exactly this reason; this
+  // endpoint was written before that and never brought into line.
+  if (!APP_SECRET) {
+    console.error("app-signup: APP_SECRET is not set — refusing to run. Set it in Edge Function secrets.");
+    return json({ error: "signup is not configured" }, 503);
+  }
+  const presented = req.headers.get("x-app-secret") ?? "";
+  // Constant-time compare: a plain !== leaks the secret one byte at a time to
+  // anyone willing to measure.
+  const a = new TextEncoder().encode(presented);
+  const b = new TextEncoder().encode(APP_SECRET);
+  let same = a.length === b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i % (a.length || 1)] !== b[i % (b.length || 1)]) same = false;
+  }
+  if (!same) return json({ error: "unauthorized" }, 401);
 
   let body: any;
   try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }

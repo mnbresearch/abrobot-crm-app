@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Empty, Spinner, humanize, timeAgo } from "../components/ui";
+import { Card, Empty, Spinner, humanize, timeAgo , LoadError } from "../components/ui";
 import type { Activity as ActivityRow } from "../lib/types";
 
 // Org-wide activity feed, grouped by day. Answers "what has the team done".
@@ -23,18 +23,22 @@ export function Activity({ navigate }: { navigate: (to: string) => void }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!org) return;
+    if (!org) { setLoading(false); return; }   // never leave the spinner up forever
     void (async () => {
       // Joins mirror the legacy app's shape: activities → leads and profiles.
-      const { data } = await supabase
+      const { data, error: loadErr } = await supabase
         .from("activities")
         .select("*, leads:lead_id(name), profiles:user_id(full_name)")
         .eq("org_id", org.id)
         .order("created_at", { ascending: false })
         .limit(300);
-      setRows((data as Row[]) ?? []);
+      // An unread error rendered "Nothing logged yet", which reads as "you have
+      // no history" rather than "we could not check".
+      if (loadErr) setError(loadErr.message);
+      else { setError(null); setRows((data as Row[]) ?? []); }
       setLoading(false);
     })();
   }, [org]);
@@ -54,6 +58,8 @@ export function Activity({ navigate }: { navigate: (to: string) => void }) {
   }, [filtered]);
 
   if (loading) return <Spinner />;
+
+  if (error) return <LoadError message={error} />;
 
   return (
     <div className="stack">

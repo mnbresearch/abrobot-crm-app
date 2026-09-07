@@ -12,6 +12,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 import { requireCronOrMember } from "../_shared/cron-auth.ts";
+import { fetchWithTimeout } from "../_shared/http.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -44,7 +45,7 @@ async function summariseBatch(items: { id: string; transcript: string }[]) {
     'Return ONLY valid JSON of the form {"summaries":[{"id":"...","summary":"...","interest":"..."}]}.';
   const user = JSON.stringify(items.map((it) => ({ id: it.id, transcript: it.transcript.slice(0, MAX_CHARS) })));
 
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const r = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GROQ_KEY}` },
     body: JSON.stringify({
@@ -57,7 +58,22 @@ async function summariseBatch(items: { id: string; transcript: string }[]) {
         { role: "user", content: "Conversations:\n" + user },
       ],
     }),
-  });
+  },
+    // summarising a long transcript is slower than a chat turn
+    25000,);
+  // r.ok was never tested. On a 429 or 500 there are no `choices`, `text` falls
+  // back to "{}", the summaries object comes out empty, the per-lead catch
+  // never fires, and this returns 200 with {}. The user clicks "AI summary",
+  // gets nothing, and no error exists anywhere to explain it.
+  if (!r.ok) {
+    const detail = (await r.text()).slice(0, 300);
+    console.error("summarize-chats: Groq returned", r.status, detail);
+    throw new Error(
+      r.status === 429
+        ? "The AI service is rate-limited right now. Try again in a minute."
+        : `The AI service returned ${r.status}.`,
+    );
+  }
   const data = await r.json();
   const text = data?.choices?.[0]?.message?.content ?? "{}";
   let parsed: any = {};
@@ -68,6 +84,22 @@ async function summariseBatch(items: { id: string; transcript: string }[]) {
     if (s && s.id) out[String(s.id)] = { summary: String(s.summary || ""), interest: String(s.interest || "") };
   }
   return out;
+}
+
+
+// The cron-death detector only works if something actually reports in.
+// record_heartbeat() shipped with zero callers, so job_heartbeats stayed at
+// "never reported" and stale_jobs() flagged every job stale forever — the
+// monitoring was itself the thing that was broken.
+async function heartbeat(status: string, detail?: string) {
+  try {
+    await supabase.rpc("record_heartbeat", {
+      p_job: "summarize-chats", p_status: status, p_detail: detail ?? null,
+    });
+  } catch (e) {
+    // Never let reporting health break the work whose health is reported.
+    console.warn("heartbeat failed:", (e as Error).message);
+  }
 }
 
 Deno.serve(async (req) => {
@@ -122,5 +154,6 @@ Deno.serve(async (req) => {
     } catch (_e) { /* skip chunk; client falls back to heuristic */ }
   }
 
+  await heartbeat("ok", `${Object.keys(summaries).length} summarised`);
   return json({ summaries });
 });

@@ -135,7 +135,13 @@ export function useLeads(orgId: string | undefined) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!orgId) return;
+    // `loading` initialises to true, so returning here without clearing it
+    // leaves it true FOREVER. Every consumer renders a skeleton or a spinner
+    // off that flag, so one failed organisation read hung the dashboard, the
+    // leads table, the pipeline, the calendar and reports — permanently, with
+    // no error anywhere. Nothing recovers, because `load` only re-runs when
+    // orgId changes and orgId is what is missing.
+    if (!orgId) { setLoading(false); return; }
     setLoading(true);
     const { data, error: err } = await supabase
       .from("leads")

@@ -29,6 +29,8 @@ const CORS = {
 };
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: CORS });
 
+
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -68,6 +70,7 @@ Deno.serve(async (req) => {
   }
 
   let updated = 0, unchanged = 0;
+  const failed: string[] = [];
   const sample: unknown[] = [];
 
   for (const l of leads ?? []) {
@@ -83,17 +86,24 @@ Deno.serve(async (req) => {
       sample.push({ id: l.id, name: l.name, was: l.score, now: score, breakdown });
     }
     if (!dryRun) {
-      await admin.from("leads").update({ score }).eq("id", l.id);
+      const { error: upErr } = await admin.from("leads").update({ score }).eq("id", l.id);
+      // updated++ used to run unconditionally, so every write could fail and
+      // the caller was still told N records were rescored.
+      if (upErr) { failed.push(`${l.id}: ${upErr.message}`); continue; }
     }
     updated++;
   }
 
+  // ok reflects whether every write actually landed. It was hardcoded true
+  // beside an `updated` counter that incremented regardless of the result.
   return json({
-    ok: true,
+    ok: failed.length === 0,
     dry_run: dryRun,
     scanned: leads?.length ?? 0,
     updated,
     unchanged,
+    failed: failed.length,
+    failures: failed.slice(0, 10),
     sample,
   });
 });

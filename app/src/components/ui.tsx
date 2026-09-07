@@ -315,7 +315,26 @@ export function humanize(key: string): string {
 
 export function timeAgo(iso: string | null): string {
   if (!iso) return "—";
-  const diff = Date.now() - new Date(iso).getTime();
+
+  const ms = new Date(iso).getTime();
+  // An unparseable date used to fall through and render as "just now", which
+  // is the most confident possible way to display corrupt data.
+  if (Number.isNaN(ms)) return "—";
+
+  // Future dates. The Dashboard's "Work on these next" table renders
+  // next_follow_up_at through this function, and those dates have not happened
+  // yet — so a negative difference fell straight through to `if (m < 1) return
+  // "just now"`, and every scheduled follow-up read "just now" on the one
+  // screen whose entire job is telling you when to call someone.
+  if (ms > Date.now()) {
+    const mins = Math.round((ms - Date.now()) / 60000);
+    if (mins < 60) return `in ${Math.max(mins, 1)}m`;
+    if (mins < 1440) return `in ${Math.round(mins / 60)}h`;
+    const days = Math.round(mins / 1440);
+    return days === 1 ? "tomorrow" : `in ${days}d`;
+  }
+
+  const diff = Date.now() - ms;
   const m = Math.floor(diff / 60000);
   if (m < 1) return "just now";
   if (m < 60) return `${m}m ago`;

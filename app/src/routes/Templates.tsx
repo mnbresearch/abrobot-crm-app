@@ -42,13 +42,18 @@ export function Templates() {
   const toast = useToast();
 
   const load = async () => {
-    if (!org) return;
+    if (!org) { setLoading(false); return; }   // never leave the spinner up forever
     const [tpl, cfg] = await Promise.all([
       supabase.from("message_templates").select("*").eq("org_id", org.id).order("created_at"),
       supabase.from("agent_config").select("nurture_enabled").eq("org_id", org.id).maybeSingle(),
     ]);
-    setRows((tpl.data as Template[]) ?? []);
-    setNurtureOn(cfg.data?.nurture_enabled ?? false);
+    // An unread error here showed "No templates yet" AND reported automatic
+    // follow-up as Off — two confident falsehoods from one failed request.
+    if (tpl.error) toast.error(`Could not load templates: ${tpl.error.message}`);
+    else setRows((tpl.data as Template[]) ?? []);
+    // null, not false, when we genuinely do not know — the card below
+    // distinguishes "off" from "unknown" rather than asserting.
+    setNurtureOn(cfg.error ? null : (cfg.data?.nurture_enabled ?? false));
     setLoading(false);
   };
 
@@ -95,6 +100,7 @@ export function Templates() {
   };
 
   const remove = async (id: string) => {
+    if (!confirm("Delete this template? This cannot be undone.")) return;
     const { error } = await supabase.from("message_templates").delete().eq("id", id);
     if (error) { toast.error(error.message); return; }
     await load();

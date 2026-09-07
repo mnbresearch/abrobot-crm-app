@@ -36,16 +36,19 @@ export function Conversations({ navigate }: { navigate: (to: string) => void }) 
   const toast = useToast();
 
   useEffect(() => {
-    if (!org) return;
+    if (!org) { setLoading(false); return; }   // never leave the spinner up forever
     void (async () => {
-      const { data } = await supabase
+      const { data, error: loadErr } = await supabase
         .from("conversations")
         .select("*")
         .eq("org_id", org.id)
         .order("last_message_at", { ascending: false })
         .limit(200);
       setConvos((data as Conversation[]) ?? []);
-      setLoading(false);
+      // An unread error rendered an empty state, which reads as "you have
+    // none" rather than "we could not check".
+    if (loadErr) toast.error(`Could not load conversations: ${loadErr.message}`);
+    setLoading(false);
     })();
   }, [org]);
 

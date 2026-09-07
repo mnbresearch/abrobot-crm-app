@@ -78,7 +78,7 @@ Deno.serve(async (req) => {
   }
 
   const { data: row, error: lookupErr } = await admin.from("payments")
-    .select("id, org_id, plan, status, period_months").eq("order_id", orderId).maybeSingle();
+    .select("id, org_id, plan, status, period_months, granted_at").eq("order_id", orderId).maybeSingle();
 
   // A failed lookup is NOT an unknown order. The error used to be discarded,
   // so one transient database blip fell through to the 200 below — Cashfree
@@ -97,10 +97,31 @@ Deno.serve(async (req) => {
     return json({ received: true, ignored: "unknown order" });
   }
 
-  // Idempotency: Cashfree retries until it gets a 2xx. Once an order is paid,
-  // further deliveries must not extend the subscription again.
-  if (row.status === "paid") {
-    return json({ received: true, already: "paid" });
+  // Idempotency: Cashfree retries until it gets a 2xx.
+  //
+  // This used to short-circuit on `status === "paid"` alone, which quietly
+  // created the worst bug in the product: the payment row is marked paid
+  // BEFORE grant_plan_from_payment runs, so if the grant failed we returned
+  // 500 to force a retry — and the retry hit this line first, saw "paid",
+  // returned 200, and Cashfree stopped retrying. Money taken, plan never
+  // granted, no further attempt, and the only trace a console line.
+  //
+  // The correct marker is granted_at, not status. grant_plan_from_payment
+  // claims it with a compare-and-swap (`and granted_at is null`), so calling
+  // it again after a failure is safe and calling it twice concurrently is a
+  // no-op for the loser. Short-circuit only when the work is genuinely done.
+  if (row.status === "paid" && row.granted_at) {
+    return json({ received: true, already: "granted" });
+  }
+  if (row.status === "paid" && !row.granted_at) {
+    console.warn("billing-webhook: payment", orderId, "is paid but ungranted — retrying the grant");
+    const { error: retryErr } = await admin
+      .rpc("grant_plan_from_payment", { p_payment_id: row.id });
+    if (retryErr) {
+      console.error("PAYMENT TAKEN BUT PLAN NOT GRANTED", orderId, retryErr.message);
+      return json({ error: "grant failed" }, 500);   // 500 → Cashfree retries → we get here again
+    }
+    return json({ received: true, recovered: true });
   }
 
   const isSuccess = /PAYMENT_SUCCESS/i.test(type) || payment?.payment_status === "SUCCESS";

@@ -6,7 +6,7 @@ import { IndustryTool } from "../components/IndustryTool";
 import type { Activity, Lead } from "../lib/types";
 
 export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string) => void }) {
-  const { org, ui, stages, fields, profile } = useApp();
+  const { org, ui, stages, fields, profile, isAdmin } = useApp();
   const [lead, setLead] = useState<Lead | null>(null);
   const [acts, setActs] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -25,12 +25,19 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [emSending, setEmSending] = useState(false);
   const toast = useToast();
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     const [l, a] = await Promise.all([
       supabase.from("leads").select("*").eq("id", id).single(),
       supabase.from("activities").select("*").eq("lead_id", id).order("created_at", { ascending: false }).limit(100),
     ]);
+    // PGRST116 is "no rows" — a genuinely missing record. Anything else is a
+    // failure, and rendering "Not found." for it tells someone their customer
+    // record has been deleted when the network simply hiccuped.
+    if (l.error && l.error.code !== "PGRST116") setLoadError(l.error.message);
+    else setLoadError(null);
     setLead((l.data as Lead) ?? null);
     setActs((a.data as Activity[]) ?? []);
     setLoading(false);
@@ -112,7 +119,11 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
       org_id: org.id, lead_id: lead.id, user_id: profile?.id ?? null, type, content,
     });
     if (error) { toast.error(error.message); return; }
-    await supabase.from("leads").update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id);
+    // "Last contacted" drives the follow-up queue, so a silent failure here
+    // means someone gets chased twice or not at all.
+    const { error: touchErr } = await supabase.from("leads")
+      .update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id);
+    if (touchErr) console.warn("could not update last_contacted_at:", touchErr.message);
     await load();
   };
 
@@ -161,6 +172,24 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (error) { setLead({ ...lead, tags }); toast.error(error.message); }
   };
 
+  const archive = async () => {
+    if (!lead) return;
+    // Soft delete, not a hard one: archive_lead sets deleted_at, RLS hides the
+    // record, and purge_archived removes it for real after 30 days. Until now
+    // the whole mechanism existed in SQL with zero callers — and the product
+    // had no way to remove a record at all, which for a CRM is not a missing
+    // nicety. A wrong number typed into a form stayed forever.
+    if (!confirm(
+      `Archive ${lead.name}?\n\nThe record is hidden immediately and permanently deleted after 30 days. ` +
+      `An admin can restore it before then.`
+    )) return;
+    const { data, error } = await supabase.rpc("archive_lead", { p_lead_id: lead.id });
+    if (error) { toast.error(error.message); return; }
+    if (data && data.ok === false) { toast.error(String(data.reason ?? "Could not archive")); return; }
+    toast.show("Archived — restorable for 30 days");
+    navigate("/leads");
+  };
+
   const addNote = async () => {
     if (!note.trim()) return;
     await log("note", note.trim());
@@ -168,6 +197,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   };
 
   if (loading) return <Spinner />;
+  if (loadError) {
+    return (
+      <Card>
+        <p style={{ marginBottom: 10 }}>Could not load this record.</p>
+        <p className="sub" style={{ marginBottom: 12 }}>{loadError}</p>
+        <button className="btn btn-primary" onClick={() => void load()}>Try again</button>
+      </Card>
+    );
+  }
   if (!lead) return <Card><p>Not found.</p></Card>;
 
   const stageKey = lead.stage_key ?? lead.stage;
@@ -365,6 +403,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
             </a>
           )}
           {lead.email && <a className="btn btn-sm" href={`mailto:${lead.email}`}>✉️ Email</a>}
+          {isAdmin && (
+            <button
+              className="btn btn-sm btn-danger"
+              onClick={() => void archive()}
+              title="Hide this record; permanently deleted after 30 days"
+            >
+              🗄 Archive
+            </button>
+          )}
         </div>
       </div>
 
@@ -375,8 +422,17 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
               key={a.key}
               className="btn btn-sm"
               onClick={async () => {
+                // Both, not either. `else if` meant an action carrying BOTH a
+                // stage and an activity type silently dropped the activity —
+                // so "Book appointment" moved the card and logged no meeting,
+                // and six actions labelled "Send proposal" / "Send quote" /
+                // "Send itinerary" moved a card while sending nothing and
+                // logging nothing. A law firm would believe a proposal had gone
+                // out. These are still not *sending* anything — that needs the
+                // Email button above — but they now leave a truthful trace.
                 if (a.toStage) await moveStage(a.toStage);
-                else if (a.logAs) { await log(a.logAs, `${a.label} logged.`); toast.show(a.label); }
+                if (a.logAs) await log(a.logAs, `${a.label}.`);
+                if (a.toStage || a.logAs) toast.show(a.label);
               }}
             >
               {a.icon} {a.label}

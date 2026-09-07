@@ -4,7 +4,7 @@ import {
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { useApp, useLeads } from "../lib/store";
-import { Card, Empty, Spinner, useToast } from "../components/ui";
+import { Card, Empty, Spinner, useToast , LoadError } from "../components/ui";
 import type { Lead, Profile } from "../lib/types";
 import { supabase } from "../lib/supabase";
 import { useEffect } from "react";
@@ -22,7 +22,7 @@ const RANGES = [
 
 export function Reports() {
   const { org, ui, stages } = useApp();
-  const { leads, loading } = useLeads(org?.id);
+  const { leads, loading, error, reload, truncated } = useLeads(org?.id);
   const [range, setRange] = useState<string>("90");
   const [team, setTeam] = useState<Profile[]>([]);
   const toast = useToast();
@@ -196,8 +196,15 @@ export function Reports() {
       const a = document.createElement("a");
       a.href = url;
       a.download = `${org?.slug ?? "leads"}-${new Date().toISOString().slice(0, 10)}.csv`;
+      // Both of these matter, and I got both wrong first time. Firefox will not
+      // action a click on an anchor that is not in the document, and revoking
+      // the object URL synchronously after click() races the browser's own
+      // fetch of it — Safari loses the download. Append, click, then revoke on
+      // a later tick. The toast said "Exported N rows" either way.
+      a.style.display = "none";
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
 
       toast.show(
         notesFailed
@@ -211,11 +218,39 @@ export function Reports() {
 
   if (loading) return <Spinner />;
 
+
+  // An unread error here told the customer they have no records. store.tsx
+
+  // documents that exact failure — "a customer with 4,000 records being told,
+
+  // convincingly, that they have none" — and this screen ignored it anyway.
+
+  if (error) return <LoadError message={error} onRetry={reload} />;
+
   const accent = ui.accent ?? "#b45309";
   const PIE = [accent, "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ef4444", "#78716c"];
 
   return (
     <div className="stack">
+
+
+    {/* The page limit is 2,000 records but the Business plan sells 50,000.
+
+        Without this, these charts and this export silently describe only the newest 2,000 and
+
+        look complete. */}
+
+    {truncated && (
+
+      <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
+
+        <b>Showing your 2,000 most recent records.</b>{" "}
+
+        <span className="sub">You have more than that, so these charts and this export cover only these. Narrow the date range, or export in batches.</span>
+
+      </div>
+
+    )}
       <div className="row">
         <div>
           <h1>Reports</h1>

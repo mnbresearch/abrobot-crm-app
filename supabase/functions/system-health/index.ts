@@ -21,7 +21,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
 
-import { requireCronSecret } from "../_shared/cron-auth.ts";
+import { requireCronOrMember } from "../_shared/cron-auth.ts";
+import { fetchWithTimeout } from "../_shared/http.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -56,7 +57,7 @@ async function checkAi(orgId: string): Promise<Check> {
 
   const model = cfg?.model || "openai/gpt-oss-120b";
   try {
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const r = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       // Smallest possible real call — this must prove the model answers, not
@@ -180,12 +181,36 @@ async function checkSecurity(orgId: string): Promise<Check> {
   };
 }
 
+
+// The cron-death detector only works if something actually reports in.
+// record_heartbeat() shipped with zero callers, so job_heartbeats stayed at
+// "never reported" and stale_jobs() flagged every job stale forever — the
+// monitoring was itself the thing that was broken.
+async function heartbeat(status: string, detail?: string) {
+  try {
+    await supabase.rpc("record_heartbeat", {
+      p_job: "system-health", p_status: status, p_detail: detail ?? null,
+    });
+  } catch (e) {
+    // Never let reporting health break the work whose health is reported.
+    console.warn("heartbeat failed:", (e as Error).message);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
   // Scheduled endpoint. Deployed --no-verify-jwt because pg_cron carries no
   // Supabase JWT, so a shared secret is the boundary. See _shared/cron-auth.ts.
-  const cronAuth = requireCronSecret(req, CORS);
+  // requireCronOrMember, not requireCronSecret. The HealthCard on the dashboard
+  // fetches this from the browser, which carries a user JWT and cannot carry a
+  // server-side secret — so the card that exists specifically so a three-day
+  // silent outage never repeats was rendering nothing, under all conditions,
+  // and "nothing" looks exactly like "healthy".
+  //
+  // run-automations and summarize-chats were converted when this same
+  // regression was found there; this one was missed.
+  const cronAuth = await requireCronOrMember(req, CORS, supabase);
   if (!cronAuth.ok) return cronAuth.response!;
 
   const url = new URL(req.url);
@@ -230,5 +255,6 @@ Deno.serve(async (req) => {
     ? "fail"
     : results.some((r) => (r as { status: Level }).status === "warn") ? "warn" : "ok";
 
+  await heartbeat(overall === "ok" ? "ok" : "warn", `overall ${overall}`);
   return json({ ok: true, status: overall, checked_at: new Date().toISOString(), orgs: results });
 });
