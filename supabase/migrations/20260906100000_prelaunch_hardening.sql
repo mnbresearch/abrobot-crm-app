@@ -354,37 +354,6 @@ select cron.unschedule('reconcile-webhooks')
 select cron.schedule('reconcile-webhooks', '*/5 * * * *',
   $$select public.reconcile_webhook_deliveries();$$);
 
--- ── Verify ──────────────────────────────────────────────────────────────────
--- Expect every row PASS.
-select 'fire_webhooks wrapped in notify_lead_change' as check,
-       case when (select prosrc from pg_proc where oid = 'public.notify_lead_change()'::regprocedure)
-                 ~ 'begin\s+perform public\.fire_webhooks'
-            then 'PASS' else 'FAIL — a webhook error can still abort lead capture' end as result
-union all
-select 'anon cannot read another org''s plan',
-       case when has_function_privilege('anon', 'public.plan_of(uuid)', 'EXECUTE')
-            then 'FAIL' else 'PASS' end
-union all
-select 'authenticated cannot read platform job status',
-       case when has_function_privilege('authenticated', 'public.stale_jobs()', 'EXECUTE')
-            then 'FAIL' else 'PASS' end
-union all
-select 'authenticated cannot read every tenant''s HTTP results',
-       case when has_function_privilege('authenticated', 'public.recent_cron_failures(integer)', 'EXECUTE')
-            then 'FAIL' else 'PASS' end
-union all
-select 'usage_snapshot reports the email allowance',
-       case when (public.usage_snapshot((select id from public.organizations order by created_at limit 1))
-                  ? 'emails')
-            then 'PASS' else 'FAIL' end
-union all
-select 'webhook reconciler is scheduled',
-       case when exists (select 1 from cron.job where jobname = 'reconcile-webhooks')
-            then 'PASS' else 'FAIL' end
-union all
-select 'reconciler runs',
-       case when public.reconcile_webhook_deliveries() >= 0 then 'PASS' else 'FAIL' end;
-
 -- ════════════════════════════════════════════════════════════════════════════
 -- 6. Rate-limit the one endpoint that has to stay open
 -- ════════════════════════════════════════════════════════════════════════════
@@ -451,3 +420,48 @@ revoke all on function public.hit_rate_limit(text, integer, integer) from public
 
 comment on function public.hit_rate_limit(text, integer, integer) is
   'Fixed-window counter. Used by chat-agent, which cannot authenticate its callers because it serves a public website widget.';
+
+-- ── Verify ──────────────────────────────────────────────────────────────────
+-- Expect every row PASS.
+select 'fire_webhooks wrapped in notify_lead_change' as check,
+       case when (select prosrc from pg_proc where oid = 'public.notify_lead_change()'::regprocedure)
+                 ~ 'begin\s+perform public\.fire_webhooks'
+            then 'PASS' else 'FAIL — a webhook error can still abort lead capture' end as result
+union all
+select 'anon cannot read another org''s plan',
+       case when has_function_privilege('anon', 'public.plan_of(uuid)', 'EXECUTE')
+            then 'FAIL' else 'PASS' end
+union all
+select 'authenticated cannot read platform job status',
+       case when has_function_privilege('authenticated', 'public.stale_jobs()', 'EXECUTE')
+            then 'FAIL' else 'PASS' end
+union all
+select 'authenticated cannot read every tenant''s HTTP results',
+       case when has_function_privilege('authenticated', 'public.recent_cron_failures(integer)', 'EXECUTE')
+            then 'FAIL' else 'PASS' end
+union all
+select 'usage_snapshot reports the email allowance',
+       -- Reads the function's SOURCE rather than calling it. usage_snapshot
+       -- raises 'not authorised' unless the caller is a super-admin or a member
+       -- of the org — and in the SQL editor you are `postgres`, where
+       -- auth.uid() is null. Calling it here is a guaranteed failure of the
+       -- check rather than of the thing being checked.
+       case when (select prosrc from pg_proc
+                   where oid = 'public.usage_snapshot(uuid)'::regprocedure) like '%''emails''%'
+            then 'PASS' else 'FAIL — the email meter is missing from the snapshot' end
+union all
+select 'webhook reconciler is scheduled',
+       case when exists (select 1 from cron.job where jobname = 'reconcile-webhooks')
+            then 'PASS' else 'FAIL' end
+union all
+select 'reconciler runs',
+       case when public.reconcile_webhook_deliveries() >= 0 then 'PASS' else 'FAIL' end
+union all
+select 'rate limiter exists',
+       case when to_regprocedure('public.hit_rate_limit(text, integer, integer)') is not null
+            then 'PASS' else 'FAIL — chat-agent calls this; without it there is no limit' end
+union all
+select 'rate limiter counts',
+       case when (public.hit_rate_limit('selftest', 1000, 60) ->> 'allowed')::boolean
+            then 'PASS' else 'FAIL' end;
+
