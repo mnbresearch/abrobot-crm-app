@@ -21,8 +21,9 @@ interface UsageSnapshot {
   plan: string; purchased_plan: string; label: string; period: string;
   is_expired: boolean; access_until: string | null; days_left: number | null;
   ai_messages: UsageMetric; leads: UsageMetric; emails: UsageMetric;
+  whatsapp_messages: UsageMetric;
   seats: UsageMetric; automations: UsageMetric;
-  whatsapp: boolean;
+  whatsapp: boolean; api_access: boolean; not_activated: boolean;
 }
 
 function UsageTab() {
@@ -82,6 +83,22 @@ function UsageTab() {
 
   return (
     <div className="stack">
+      {snap.not_activated && (
+        <Card>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <span style={{ fontSize: 22 }}>🔒</span>
+            <div>
+              <div style={{ fontWeight: 700 }}>Choose a plan to switch everything on</div>
+              <p className="sub" style={{ marginTop: 4 }}>
+                Your workspace is set up and yours to explore — pipeline, fields, the AI agent's
+                settings, everything. Capturing records, AI replies and sending are off until you
+                pick a plan below. Nothing you configure now is lost.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {snap.is_expired && (
         <Card>
           <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
@@ -123,17 +140,25 @@ function UsageTab() {
           {until && !snap.is_expired && ` Access until ${until}.`}
         </p>
         <Meter label="AI chat messages" m={snap.ai_messages} />
-        {/* The tightest cap in the product — 50/month on trial — and the only
-            one whose limit is other people's deliverability rather than our
-            compute. It was enforced but shown nowhere, so the first a customer
-            knew of it was a refused send. */}
+        {/* Enforced but shown nowhere until now, so the first a customer knew
+            of the cap was a refused send. The limit exists because sending
+            reputation is shared across every tenant. */}
         {snap.emails && <Meter label="Emails sent" m={snap.emails} />}
+        {/* Metered because Meta bills per message, and a marketing template
+            costs about seven times a service one. Without a visible number,
+            the first a customer knows about the cap is a refused send. */}
+        {snap.whatsapp && snap.whatsapp_messages && (
+          <Meter label="WhatsApp messages" m={snap.whatsapp_messages} />
+        )}
         <Meter label="Records" m={snap.leads} />
         <Meter label="Active team members" m={snap.seats} />
         <Meter label="Active automations" m={snap.automations} />
         <div className="row" style={{ marginTop: 4 }}>
           <span className={snap.whatsapp ? "pill pill-green" : "pill pill-muted"}>
             {snap.whatsapp ? "✓ WhatsApp included" : "WhatsApp not on this plan"}
+          </span>
+          <span className={snap.api_access ? "pill pill-green" : "pill pill-muted"}>
+            {snap.api_access ? "✓ API & webhooks" : "API not on this plan"}
           </span>
         </div>
       </Card>

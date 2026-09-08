@@ -37,6 +37,9 @@ Then run these migrations in the SQL editor, in this order:
 | 5 | `20260905130000_tenant_nurture.sql` | follow-up sequence becomes the tenant's own content, opt-in |
 | 6 | `20260905140000_email_limits.sql` | monthly email allowance per plan, metered like AI replies |
 | 7 | `20260906080000_fix_pgcrypto_search_path.sql` | lets the API and webhook functions find pgcrypto |
+| 8 | `20260906100000_prelaunch_hardening.sql` | webhook cannot kill lead capture; anon locked out; reconciler |
+| 9 | `20260908090000_pricing_reset.sql` | no trial, ₹999 entry, WhatsApp capped and metered |
+| 10 | `20260908100000_super_admin.sql` | platform owner reach, plan control, audit trail |
 
 `--no-verify-jwt` on `api` is correct: callers authenticate with an AbroBot API
 key, not a Supabase JWT. The key check *is* the authentication. `send-campaign`

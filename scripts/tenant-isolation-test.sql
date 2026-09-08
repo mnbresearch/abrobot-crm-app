@@ -70,7 +70,10 @@ begin
 
   insert into public.organizations
     (name, slug, active, plan, trial_started_at, trial_days, credits_total, credits_used)
-  values ('Isolation Probe', 'zz-isolation-probe', true, 'trial', now(), 7, 0, 0)
+  -- 'free' since the pricing reset removed the trial plan. There is no FK on
+  -- organizations.plan, so 'trial' would still have inserted — it would just
+  -- have been a value nothing recognises.
+  values ('Isolation Probe', 'zz-isolation-probe', true, 'free', now(), 0, 0, 0)
   returning id into v_org;
 
   -- A trigger on auth.users may already have made the profile row.

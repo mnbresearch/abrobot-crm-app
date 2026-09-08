@@ -53,6 +53,13 @@ const EVENTS = [
   { id: "lead.stage_changed", label: "A record moves stage" },
 ];
 
+// Sends the admin to the plan screen. Settings honours ?tab=, so this lands on
+// Plan & usage rather than the Industry tab.
+function navigateToPlan() {
+  window.history.pushState({}, "", "/settings?tab=usage");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
 export function Integrations() {
   const { org, isAdmin, ui } = useApp();
   const toast = useToast();
@@ -74,6 +81,10 @@ export function Integrations() {
 
   // Channels
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
+  // The API and webhooks are a Business-plan feature. The server enforces it
+  // (api/index.ts returns 402), but offering a "Create key" button that always
+  // fails is the kind of dead end this screen exists to remove.
+  const [apiAccess, setApiAccess] = useState<boolean | null>(null);
   const [waToken, setWaToken] = useState("");
   const [waPhoneId, setWaPhoneId] = useState("");
   const [waNumber, setWaNumber] = useState("");
@@ -105,6 +116,10 @@ export function Integrations() {
     try {
       const s = await callFunction<IntegrationStatus>("save-integration", { action: "status" });
       setStatus(s);
+      if (org) {
+        const { data: snap } = await supabase.rpc("usage_snapshot", { p_org_id: org.id });
+        setApiAccess((snap as { api_access?: boolean } | null)?.api_access ?? null);
+      }
       if (s?.whatsapp?.display_number) setWaNumber(s.whatsapp.display_number);
     } catch {
       // Channel config is optional; a failure here must not blank the rest of
@@ -460,6 +475,22 @@ export function Integrations() {
       </Card>
 
       {/* ── API keys ──────────────────────────────────────────────────────── */}
+      {/* The server returns 402 for a key on a plan without API access, so
+          offering the button anyway would be a dead end — the exact thing this
+          screen was built to remove. Say what it costs instead. */}
+      {apiAccess === false && (
+        <Card title="API keys & webhooks">
+          <p className="sub" style={{ marginTop: -8 }}>
+            Included on the <b>Business</b> plan and above. The REST API lets your own systems read
+            and push records; outbound webhooks tell you the moment anything changes.
+          </p>
+          <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={navigateToPlan}>
+            See plans →
+          </button>
+        </Card>
+      )}
+
+      {apiAccess !== false && (
       <Card title="API keys">
         <p className="sub" style={{ marginTop: -8 }}>
           For reading and writing records from your own systems. Base URL{" "}
@@ -514,6 +545,7 @@ export function Integrations() {
           </div>
         )}
       </Card>
+      )}
 
       {/* ── Inbound capture ───────────────────────────────────────────────── */}
       <Card title={`Capture URLs — send ${ui.leadNounPlural.toLowerCase()} in`}>
@@ -563,6 +595,7 @@ export function Integrations() {
       </Card>
 
       {/* ── Outbound ──────────────────────────────────────────────────────── */}
+      {apiAccess !== false && (
       <Card title="Outbound webhooks — get notified when things happen">
         <p className="sub" style={{ marginTop: -8 }}>
           We POST to your URL when a record is created or moves stage, so your own systems
@@ -625,6 +658,7 @@ export function Integrations() {
           the signature is the only thing distinguishing us from anyone who guessed your URL.
         </p>
       </Card>
+      )}
 
       {toast.node}
     </div>

@@ -61,13 +61,30 @@ Deno.serve(async (req) => {
   // real per-conversation cost from Meta, so it is the one limit where "shown
   // in the pricing table but never checked" costs money twice: margin on the
   // sends, and the reason anyone upgrades.
-  const { data: allowed } = await admin.rpc("plan_allows_whatsapp", { p_org_id: profile.org_id });
-  if (allowed !== true) {
+  // Two distinct refusals, because they need different messages: "your plan
+  // does not include WhatsApp" is an upsell, "you have used this month's
+  // WhatsApp allowance" is not.
+  const { data: wa, error: waErr } = await admin.rpc("whatsapp_allowance", { p_org_id: profile.org_id });
+  if (waErr) {
+    // Fail CLOSED. Meta bills us per message and marketing templates cost 7x a
+    // utility one, so "we could not check the allowance" must never mean "send
+    // it anyway".
+    console.error("whatsapp-send: allowance check failed:", waErr.message);
+    return json({ error: "Could not check your WhatsApp allowance. Nothing was sent." }, 503);
+  }
+  if (!wa?.included) {
     return json({
       error: "WhatsApp is not included on your current plan",
       code: "PLAN_UPGRADE_REQUIRED",
       upgrade_to: "growth",
     }, 402); // Payment Required — the honest status for this
+  }
+  if (wa.remaining !== null && wa.remaining <= 0) {
+    return json({
+      error: `You have used this month's WhatsApp allowance (${wa.limit} messages). It resets on the 1st.`,
+      code: "WHATSAPP_LIMIT_REACHED",
+      used: wa.used, limit: wa.limit,
+    }, 402);
   }
 
   const cfg = await getWhatsAppConfig(admin, profile.org_id);
@@ -77,6 +94,12 @@ Deno.serve(async (req) => {
     const status = result.reason === "not_configured" ? 503 : 502;
     return json({ ok: false, error: result.detail ?? result.reason }, status);
   }
+
+  // Meter AFTER a confirmed send. Counting attempts would bill a customer for
+  // Meta's rejections, which is the wrong side to err on.
+  await admin.rpc("consume_usage", {
+    p_org_id: profile.org_id, p_metric: "whatsapp_messages", p_amount: 1,
+  });
 
   await admin.from("activities").insert({
     org_id: profile.org_id, lead_id: lead.id, user_id: userData.user.id,

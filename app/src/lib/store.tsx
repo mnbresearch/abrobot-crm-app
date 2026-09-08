@@ -17,6 +17,7 @@ interface AppState {
   industries: IndustryRow[];
   ui: IndustryUi;
   isAdmin: boolean;
+  isSuperAdmin: boolean;
   needsOnboarding: boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -94,6 +95,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     industries,
     ui,
     isAdmin: profile?.role === "org_admin" || profile?.role === "super_admin",
+    // The platform owner, not a tenant's admin. Gates the Admin console, which
+    // reaches across every organisation — so it is deliberately a separate
+    // flag rather than another thing isAdmin happens to imply.
+    isSuperAdmin: profile?.role === "super_admin",
     // A brand-new org has no stages until a pack is applied — that is the
     // signal to show the industry picker.
     needsOnboarding: !!profile?.org_id && stages.length === 0,

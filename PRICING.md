@@ -1,194 +1,136 @@
-# Does the business model work?
+# Pricing — and why the limits are what they are
 
-Answering the question directly: **yes, the pricing works. The enforcement did not.**
+Updated 8 September 2026. There is no free trial. **₹999 Starter is the front
+door**: sign up free, set everything up, pay to switch it on.
 
-Written 28 Aug 2026, after auditing what the code actually does versus what the
-pricing page promises.
+| | Starter | Growth | Business | Enterprise |
+|---|---|---|---|---|
+| **Price / month** | **₹999** | ₹2,499 | ₹4,999 | Custom |
+| Users | 3 | 10 | 30 | Unlimited |
+| Records | 1,000 | 10,000 | 50,000 | Unlimited |
+| AI replies / mo | 1,000 | 5,000 | 10,000 | Unlimited |
+| Emails / mo | 300 | 3,000 | 6,000 | Unlimited |
+| **WhatsApp / mo** | — | **1,500** | **3,000** | Unlimited |
+| Automations | 3 | 25 | 100 | Unlimited |
+| **REST API + webhooks** | — | — | **✓** | ✓ |
+
+Before paying, an organisation sits on `free`: read-only. They can configure
+the pipeline, fields and AI agent and look at everything. Capture, AI, email
+and WhatsApp are off. Nothing they set up is lost when they pay.
 
 ---
 
-## 1. The thing worth correcting first
+## The hole this closed
 
-The worry was that generous teammate limits dilute what we charge. That reads
-the cost structure backwards.
+`plan_limits.whatsapp` was a **boolean**. Growth and Business granted WhatsApp
+with no volume cap and nothing metered it.
 
-**Seats do not cost us money.** Ten users and three users hit the same
-database, the same edge functions, the same Postgres. The marginal cost of the
-tenth seat is effectively zero.
+Meta bills per message in India, and a **marketing template costs about seven
+times a service one** — ₹1.04 against ₹0.15, both including GST. So:
 
-What *does* cost money, per unit, is:
+- **2,407 marketing messages consumed an entire ₹2,499 Growth subscription.**
+  Every message after that was a loss, and nothing in the system noticed.
+- Modelled at the old limits, Business came out at **−39% margin**.
 
-| Driver | Real cost | Who pays it |
+One enthusiastic customer could cost more than they paid. `max_whatsapp` now
+exists, is metered through the same `consume_usage` path as AI replies and
+email, and both the manual send and the unattended autoreply respect it.
+
+---
+
+## Unit costs (September 2026, INR, incl. 18% GST)
+
+| Item | Cost | Source |
 |---|---|---|
-| AI chat messages | ~₹0.03 each (Groq, ~1,250 tokens) | us |
-| WhatsApp conversations | ~₹0.80 each (Meta) | us |
-| Email sends | ~₹0.27 each (Resend) | us |
-| Seats | ₹0 | nobody |
+| AI reply (Groq `gpt-oss-120b`, ~1,200 in / 350 out) | ₹0.040 | $0.15/M in, $0.60/M out |
+| Email (Resend) | ₹0.042 | $20 per 50,000 |
+| WhatsApp service/utility template | ₹0.15 | Meta India ₹0.13 |
+| WhatsApp **marketing** template | ₹1.04 | Meta India ₹0.88 |
+| Payment gateway | 2.30% of price | Cashfree 1.95% + GST |
+| Supabase Pro | ₹2,200/mo total | shared across all customers |
 
-So seats are a **value metric**, not a cost driver — a bigger team gets more
-value from the CRM, so a bigger team pays more. That is a good reason to cap
-them, and they were already capped at 3 / 10 / 30 and correctly enforced.
+Two things that change soon and are worth watching:
 
-Seats were never the leak. Three other things were.
-
----
-
-## 2. Margins
-
-Assuming an org uses ~80% of its allowance (heavy users; most use far less):
-
-| Plan | Price | AI | WhatsApp | Email | Variable cost | Margin | % |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Starter | ₹999 | ₹30 | ₹0 | ₹5 | ₹36 | **₹963** | 96% |
-| Growth | ₹2,499 | ₹152 | ₹240 | ₹54 | ₹446 | **₹2,053** | 82% |
-| Business | ₹4,999 | ₹607 | ₹640 | ₹270 | ₹1,517 | **₹3,482** | 70% |
-
-Fixed infrastructure is ~₹3,960/month (Supabase Pro + Resend). **Break-even is
-four Starter customers, or two Growth.**
-
-Margins decline as customers move up, which is the correct shape — the bigger
-plans are the ones actually consuming. Nothing here is priced below cost even
-if a customer maxes out every allowance.
-
-**The pricing is not the problem.**
+- **From 1 October 2026 Meta charges for _service_ messages too**, at the
+  utility rate. Inbound-reply traffic stops being free. The caps above already
+  assume it.
+- India moved to local-currency billing in January 2026 and the marketing rate
+  rose about 10%. Expect that to continue.
 
 ---
 
-## 3. What the audit actually found
+## Margins
 
-| Limit | Sold as | Was it enforced? |
-|---|---|---|
-| Seats | 3 / 10 / 30 | ✅ Yes |
-| AI messages | 1k / 5k / 20k per month | ✅ Yes |
-| Records | 1k / 10k / 50k | ❌ Displayed only |
-| Automations | 5 / 25 / 100 | ❌ Displayed only |
-| WhatsApp | Growth and above | ❌ **Never checked** |
-| **Subscription expiry** | monthly | ❌ **Never checked** |
-| **Trial expiry** | 7 days | ❌ **Never checked** |
+Computed, not estimated — the model is in the migration header and reproducible.
+Assumes 25 paying customers sharing Supabase Pro.
 
-The last two matter far more than the first three, and neither was on the
-original list of concerns.
+| Plan | Realistic | Worst case | Best case |
+|---|---|---|---|
+| Starter ₹999 | **84%** | 84% | 84% |
+| Growth ₹2,499 | **61%** | 19% | 72% |
+| Business ₹4,999 | **63%** | 21% | 74% |
 
-`subscriptions.current_period_end` was written by the payment webhook and read
-by nothing. `organizations.trial_started_at` likewise. There was no code
-anywhere that reduced anyone's access, ever.
+**Realistic** = 80% service/utility WhatsApp, 20% marketing. That is the mix a
+CRM produces: most traffic here is replies and reminders, not campaigns.
 
-The practical effect: **pay ₹2,499 once and hold Growth forever.** Start a
-7-day trial and it never ends. We were not selling a subscription — we were
-selling a perpetual licence at a monthly price, by accident. No customer had
-hit that yet only because the product is young.
+**Worst case** = every WhatsApp message a marketing template. The point of the
+cap is that this case is never negative. An unusual customer costs you margin,
+never money.
 
----
+Starter carries no WhatsApp at all, which is why it holds 84% whatever happens
+— and why it can be the cheap way in without being the loss leader.
 
-## 4. How it is fixed
-
-`20260821080000_enforce_plan_limits.sql`
-
-**One function decides entitlement.** `plan_of(org)` resolves what an
-organisation is entitled to *right now*, accounting for trial and subscription
-expiry. Every limit check reads it. Expiry cannot be forgotten at a call site
-because no call site computes it.
-
-`organizations.plan` is never overwritten — it keeps recording what was bought.
-Only the *effective* plan changes. A renewal therefore restores full access the
-moment the webhook lands: no repair job, no lost history.
-
-**Three days of grace.** Cards fail and UPI mandates lapse. Cutting off a
-paying customer at midnight over a failed card loses accounts that wanted to
-stay.
-
-**The expired tier is read-only, not locked-out.** Sign in, see everything,
-export it. What stops is *new* — records, AI replies, WhatsApp, automations.
-Holding a customer's own data hostage converts a lapsed account into a
-chargeback and a bad review; removing ongoing value is enough.
-
-**Record limits are deliberately asymmetric:**
-
-- **Inbound** (chat widget, webhook) — accepted over the limit, always.
-- **Deliberate** (manual add, CSV import) — blocked, with a message.
-
-An inbound record is a real person who just messaged our customer. Dropping it
-means our customer loses business and blames the CRM. That loses the account;
-it does not upsell it. Upgrade pressure comes from the blocked bulk paths and
-the meter, not from binning enquiries.
-
-**Warning before cut-off.** Settings shows a banner from seven days out.
-Someone who learns they lapsed by watching a send fail files a support ticket;
-someone who saw it coming renews.
+Margins improve with scale: the only fixed cost is Supabase Pro, so at 100
+customers Starter is 90%.
 
 ---
 
-## 5. Bugs found while doing this
+## Where each limit came from
 
-Four, all pre-existing:
-
-1. **`consume_usage` was callable by anyone, anonymously**, with any `org_id`.
-   A stranger with a browser could burn a paying customer's monthly AI
-   allowance to zero. Now revoked from `public`, `anon` and `authenticated`.
-
-2. **`usage_snapshot` read the purchased plan**, so a lapsed org's Settings page
-   would have cheerfully reported "5,000 AI messages" while the server refused
-   at zero.
-
-3. **`plan_of` failed open.** There is no foreign key from
-   `organizations.plan` to `plan_limits.plan`, so a single typo would have
-   produced a NULL limit — which every guard reads as *unlimited*. Now falls
-   back to trial.
-
-4. **`app-signup` inserted `source: "app"`**, which is not a member of the
-   `lead_source` enum. Every insert failed with 22P02, the error was discarded,
-   and the endpoint returned `ok: true` while recording nothing. **Signups from
-   app.abrobot.ai have been dropping on the floor.** Fixed to `"other"`, and
-   the error is now surfaced rather than swallowed.
-
-Bug 4 is the same silent-write-failure pattern found three times before in this
-codebase. It is worth a dedicated pass over every `.insert(` and `.update(`
-that ignores its error.
+- **Starter has no WhatsApp.** Not a downsell — it is the single line that keeps
+  a ₹999 plan profitable under every usage pattern. It is also the clearest
+  reason to move to Growth.
+- **Emails are capped low on Starter (300).** Sending reputation is shared
+  across every tenant: one account sending badly hurts everyone else's
+  deliverability. This is the limit that protects other customers, not us.
+- **API is Business-only.** It costs almost nothing to serve, which makes it
+  the right thing to reserve for the tier that pays most — high perceived
+  value, near-zero marginal cost.
+- **AI replies are generous** because they are genuinely cheap (₹0.04). 5,000
+  replies costs ₹202. This is the feature to be liberal with.
+- **Business AI dropped from 20,000 to 10,000.** At 20,000 the plan modelled at
+  53% even before WhatsApp. Nobody was using 20,000, and it was never
+  advertised as unlimited.
 
 ---
 
-## 6. Honest read on direction
+## Things to revisit
 
-**What is working:** margins are healthy at every tier. The value metric
-(seats) is the right one — it scales with how much the customer gets, not with
-what they cost us. The AI allowance, which is the true variable cost, was
-already enforced atomically.
-
-**What to watch:**
-
-- **₹999 with no WhatsApp is a hard sell in India.** WhatsApp is how Indian
-  businesses talk to customers. Starter may need a small WhatsApp allowance —
-  say 100 conversations — to stop being a plan nobody picks. Worth watching
-  the conversion split before changing anything.
-- **Multiple free trials via multiple emails.** One org per account is
-  enforced, but one *person* can hold several accounts. Not worth solving
-  until it is observed.
-- **Annual is priced at 10× monthly** ("2 months free"). That is a 17%
-  discount for a 12× cash-flow improvement — good, and worth pushing harder in
-  the UI than it currently is.
-
-**Before selling into healthcare or legal:** terms, privacy policy and a DPA.
-Not optional in those verticals, and not written yet.
+1. **The gateway is free until 31 March 2027.** Cashfree waives the platform
+   fee for new merchants up to ₹20 lakh GMV. The margins above ignore that, so
+   real margins are ~2.3 points better until it ends — do not build the plan
+   around a discount with an expiry date.
+2. **Marketing templates should probably be an add-on.** Right now a customer
+   can spend their whole WhatsApp allowance on marketing at 7× the cost. The
+   cap makes that survivable, not optimal. Metering by *category* would let
+   Growth include 1,500 utility and sell marketing separately.
+3. **Nothing charges for overage.** At the cap the feature stops. That is the
+   honest default, but "buy 1,000 more" is money left on the table.
+4. **Supabase Pro is still not on.** These numbers assume ₹2,200/mo for it.
+   On the free tier the margins are better and the risk is a paused project.
 
 ---
 
-## Verify after applying
+## Verifying any of this
 
 ```sql
--- Who is live, who has lapsed
-select o.name, o.plan as purchased, effective_plan(o.id) as effective,
-       s.current_period_end
-  from organizations o left join subscriptions s on s.org_id = o.id
- order by 3, 1;
+select plan, label, price_inr, max_seats, max_leads, max_ai_messages,
+       max_emails, max_whatsapp, whatsapp, api_access
+  from plan_limits order by position;
 ```
 
-Expiry (rolls back, safe to run):
+The margin model lives in the header of
+`supabase/migrations/20260908090000_pricing_reset.sql`, with every input named
+so the arithmetic can be re-run when Meta or Groq change their rates.
 
-```sql
-begin;
-  update subscriptions set current_period_end = now() - interval '30 days'
-   where org_id = '<org>';
-  select effective_plan('<org>');         -- expect: expired
-  select plan_allows_whatsapp('<org>');   -- expect: false
-rollback;
-```
+Sources: [Meta WhatsApp Business pricing](https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing) · [WhatsApp API pricing India 2026](https://myoperator.com/blog/whatsapp-business-api-pricing-india-2026) · [Groq pricing](https://www.cloudzero.com/blog/groq-pricing/) · [Cashfree charges](https://www.cashfree.com/payment-gateway-charges/)

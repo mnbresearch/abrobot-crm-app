@@ -16,7 +16,7 @@ interface Item {
 }
 
 export function CommandPalette({ navigate }: { navigate: (to: string) => void }) {
-  const { org, ui, isAdmin } = useApp();
+  const { org, ui, isAdmin, isSuperAdmin } = useApp();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [results, setResults] = useState<Lead[]>([]);
@@ -79,10 +79,17 @@ export function CommandPalette({ navigate }: { navigate: (to: string) => void })
       go("/team", "Team", "🧑‍🤝‍🧑"),
     ];
     if (isAdmin) {
-      items.push(go("/automations", "Automations", "⚡"), go("/import", "Import", "📥"), go("/settings", "Settings", "⚙️"));
+      items.push(
+        go("/automations", "Automations", "⚡"), go("/import", "Import", "📥"),
+        go("/archived", "Archived", "🗄"), go("/integrations", "Integrations", "🔌"),
+        go("/settings", "Settings", "⚙️"),
+      );
     }
+    // The platform console, for the owner only — the palette is the fastest way
+    // in and it was the one route it did not know about.
+    if (isSuperAdmin) items.push(go("/admin", "Platform admin", "🛠"));
     return items;
-  }, [navigate, ui.leadNounPlural, isAdmin]);
+  }, [navigate, ui.leadNounPlural, isAdmin, isSuperAdmin]);
 
   const filteredNav = useMemo(() => {
     const term = q.trim().toLowerCase();

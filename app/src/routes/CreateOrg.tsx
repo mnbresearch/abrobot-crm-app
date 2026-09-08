@@ -154,7 +154,10 @@ export function CreateOrg({ onDone }: { onDone: () => void }) {
       </div>
 
       <p className="sub" style={{ textAlign: "center", marginTop: 18, fontSize: 12.5 }}>
-        Starts a 7-day free trial. No card needed.{" "}
+        {/* There is no trial any more. Saying so here, before they invest any
+            setup effort, is the honest place for it — better than letting them
+            configure a pipeline and discover the paywall afterwards. */}
+        Free to set up — no card needed. Pick a plan when you're ready to start capturing.{" "}
         <button className="btn btn-ghost btn-sm" onClick={signOut}>Sign out</button>
       </p>
       {toast.node}

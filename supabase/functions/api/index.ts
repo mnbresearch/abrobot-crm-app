@@ -78,6 +78,20 @@ async function authenticate(req: Request): Promise<Auth | Response> {
     return err("Invalid or revoked API key", 401);
   }
 
+  // The key is valid — but is the API on this plan at all? Checked here rather
+  // than per route so a downgraded customer's key stops working everywhere at
+  // once, and 402 rather than 403 because this is a billing state, not a
+  // permission the holder could ever be granted.
+  const { data: apiOk, error: apiErr } = await admin.rpc("plan_allows_api", { p_org_id: row.org_id });
+  if (apiErr) {
+    console.error("plan_allows_api failed:", apiErr.message);
+    return err("Could not verify your plan", 503);
+  }
+  if (apiOk !== true) {
+    return err("The REST API is included on the Business plan and above", 402,
+      "Your key is valid — your current plan does not include API access. Upgrade in Settings → Plan & usage.");
+  }
+
   return { orgId: row.org_id, keyId: row.key_id, scopes: row.scopes ?? [] };
 }
 

@@ -2,7 +2,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
 import { scoreLead } from "../_shared/score.ts";
-import { getWhatsAppConfig, sendWhatsAppText } from "../_shared/whatsapp.ts";
+import { getWhatsAppConfig, sendWhatsAppText, type SendResult } from "../_shared/whatsapp.ts";
 import { fireEventAutomations } from "../_shared/run-actions.ts";
 import { firstStageKey } from "../_shared/stage.ts";
 
@@ -193,11 +193,16 @@ Deno.serve(async (req) => {
 
   // WhatsApp autoreply — only for inbound WhatsApp, only if the org enabled it.
   // We are inside the 24h window by definition here: they just messaged us.
-  let autoreply: unknown = undefined;
+  let autoreply: SendResult | undefined = undefined;
   if (wk.source === "whatsapp" && lead.phone) {
     // Same plan gate as whatsapp-send — the autoreply is an outbound WhatsApp
     // message and costs the same as any other, so it cannot be the back door
     // around the paid feature.
+    // plan_allows_whatsapp now means "included AND under this month's cap", so
+    // the autoreply stops on its own once the allowance is used. That matters
+    // here more than on the manual send: this fires unattended on every inbound
+    // message, so an uncapped autoreply is the fastest way to spend an entire
+    // subscription on Meta fees without anyone deciding to.
     const { data: waAllowed } = await supabase.rpc("plan_allows_whatsapp", { p_org_id: wk.org_id });
     const waCfg = await getWhatsAppConfig(supabase, wk.org_id);
     if (waAllowed === true && waCfg.whatsapp_autoreply) {
@@ -211,6 +216,12 @@ Deno.serve(async (req) => {
         `A counsellor will get back to you shortly. ` +
         `Meanwhile, feel free to tell us your target country and course.`,
       );
+      // Only a delivered autoreply counts against the allowance.
+      if (autoreply?.sent) {
+        await supabase.rpc("consume_usage", {
+          p_org_id: wk.org_id, p_metric: "whatsapp_messages", p_amount: 1,
+        });
+      }
     }
   }
 

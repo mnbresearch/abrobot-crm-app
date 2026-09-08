@@ -16,6 +16,7 @@ import { Calendar } from "./routes/Calendar";
 import { Templates } from "./routes/Templates";
 import { Import } from "./routes/Import";
 import { Archived } from "./routes/Archived";
+import { Admin } from "./routes/Admin";
 import { Automations } from "./routes/Automations";
 import { Integrations } from "./routes/Integrations";
 import { CommandPalette } from "./components/CommandPalette";
@@ -33,6 +34,10 @@ interface NavItem {
   label: string | null;   // null = use the industry's plural noun
   icon: string;
   adminOnly?: boolean;
+  // A tenant's admin is not the platform owner. Separate flag, because
+  // conflating them is how the Platform console would appear in every
+  // customer's sidebar.
+  superAdminOnly?: boolean;
   group?: string;
 }
 
@@ -51,10 +56,11 @@ const NAV: NavItem[] = [
   { path: "/archived", label: "Archived", icon: "🗄", group: "Manage", adminOnly: true },
   { path: "/integrations", label: "Integrations", icon: "🔌", group: "Manage", adminOnly: true },
   { path: "/settings", label: "Settings", icon: "⚙️", group: "Manage", adminOnly: true },
+  { path: "/admin", label: "Platform", icon: "🛠", group: "Manage", superAdminOnly: true },
 ];
 
 export default function App() {
-  const { loading, session, profile, org, ui, isAdmin, needsOnboarding, signOut, refresh } = useApp();
+  const { loading, session, profile, org, ui, isAdmin, isSuperAdmin, needsOnboarding, signOut, refresh } = useApp();
   const { path, navigate } = useRoute();
   const { theme, cycle, resolved } = useTheme();
 
@@ -71,7 +77,8 @@ export default function App() {
   if (needsOnboarding) return <Onboarding onDone={() => { void refresh(); navigate("/"); }} />;
 
   const leadParams = match("/leads/:id", path);
-  const visible = NAV.filter((n) => !n.adminOnly || isAdmin);
+  const visible = NAV.filter((n) =>
+    (!n.adminOnly || isAdmin) && (!n.superAdminOnly || isSuperAdmin));
 
   let lastGroup: string | undefined;
 
@@ -158,6 +165,7 @@ export default function App() {
           {path === "/archived" && <Archived navigate={navigate} />}
           {path === "/integrations" && <Integrations />}
           {path === "/settings" && <Settings />}
+          {path === "/admin" && <Admin />}
 
           {!isKnown(path) && (
             <div className="empty">
@@ -178,7 +186,7 @@ export default function App() {
 const KNOWN = [
   "/", "/leads", "/pipeline", "/calendar", "/conversations",
   "/templates", "/automations", "/reports", "/activity", "/team", "/import", "/archived",
-  "/integrations", "/settings",
+  "/integrations", "/settings", "/admin",
 ];
 
 function isKnown(path: string): boolean {
