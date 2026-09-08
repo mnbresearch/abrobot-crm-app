@@ -40,6 +40,7 @@ Then run these migrations in the SQL editor, in this order:
 | 8 | `20260906100000_prelaunch_hardening.sql` | webhook cannot kill lead capture; anon locked out; reconciler |
 | 9 | `20260908090000_pricing_reset.sql` | no trial, ₹999 entry, WhatsApp capped and metered |
 | 10 | `20260908100000_super_admin.sql` | platform owner reach, plan control, audit trail |
+| 11 | `20260908110000_delete_guards.sql` | no API delete path for organisations; payments and subscriptions stop cascading |
 
 `--no-verify-jwt` on `api` is correct: callers authenticate with an AbroBot API
 key, not a Supabase JWT. The key check *is* the authentication. `send-campaign`

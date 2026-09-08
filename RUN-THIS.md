@@ -1,5 +1,10 @@
 # Run this — 8 September 2026
 
+> **Status: steps 1–4 completed 8 September 2026.** Every check passed. Kept as
+> the record of what was applied and in what order; step 5 is the part that
+> remains.
+
+
 Everything outstanding, in order. Steps 1–4 take about ten minutes. Step 5 is
 the one that matters and only you can do it.
 
@@ -43,6 +48,21 @@ all — every plan change was an `UPDATE` typed by hand, with no record of who d
 it. This fixes the reach, adds the operations, and starts an audit trail.
 
 **Expect:** 8 rows, all PASS.
+
+---
+
+## Step 2b — SQL: delete guards
+
+Open `supabase/migrations/20260908110000_delete_guards.sql`, paste, Run.
+
+Removes the API-level DELETE path on organisations (`org_super_all` was
+`FOR ALL`, so the platform owner could delete a tenant over PostgREST — one
+stray request from destroying 19 tables), and stops `payments` and
+`subscriptions` cascading, because tax rules require retaining them whether or
+not the customer still exists.
+
+**Expect:** 3 PASS and a count — "17 tables" still cascade, which is 19 minus
+those two.
 
 ---
 
