@@ -1,7 +1,7 @@
 /* ============================================================
    AbroBot AI chat widget — free, fully CRM-configurable.
    Embed (before </body>):
-     <script src="https://abrobot-crm-app.pages.dev/widget.js" data-org="abrobot"></script>
+     <script src="https://crm.mnbresearch.com/widget.js" data-org="your-org-slug"></script>
    Everything (greeting, look, quick replies, colours, position, agent name)
    is controlled from the CRM → Settings → AI Agent. This script just renders it.
    ============================================================ */
@@ -44,23 +44,38 @@
 
   var API = "https://pomsltnrxvbcafwtbtlc.supabase.co/functions/v1/chat-agent";
 
-  // sensible fallbacks if the config call fails
+  // ── Fallbacks, and why none of them name a company ────────────────────────
+  //
+  // This object used to hold AbroBot's branding: "Study-abroad assistant ·
+  // online", a greeting about universities and visas, AbroBot's orange,
+  // AbroBot's logo, AbroBot's Calendly and abrobot.ai as the contact link.
+  //
+  // That was not a rare error path. boot() reads this object ONCE and bakes the
+  // colour, header, subtitle, logo and contact link straight into the DOM, and
+  // it is called by a 2500 ms timer that a Supabase cold start routinely beats.
+  // When the real config arrived a moment later it was a no-op, because
+  // `booted` was already true. So every slow first load on a customer's site —
+  // the first visitor of every quiet hour — rendered a competitor's brand, and
+  // then kept it for the life of the page.
+  //
+  // The fix is not a longer timer. It is that a default which names a specific
+  // business is wrong for every other business, so there are none. What is left
+  // is deliberately anonymous: it says nothing that could be false for anyone.
   var CFG = {
     enabled: true,
-    header_title: "AbroBot AI", header_subtitle: "Study-abroad assistant · online",
-    greeting: "Hi there! 👋 I'm the AbroBot AI assistant. Ask me anything about universities, scholarships, visas or SOPs.",
-    teaser: "Hi there 👋 I'm AbroBot AI — ask me anything!",
-    quick_replies: [
-      { label: "🎓 Universities", prompt: "Which universities suit my profile?" },
-      { label: "💰 Scholarships", prompt: "What scholarships can I get for studying abroad?" },
-      { label: "🛂 Visa help", prompt: "Can you help me with my student visa?" }
-    ],
-    cta_text: "📅 Book a free call",
-    booking_url: (s && s.getAttribute("data-booking")) || "https://calendly.com/mridulnanda2004/abrobot-meet",
-    contact_url: (s && s.getAttribute("data-contact")) || "https://www.abrobot.ai/contactus",
+    header_title: "Chat", header_subtitle: "Online",
+    greeting: "Hi 👋 How can we help?",
+    teaser: "Hi 👋 How can we help?",
+    quick_replies: [],
+    cta_text: "📅 Book a call",
+    // data-* attributes still win, so an operator can hardcode these per site.
+    // Absent them these are null, and every consumer below hides the control
+    // rather than substituting somebody else's URL.
+    booking_url: (s && s.getAttribute("data-booking")) || null,
+    contact_url: (s && s.getAttribute("data-contact")) || null,
     whatsapp: null,
-    widget_color: "#f97316", widget_position: "right",
-    logo_url: (s && s.getAttribute("data-logo")) || "https://www.abrobot.ai/web/image/website/1/logo/AbroBot"
+    widget_color: "#2f3a4a", widget_position: "right",
+    logo_url: (s && s.getAttribute("data-logo")) || null
   };
 
   function shade(hex, p) {
@@ -73,14 +88,39 @@
     } catch (e) { return hex; }
   }
 
+  // Readable text ON the accent colour.
+  //
+  // Four rules hardcoded #1a1205 — a near-black brown chosen when the default
+  // accent was orange. The default is now slate (#2f3a4a), and shade(slate,22)
+  // is about #5d6572, so dark-brown-on-dark-slate came out at roughly 2.5:1:
+  // user bubbles, the send button and the CTA chip were unreadable on every
+  // tenant who had not picked a colour. Compute it instead of assuming.
+  function onAccent(hex) {
+    try {
+      var n = parseInt(String(hex).replace("#", ""), 16);
+      // Rec. 601 luma — good enough to choose between two texts.
+      var l = (((n >> 16) & 255) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000;
+      return l > 150 ? "#14110c" : "#ffffff";
+    } catch (e) { return "#ffffff"; }
+  }
+
   var convId = null, open = false, busy = false, built = false;
 
   function boot() {
     if (built) return; built = true;
-    var C = CFG.widget_color || "#f97316";
+    var C = CFG.widget_color || "#2f3a4a";
     var GRAD = "linear-gradient(90deg," + shade(C, -8) + " 0%," + shade(C, 22) + " 50%," + C + " 100%)";
+    var FG = onAccent(shade(C, 22));
     var SIDE = CFG.widget_position === "left" ? "left" : "right";
     var LOGO = CFG.logo_url;
+    var escAttr = function (v) {
+      // logo_url is tenant-typed config interpolated into a src="..."
+      // attribute. The escaping added for the header skipped this one
+      // because esc() is defined further down, inside boot().
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    };
     var logoImg = function () {
       return LOGO ? '<img alt="chat" src="' + LOGO + '" onerror="this.onerror=null;this.replaceWith(document.createTextNode(\'\\uD83D\\uDCAC\'))"/>' : "💬";
     };
@@ -113,7 +153,7 @@
       ".abx-body{flex:1;overflow-y:auto;padding:16px;background:#0d0d10;display:flex;flex-direction:column;gap:10px}",
       ".abx-msg{max-width:85%;padding:11px 14px;border-radius:15px;font-size:14px;line-height:1.55;white-space:pre-wrap;word-wrap:break-word;animation:abxin .25s ease both}",
       ".abx-bot{background:#1a1a1f;border:1px solid #26262d;color:#e8e8ea;align-self:flex-start;border-bottom-left-radius:5px}",
-      ".abx-user{background:" + GRAD + ";color:#1a1205;font-weight:600;align-self:flex-end;border-bottom-right-radius:5px}",
+      ".abx-user{background:" + GRAD + ";color:" + FG + ";font-weight:600;align-self:flex-end;border-bottom-right-radius:5px}",
       ".abx-bot a{color:" + shade(C, 25) + ";font-weight:600}",
       ".abx-dots{align-self:flex-start;display:flex;gap:4px;padding:12px 14px;background:#1a1a1f;border:1px solid #26262d;border-radius:15px}",
       ".abx-dots i{width:7px;height:7px;border-radius:50%;background:" + C + ";animation:abxdot 1.2s infinite}",
@@ -122,41 +162,75 @@
       ".abx-foot input{flex:1;border:1px solid #2a2a31;border-radius:13px;padding:12px 14px;font-size:14px;outline:none;background:#16161a;color:#f4f4f6}",
       ".abx-foot input::placeholder{color:#6b6b74}",
       ".abx-foot input:focus{border-color:" + C + ";box-shadow:0 0 0 3px " + C + "2e}",
-      ".abx-foot button{background:" + GRAD + ";color:#1a1205;border:none;border-radius:13px;padding:0 17px;font-size:17px;font-weight:700;cursor:pointer;transition:transform .15s}",
+      ".abx-foot button{background:" + GRAD + ";color:" + FG + ";border:none;border-radius:13px;padding:0 17px;font-size:17px;font-weight:700;cursor:pointer;transition:transform .15s}",
       ".abx-foot button:active{transform:scale(.93)}",
       ".abx-cred{text-align:center;font-size:10.5px;color:#5f5f68;padding:7px;background:#111114}",
-      ".abx-hcta{margin-left:auto;font-size:11px;color:" + shade(C, 25) + ";text-decoration:none;border:1px solid #3a2a17;background:#1a130a;padding:6px 10px;border-radius:9px;white-space:nowrap;font-weight:600}",
-      ".abx-hcta:hover{background:#221808;border-color:" + C + "}",
+      ".abx-hcta{margin-left:auto;font-size:11px;color:" + shade(C, 25) + ";text-decoration:none;border:1px solid " + shade(C, -35) + ";background:" + shade(C, -60) + ";padding:6px 10px;border-radius:9px;white-space:nowrap;font-weight:600}",
+      ".abx-hcta:hover{background:" + shade(C, -45) + ";border-color:" + C + "}",
       ".abx-chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:2px;animation:abxin .3s ease both}",
       ".abx-chip{background:#16161a;border:1px solid #2a2a31;color:#e0e0e4;border-radius:999px;padding:8px 13px;font-size:12.5px;cursor:pointer;text-decoration:none;transition:all .18s;font-family:inherit}",
       ".abx-chip:hover{border-color:" + C + ";color:#fff;transform:translateY(-1px)}",
-      ".abx-chip.cta{background:" + GRAD + ";color:#1a1205;font-weight:700;border:none}"
+      ".abx-chip.cta{background:" + GRAD + ";color:" + FG + ";font-weight:700;border:none}"
     ].join("");
     document.head.appendChild(css);
 
     var btn = document.createElement("button");
-    btn.className = "abx-btn"; btn.setAttribute("aria-label", "Chat with " + CFG.header_title);
+    btn.className = "abx-btn"; btn.setAttribute("aria-label", CFG.header_title && CFG.header_title !== "Chat" ? "Chat with " + CFG.header_title : "Open chat");
     btn.innerHTML = logoImg();
     document.body.appendChild(btn);
 
     var teaser = document.createElement("div");
     teaser.className = "abx-teaser";
-    teaser.innerHTML = '<span class="cl" aria-label="Dismiss">✕</span>' + CFG.teaser;
+    // textContent for the tenant's string, not innerHTML. This is config typed
+    // in Settings and rendered on the customer's own site; the escaping added
+    // for header_title and header_subtitle skipped this line, which is the one
+    // that renders before anyone clicks anything.
+    var tclose = document.createElement("span");
+    tclose.className = "cl"; tclose.setAttribute("aria-label", "Dismiss"); tclose.textContent = "✕";
+    teaser.appendChild(tclose);
+    teaser.appendChild(document.createTextNode(CFG.teaser || ""));
     document.body.appendChild(teaser);
     teaser.querySelector(".cl").onclick = function (e) { e.stopPropagation(); teaser.classList.remove("on"); };
     teaser.onclick = function () { teaser.classList.remove("on"); if (!open) toggle(); };
 
     var panel = document.createElement("div");
     panel.className = "abx-panel";
-    var titleHtml = CFG.header_title.replace(/(AbroBot|AbroBot AI)/i, '<span class="abx-brand">$1</span>');
+
+    // Escape everything that comes from config. These strings are typed by the
+    // tenant in Settings and rendered here with innerHTML, so an apostrophe in
+    // a business name used to break the markup and an angle bracket could do
+    // considerably worse on their own visitors.
+    function esc(v) {
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    // Was: CFG.header_title.replace(/(AbroBot|AbroBot AI)/i, …) — the tenant's
+    // own header had AbroBot's name highlighted in it, if it happened to
+    // contain it. Nothing about one tenant's brand belongs in another's header.
+    var titleHtml = esc(CFG.header_title);
+
+    // Only render the header link when there is somewhere for it to go.
+    // Previously this interpolated CFG.contact_url unconditionally, so a
+    // business that had not set one shipped href="null" — a visible, clickable
+    // "Talk to expert" button that navigated to a 404 on their own domain.
+    var ctaHtml = CFG.contact_url
+      ? '<a class="abx-hcta" href="' + esc(CFG.contact_url) + '" target="_blank" rel="noopener">📞 Talk to us</a>'
+      : "";
+
     panel.innerHTML =
       '<div class="abx-head"><span class="av">' + logoImg() + '</span>' +
         '<div><div class="ttl">' + titleHtml + '</div>' +
-        '<div class="sub"><i></i> ' + CFG.header_subtitle + '</div></div>' +
-        '<a class="abx-hcta" href="' + CFG.contact_url + '">📞 Talk to expert</a></div>' +
+        '<div class="sub"><i></i> ' + esc(CFG.header_subtitle) + '</div></div>' +
+        ctaHtml + '</div>' +
       '<div class="abx-body" id="abxBody"></div>' +
       '<div class="abx-foot"><input id="abxInput" placeholder="Type your message…" autocomplete="off"/><button id="abxSend" aria-label="Send">➤</button></div>' +
-      '<div class="abx-cred">Powered by <span class="abx-brand">' + CFG.header_title + '</span></div>';
+      // The platform credit, not the tenant's own name. This used to read
+      // "Powered by <tenant>", which is circular on the tenant's own website
+      // and would now render "Powered by Chat" whenever config was still in
+      // flight.
+      '<div class="abx-cred">Powered by <a class="abx-brand" href="https://crm.mnbresearch.com" target="_blank" rel="noopener">AbroBot CRM</a></div>';
     document.body.appendChild(panel);
 
     var body = panel.querySelector("#abxBody");
@@ -210,7 +284,7 @@
       if (CFG.booking_url) {
         var a = document.createElement("a");
         a.className = "abx-chip cta"; a.href = CFG.booking_url; a.target = "_blank"; a.rel = "noopener";
-        a.textContent = CFG.cta_text || "📅 Book a free call";
+        a.textContent = CFG.cta_text || "📅 Book a call";
         wrap.appendChild(a);
       }
       body.appendChild(wrap); body.scrollTop = body.scrollHeight;
@@ -250,37 +324,17 @@
     input.addEventListener("keydown", function (e) { if (e.key === "Enter") ask(); });
   }
 
-  // Built-in per-org presets — used until the live config endpoint is deployed,
-  // so each site looks right immediately. Live CRM config always takes precedence.
-  var PRESETS = {
-    "aa-enterprises": {
-      header_title: "AA Enterprises", header_subtitle: "Yarn & textile supplier · online", widget_color: "#1e40af", widget_position: "left",
-      greeting: "Hi 👋 Welcome to AA Enterprises — mill-grade cotton & blended yarn and fabric since 1974. Tell me the count, blend and quantity you need and I'll help you get a firm quote.",
-      teaser: "Need a yarn quote? 👋 Ask me anything!",
-      quick_replies: [
-        { label: "🧵 Get a quote", prompt: "I need a quote — here is my yarn spec (count, blend, quantity)" },
-        { label: "📋 Yarn varieties", prompt: "What yarn varieties do you supply?" },
-        { label: "🏭 Bulk / mill order", prompt: "Can you supply bulk mill-grade yarn?" }
-      ],
-      cta_text: "💬 Enquire on WhatsApp", booking_url: "https://wa.me/919811028403",
-      contact_url: "https://www.aaenterprises.in/contactus", whatsapp: "+91 98110 28403",
-      logo_url: "https://www.aaenterprises.in/web/image/website/1/logo/AA%20Enterprises"
-    },
-    "toppers-hub": {
-      header_title: "Toppers Hub Academy", header_subtitle: "Coaching · Faridabad · online", widget_color: "#059669", widget_position: "left",
-      greeting: "Hi 👋 Welcome to Toppers Hub Academy! Whether it's Classes 1–12 or CA / CS / CFA / CMA / ACCA, tell me the student's class or course and I'll help you get started — you can book a free demo class too.",
-      teaser: "Looking for coaching? 👋 Ask me!",
-      quick_replies: [
-        { label: "📚 Courses & batches", prompt: "What courses and batches do you offer?" },
-        { label: "🎓 CA / CS / CFA", prompt: "Tell me about your professional courses" },
-        { label: "🧑‍🏫 Free demo class", prompt: "I want to book a free demo class" }
-      ],
-      cta_text: "📲 Enroll on WhatsApp", booking_url: "https://wa.me/919891612831",
-      contact_url: "https://www.topperhubacademy.com/contactus", whatsapp: "+91 98916 12831",
-      logo_url: "https://www.topperhubacademy.com/web/image/website/1/logo/toppershubacademy"
-    }
-  };
-  if (PRESETS[ORG]) { var p = PRESETS[ORG]; for (var pk in p) CFG[pk] = p[pk]; }
+  // ── Per-org PRESETS removed, 2026-09-11 ──────────────────────────────────
+  // This file is served to every customer's website. It contained hardcoded
+  // configuration for two named businesses — their logos, their contact pages
+  // and their WhatsApp numbers — which meant every AbroBot CRM customer was
+  // downloading two other customers' phone numbers as a side effect of
+  // installing the widget.
+  //
+  // The presets existed because the config endpoint did not. It does now, and
+  // 20260911090000 seeds real per-industry copy, so an org with no
+  // configuration renders sensibly without anyone hardcoding it here.
+
 
   // Load live config from the CRM, then render.
   //

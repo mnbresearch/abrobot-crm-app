@@ -55,9 +55,21 @@ function extractLead(body: any, source: string) {
   // address containing a comma or parenthesis reshaped the PostgREST dedupe
   // filter below. The message-extraction path already ran EMAIL_RE — the
   // body-field path was simply never held to the same standard.
-  const cleanEmail = typeof email === "string" && EMAIL_RE.test(email.trim())
+  //
+  // ANCHORED, unlike EMAIL_RE. That regex is deliberately unanchored because
+  // the message-extraction path above has to find an address inside a sentence.
+  // Reusing it to validate a whole field accepted anything CONTAINING an
+  // address — `Bob <bob@x.com>`, `a!b@c.com` — and then stored the entire
+  // string as leads.email, so the follow-up engine would hand Resend a value it
+  // rejects and the record would silently never be emailed.
+  const ADDRESS_ONLY = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  const cleanEmail = typeof email === "string" && ADDRESS_ONLY.test(email.trim())
     ? email.trim().toLowerCase()
-    : null;
+    // Fall back to pulling a valid address out of the noise rather than
+    // discarding the enquiry: `Bob <bob@x.com>` still yields bob@x.com.
+    : (typeof email === "string" && EMAIL_RE.test(email)
+      ? email.match(EMAIL_RE)![0].toLowerCase()
+      : null);
 
   return {
     name: String(name).slice(0, 200),
@@ -68,8 +80,53 @@ function extractLead(body: any, source: string) {
     course: body.course ?? body.program ?? null,
     course_level: body.course_level ?? null,
     intake: body.intake ?? null,
+    // Raw, unvalidated. resolveCustom() below decides what is allowed to land.
+    custom: body.custom && typeof body.custom === "object" && !Array.isArray(body.custom)
+      ? body.custom as Record<string, unknown>
+      : null,
     source,
   };
+}
+
+/**
+ * Map a submitted `custom` object onto the org's OWN field definitions.
+ *
+ * Why this exists: the five columns above are study-abroad leftovers. Every
+ * other industry keeps what matters in custom fields, so a public capture form
+ * could collect a company name, a budget or a plan and had nowhere to put it —
+ * the value survived only inside `raw`, which nothing in the UI reads. A form
+ * that visibly asks a question and then loses the answer is worse than one that
+ * never asked.
+ *
+ * Why it is an allow-list: this endpoint is public and authenticated only by a
+ * capture key that lives in page source. Writing the posted object straight
+ * into leads.custom would let anyone with that key push unbounded arbitrary
+ * JSON into the tenant's records. Only keys the tenant has actually defined in
+ * field_defs are kept, values are stringified and capped, and anything else is
+ * dropped silently — it is already preserved verbatim in `raw` if it is ever
+ * needed for a support question.
+ */
+// deno-lint-ignore no-explicit-any
+async function resolveCustom(sb: any, orgId: string, submitted: Record<string, unknown> | null) {
+  if (!submitted) return null;
+  const keys = Object.keys(submitted);
+  if (keys.length === 0 || keys.length > 50) return null;
+
+  const { data: defs, error } = await sb
+    .from("field_defs").select("key").eq("org_id", orgId);
+  // Fail closed. An unreadable field list is not permission to write anything.
+  if (error || !defs?.length) return null;
+
+  const allowed = new Set((defs as { key: string }[]).map((d) => d.key));
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    if (!allowed.has(k)) continue;
+    const v = submitted[k];
+    if (v === null || v === undefined || v === "") continue;
+    if (typeof v === "object") continue;   // fields are scalars; nested data is not a field
+    out[k] = String(v).slice(0, 500);
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 const CORS = {
@@ -88,7 +145,7 @@ Deno.serve(async (req) => {
   if (!key) return json({ ok: false, error: "missing ?key=" }, 401);
 
   const { data: wk } = await supabase
-    .from("webhook_keys").select("org_id, source, active").eq("key", key).single();
+    .from("webhook_keys").select("org_id, source, segment, active").eq("key", key).single();
   if (!wk?.active) return json({ ok: false, error: "invalid or inactive key" }, 401);
 
   if (req.method === "GET") {
@@ -128,7 +185,35 @@ Deno.serve(async (req) => {
       org_id: wk.org_id, lead_id: existing[0].id, type: wk.source === "whatsapp" ? "whatsapp" : "note",
       content: "New inbound message via " + wk.source + ":\n" + lead.message,
     });
-    await supabase.from("leads").update({ last_contacted_at: new Date().toISOString() }).eq("id", existing[0].id);
+
+    // A returning enquirer used to have everything but the note discarded here.
+    // That matters most for `segment`: someone who chatted to the widget first
+    // and then filled the plan form was already on file with no segment, so
+    // they stayed in the default sequence — which for an org that only wrote
+    // segment-specific copy means they receive nothing at all, having just
+    // asked to be sold to. Fill what is genuinely EMPTY, overwrite nothing.
+    // Moving someone who is mid-sequence into a different one would restart
+    // their follow-up from step 1 with different copy, which is worse than
+    // leaving them where they are.
+    const patch: Record<string, unknown> = { last_contacted_at: new Date().toISOString() };
+
+    const { data: before } = await supabase.from("leads")
+      .select("segment, custom").eq("id", existing[0].id).single();
+
+    if (wk.segment && !before?.segment) patch.segment = wk.segment;
+
+    const incoming = await resolveCustom(supabase, wk.org_id, lead.custom);
+    if (incoming) {
+      const merged = { ...(before?.custom ?? {}) } as Record<string, unknown>;
+      let changed = false;
+      for (const [k, v] of Object.entries(incoming)) {
+        const cur = merged[k];
+        if (cur === null || cur === undefined || cur === "") { merged[k] = v; changed = true; }
+      }
+      if (changed) patch.custom = merged;
+    }
+
+    await supabase.from("leads").update(patch).eq("id", existing[0].id);
     return json({ ok: true, deduped: true, lead_id: existing[0].id });
   }
 
@@ -155,12 +240,18 @@ Deno.serve(async (req) => {
   // column default ('new') apply, and 11 of 13 industry packs have no stage
   // keyed 'new' — so the lead vanished from the Pipeline board. See _shared/stage.ts.
   const stageKey = await firstStageKey(supabase, wk.org_id);
+  const custom = await resolveCustom(supabase, wk.org_id, lead.custom);
 
   const { data: inserted, error } = await supabase.from("leads").insert({
     org_id: wk.org_id, name: lead.name, email: lead.email, phone: lead.phone,
     stage_key: stageKey,
     source: lead.source, target_country: lead.target_country, course: lead.course,
     course_level: lead.course_level, intake: lead.intake, raw: body, assigned_to: assignTo,
+    // Which audience this record belongs to, for follow-up. Free text from the
+    // capture key — deliberately NOT `source`, which is an enum a tenant
+    // cannot extend. See 20260908120000.
+    ...(wk.segment ? { segment: wk.segment } : {}),
+    ...(custom ? { custom } : {}),
     score,
     next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
   }).select("id").single();

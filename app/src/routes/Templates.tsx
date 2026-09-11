@@ -24,29 +24,50 @@ interface Template {
   subject: string | null;
   body: string;
   nurture_step: number | null;
+  nurture_segment: string | null;
   created_at: string;
 }
 
-const TOKENS = ["{{first_name}}", "{{name}}", "{{country}}", "{{course}}", "{{brand}}"];
+// Tokens every record has, whatever the industry. The tenant's own custom
+// fields are appended to these at render time — see `tokens` below. Hardcoding
+// only this list meant a business whose useful details all live in custom
+// fields (which, outside study-abroad, is most of them) had no way to merge
+// them in, and no way to discover that {{custom.<key>}} even worked.
+const BASE_TOKENS = [
+  "{{first_name}}", "{{name}}", "{{email}}", "{{phone}}",
+  "{{country}}", "{{course}}", "{{brand}}",
+];
 
 // Hours after the previous message, matching GAP_HOURS in the nurture function.
 const STEP_TIMING = ["about an hour after the record is created", "3 days later", "4 days after that"];
 
+const ALL_AUDIENCES = "";   // the empty string is "everyone", i.e. nurture_segment = null
+
 export function Templates() {
-  const { org, ui, isAdmin, stages } = useApp();
+  const { org, ui, isAdmin, stages, fields } = useApp();
   const [rows, setRows] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<Template> | null>(null);
   const [nurtureOn, setNurtureOn] = useState<boolean | null>(null);
   const [sending, setSending] = useState<Template | null>(null);
+  // The audiences this org actually captures into, read from its own capture
+  // keys. A hardcoded list would offer audiences that cannot exist here and
+  // omit the ones that do — and an audience matching no record is a sequence
+  // that silently never sends.
+  const [segments, setSegments] = useState<string[]>([]);
   const toast = useToast();
 
   const load = async () => {
     if (!org) { setLoading(false); return; }   // never leave the spinner up forever
-    const [tpl, cfg] = await Promise.all([
+    const [tpl, cfg, keys] = await Promise.all([
       supabase.from("message_templates").select("*").eq("org_id", org.id).order("created_at"),
       supabase.from("agent_config").select("nurture_enabled").eq("org_id", org.id).maybeSingle(),
+      supabase.from("webhook_keys").select("segment").eq("org_id", org.id).eq("active", true),
     ]);
+    // Failing to list audiences must not break the screen — it only narrows the
+    // dropdown, and an existing template's own audience is added back below.
+    setSegments([...new Set(((keys.data ?? []) as { segment: string | null }[])
+      .map((k) => k.segment).filter((s): s is string => !!s))].sort());
     // An unread error here showed "No templates yet" AND reported automatic
     // follow-up as Off — two confident falsehoods from one failed request.
     if (tpl.error) toast.error(`Could not load templates: ${tpl.error.message}`);
@@ -59,10 +80,29 @@ export function Templates() {
 
   useEffect(() => { void load(); /* eslint-disable-next-line */ }, [org]);
 
-  const sequence = useMemo(
-    () => rows.filter((r) => r.nurture_step !== null).sort((a, b) => a.nurture_step! - b.nurture_step!),
-    [rows],
+  // The base tokens plus this org's own custom fields, so a business can merge
+  // in the things it actually collects. The engine already resolves
+  // {{custom.<key>}}; nothing had ever told anyone it existed.
+  const tokens = useMemo(
+    () => [...BASE_TOKENS, ...fields.map((f) => `{{custom.${f.key}}}`)],
+    [fields],
   );
+
+  // One entry per audience, because an org may now run several sequences at
+  // once. The default sequence sorts first; named audiences follow.
+  const sequences = useMemo(() => {
+    const groups = new Map<string, Template[]>();
+    rows.filter((r) => r.nurture_step !== null).forEach((r) => {
+      const k = r.nurture_segment ?? ALL_AUDIENCES;
+      groups.set(k, [...(groups.get(k) ?? []), r]);
+    });
+    return [...groups.entries()]
+      .map(([audience, list]) => ({
+        audience,
+        list: list.sort((a, b) => a.nurture_step! - b.nurture_step!),
+      }))
+      .sort((a, b) => a.audience.localeCompare(b.audience));
+  }, [rows]);
 
   const save = async () => {
     if (!org || !editing) return;
@@ -73,6 +113,11 @@ export function Templates() {
     // which looks like the sequence is running when it is not.
     const step = editing.channel === "whatsapp" ? null : (editing.nurture_step ?? null);
 
+    // An audience only means something on a step. Storing one on a hand-sent
+    // template would show a badge claiming this reaches a particular group when
+    // nothing reads the column outside the sequence engine.
+    const audience = step === null ? null : (editing.nurture_segment?.trim() || null);
+
     const payload = {
       org_id: org.id,
       name: editing.name.trim(),
@@ -80,16 +125,28 @@ export function Templates() {
       subject: editing.subject?.trim() || null,
       body: editing.body,
       nurture_step: step,
+      nurture_segment: audience,
     };
     const { error } = editing.id
       ? await supabase.from("message_templates").update(payload).eq("id", editing.id)
       : await supabase.from("message_templates").insert(payload);
     if (error) {
-      // The unique index on (org_id, nurture_step) is the likeliest failure,
-      // and "duplicate key value violates..." tells a business owner nothing.
+      // The unique index on the step is the likeliest failure, and "duplicate
+      // key value violates..." tells a business owner nothing.
+      //
+      // Both index names are matched, because this screen has to stay honest
+      // against a database that has not had 20260908120000 applied yet. On
+      // such a database the live index is still ORG-WIDE, so the collision may
+      // be with a template for a completely different audience — which is why
+      // the message deliberately does not name one. Asserting "step 1 for
+      // crm-website already exists" would send someone hunting for a template
+      // that isn't there.
+      const collided = /message_templates_org_(nurture|segment)_step/.test(error.message)
+        || /duplicate key/i.test(error.message);
       toast.error(
-        /message_templates_org_nurture_step/.test(error.message)
-          ? "Another template is already that follow-up step. Change one of them first."
+        collided
+          ? `Another email template is already step ${(step ?? 0) + 1}. ` +
+            `Two templates cannot share a step for the same audience — change one of them first.`
           : error.message,
       );
       return;
@@ -133,25 +190,60 @@ export function Templates() {
             Off. Nothing is emailed automatically. Turn it on in <b>Settings → AI Agent</b> once you
             have written the messages below.
           </p>
-        ) : sequence.length === 0 ? (
+        ) : nurtureOn === null ? (
+          // `null` means the agent_config read failed, and load() sets it
+          // deliberately so this screen can distinguish "off" from "unknown".
+          // It then fell straight through into copy asserting the sequence was
+          // switched on — producing exactly the confident falsehood the null
+          // was introduced to avoid.
+          <p className="sub">
+            We couldn't read whether automatic follow-up is switched on, so this
+            card can't tell you either way. Reload, or check{" "}
+            <b>Settings → AI Agent</b>. The templates below are unaffected.
+          </p>
+        ) : sequences.length === 0 ? (
           <p className="sub">
             Switched on, but <b>no follow-up messages are written yet, so nothing is being sent.</b>{" "}
             Mark an email template as step 1 to start the sequence.
           </p>
         ) : (
           <>
-            <p className="sub" style={{ marginBottom: 8 }}>
-              {sequence.length} message{sequence.length > 1 ? "s" : ""}, sent automatically to any{" "}
-              {ui.leadNoun.toLowerCase()} with an email address who has not reached a won or lost stage,
-              until they reply or unsubscribe.
+            <p className="sub" style={{ marginBottom: 10 }}>
+              Sent automatically to any {ui.leadNoun.toLowerCase()} with an email address who has not
+              reached a won or lost stage, until they reply or unsubscribe.
             </p>
-            <ol className="sub" style={{ margin: 0, paddingLeft: 20 }}>
-              {sequence.map((t) => (
-                <li key={t.id} style={{ marginBottom: 3 }}>
-                  <b>{t.name}</b> — {STEP_TIMING[t.nurture_step!] ?? "later"}
-                </li>
-              ))}
-            </ol>
+            {sequences.map(({ audience, list }) => (
+              <div key={audience || "default"} style={{ marginBottom: 12 }}>
+                <div className="row-wrap" style={{ gap: 6, marginBottom: 4 }}>
+                  <span className={audience ? "pill" : "pill pill-muted"}>
+                    {audience ? `🎯 ${audience}` : "Everyone else"}
+                  </span>
+                  <span className="sub" style={{ fontSize: 12 }}>
+                    {list.length} message{list.length > 1 ? "s" : ""}
+                  </span>
+                </div>
+                <ol className="sub" style={{ margin: 0, paddingLeft: 20 }}>
+                  {list.map((t) => (
+                    <li key={t.id} style={{ marginBottom: 3 }}>
+                      <b>{t.name}</b> — {STEP_TIMING[t.nurture_step!] ?? "later"}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ))}
+            {/* The failure mode segmentation introduces, said out loud. A
+                business that writes copy only for one source stops following up
+                with everybody else, and nothing on screen would otherwise say
+                so — it just looks like a working sequence. */}
+            {!sequences.some((s) => s.audience === ALL_AUDIENCES) && (
+              <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+                Every sequence above is for a specific source.{" "}
+                <b>
+                  {ui.leadNoun}s from any other source receive no automatic follow-up at all.
+                </b>{" "}
+                Add a step with the audience set to <i>Everyone</i> if you want a fallback.
+              </p>
+            )}
           </>
         )}
       </Card>
@@ -178,6 +270,9 @@ export function Templates() {
                     </span>
                     {t.nurture_step !== null && (
                       <span className="pill">🔁 Follow-up step {t.nurture_step + 1}</span>
+                    )}
+                    {t.nurture_step !== null && t.nurture_segment && (
+                      <span className="pill pill-muted">🎯 {t.nurture_segment}</span>
                     )}
                   </div>
                 </div>
@@ -254,6 +349,51 @@ export function Templates() {
                   lost stage or unsubscribes.
                 </p>
               </div>
+
+              {/* Audience. Only meaningful on a step, so it is hidden otherwise
+                  rather than shown disabled — a control that does nothing is
+                  worse than one that isn't there. */}
+              {editing.nurture_step !== null && editing.nurture_step !== undefined && (
+                <div className="field">
+                  <label className="label">Who this sequence is for</label>
+                  <select
+                    className="select"
+                    value={editing.nurture_segment ?? ALL_AUDIENCES}
+                    onChange={(e) =>
+                      setEditing({ ...editing, nurture_segment: e.target.value || null })}
+                  >
+                    <option value={ALL_AUDIENCES}>
+                      Everyone — anyone without a sequence of their own
+                    </option>
+                    {/* The org's own capture segments, plus this template's
+                        current one even if its key was since deleted, so
+                        editing an old template cannot silently reassign it. */}
+                    {[...new Set([
+                      ...segments,
+                      ...(editing.nurture_segment ? [editing.nurture_segment] : []),
+                    ])].sort().map((s) => (
+                      <option key={s} value={s}>Only {ui.leadNoun.toLowerCase()}s from “{s}”</option>
+                    ))}
+                  </select>
+                  <p className="sub" style={{ fontSize: 12, marginTop: 5 }}>
+                    {segments.length === 0 ? (
+                      <>
+                        You have no audiences yet, so this sequence goes to everyone. To split it,
+                        give a capture key an audience name in <b>Integrations</b> — records captured
+                        on that key can then have follow-up written just for them.
+                      </>
+                    ) : (
+                      <>
+                        Audiences come from your capture keys in <b>Integrations</b>. Give a form or
+                        channel its own key and you can write follow-up that speaks to what those
+                        people actually asked about. An audience with its own sequence does not also
+                        receive the “Everyone” one. Records added by hand or imported have no
+                        audience, so they get “Everyone”.
+                      </>
+                    )}
+                  </p>
+                </div>
+              )}
             </>
           )}
           <div className="field">
@@ -265,7 +405,7 @@ export function Templates() {
               onChange={(e) => setEditing({ ...editing, body: e.target.value })}
             />
             <div className="row-wrap" style={{ marginTop: 7 }}>
-              {TOKENS.map((tk) => (
+              {tokens.map((tk) => (
                 <button
                   key={tk}
                   type="button"

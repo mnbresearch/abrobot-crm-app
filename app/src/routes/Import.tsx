@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Spinner, useToast } from "../components/ui";
+import { Card, useToast } from "../components/ui";
 
 // CSV import. Parsing is done here rather than pulling in a library — the
 // format is simple and a dependency for one screen isn't worth it. Handles
@@ -64,17 +64,25 @@ function guess(header: string): string {
   return "";
 }
 
+/** PostgREST's hosted max-rows default. There is no supabase/config.toml in
+ *  this repo, so this is what any single unbounded select is silently cut to. */
+const MAX_ROWS = 1000;
+
 export function Import({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, profile, stages, fields } = useApp();
   const [rows, setRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<string[]>([]);
   const [filename, setFilename] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number; phase: string } | null>(null);
+  // A refusal BEFORE anything is written, as opposed to a report afterwards.
+  const [blocked, setBlocked] = useState<{ title: string; detail: string; upgrade: boolean } | null>(null);
   const [result, setResult] = useState<{
     inserted: number;
     duplicates: number;
     failed: number;               // rows we skipped: no email and no phone
     rejected: number;             // rows the database refused — a different thing
+    notAttempted: number;         // rows after the failure, never sent
     rejectReason: string | null;
   } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -95,28 +103,107 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
   const run = async () => {
     if (!org || rows.length < 2) return;
     setBusy(true);
+    setBlocked(null);
 
     const header = mapping;
     const body = rows.slice(1);
     const firstStage = stages[0]?.key ?? "new";
 
+    // ── 1. pre-flight the plan allowance ──────────────────────────────────
+    // Without this, a 1,500-row file into a Starter org (1,000 cap) committed
+    // 1,000 rows and lost 500 — with no record of WHICH 500, so the only
+    // recovery was to re-import the whole file and rely on dedupe. Asking the
+    // server what is left costs one RPC and turns a partial, unrecoverable
+    // write into a refusal the customer can act on.
+    setProgress({ done: 0, total: body.length, phase: "Checking your plan" });
+    const { data: snap, error: snapErr } = await supabase.rpc("usage_snapshot", { p_org_id: org.id });
+    if (snapErr) {
+      setBusy(false);
+      setProgress(null);
+      toast.error(`Could not check your plan allowance: ${snapErr.message}. Nothing was imported.`);
+      return;
+    }
+    const usage = snap as { plan?: string; not_activated?: boolean; is_expired?: boolean; leads?: { used: number; limit: number | null } } | null;
+    const used = usage?.leads?.used ?? 0;
+    const cap = usage?.leads?.limit ?? null;
+    const remaining = cap === null ? Infinity : Math.max(0, cap - used);
+
+    // Refuse immediately only when there is provably no room for anything. The
+    // precise check happens after deduplication, below: duplicates and rows
+    // with no contact details are never inserted, so testing the raw row count
+    // here would turn away a 1,500-row file that is 600 duplicates and would
+    // have fitted comfortably.
+    if (remaining === 0) {
+      setBusy(false);
+      setProgress(null);
+      setBlocked({
+        title: `Your plan has no room for new ${ui.leadNounPlural.toLowerCase()}`,
+        detail: `Your ${usage?.plan ?? "current"} plan allows ${cap === null ? "unlimited" : cap.toLocaleString("en-IN")} records and you already have ${used.toLocaleString("en-IN")}. Nothing has been imported — your file is untouched.`,
+        upgrade: true,
+      });
+      return;
+    }
+
+    // ── 2. build the duplicate index ──────────────────────────────────────
     // Pull existing contacts once — cheaper and more reliable than a query
     // per row, and it lets us report duplicates honestly.
     // Two bugs here, both silent. The error was discarded, so on failure
     // `existing` was null, both dedupe sets came out empty, and EVERY row was
     // imported as new while the result card confidently reported "0 duplicates
-    // skipped". And there was no .limit(), so PostgREST's default 1,000-row cap
-    // truncated the comparison set for any org past a thousand records —
-    // useLeads sets an explicit limit precisely because of that cap.
-    const { data: existing, error: dupeErr } = await supabase
-      .from("leads").select("email, phone").eq("org_id", org.id).limit(50000);
-    if (dupeErr) {
+    // skipped". And `.limit(50000)` did NOT lift the cap — PostgREST clamps to
+    // max-rows (1,000 here) regardless of what the client asks for, so for any
+    // org past a thousand records the comparison set was the newest 1,000 and
+    // every older contact re-imported as a fresh duplicate. Paged properly now.
+    const seenEmail = new Set<string>();
+    const seenPhone = new Set<string>();
+    // An absolute stop. The loop's only exit was an empty page, which is
+    // exactly what a proxy that ignores Range never returns — it re-serves page
+    // one forever and the browser tab locks up behind a progress bar with no
+    // way out but killing it. 200 pages is 200,000 contacts, past the largest
+    // plan, so reaching it means something is wrong rather than that the org is
+    // big. Same class of bug as the export loop in store.tsx.
+    const MAX_DUPE_PAGES = 200;
+    // Contacts EXAMINED, not the size of the two sets added together. A contact
+    // with both an email and a phone lands in both, so `seenEmail.size +
+    // seenPhone.size` counted it twice and the progress readout sailed past
+    // 100% of the org's own record count.
+    let scanned = 0;
+    let from = 0;
+    let finished = false;
+    for (let page = 0; page < MAX_DUPE_PAGES; page++) {
+      setProgress({ done: Math.min(scanned, used), total: used, phase: "Checking for duplicates" });
+      const { data: rows, error: dupeErr } = await supabase
+        .from("leads").select("email, phone").eq("org_id", org.id)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, from + MAX_ROWS - 1);
+      if (dupeErr) {
+        setBusy(false);
+        setProgress(null);
+        toast.error(`Could not check for duplicates: ${dupeErr.message}. Nothing was imported.`);
+        return;
+      }
+      const batch = rows ?? [];
+      if (batch.length === 0) { finished = true; break; }
+      for (const e of batch) {
+        if (e.email) seenEmail.add(e.email.toLowerCase());
+        if (e.phone) seenPhone.add(e.phone);
+      }
+      scanned += batch.length;
+      // Advance by what came back, never by MAX_ROWS — if the real cap is
+      // lower than assumed, a fixed step skips whole blocks of contacts and
+      // they re-import as duplicates.
+      from += batch.length;
+    }
+    // Refuse rather than import against a half-built index: an incomplete
+    // duplicate set silently re-imports contacts the customer already has, and
+    // the result card would report "0 duplicates skipped" while doing it.
+    if (!finished) {
       setBusy(false);
-      toast.error(`Could not check for duplicates: ${dupeErr.message}. Nothing was imported.`);
+      setProgress(null);
+      toast.error("Could not finish checking for duplicates — the server kept returning the same page. Nothing was imported.");
       return;
     }
-    const seenEmail = new Set((existing ?? []).map((e) => (e.email ?? "").toLowerCase()).filter(Boolean));
-    const seenPhone = new Set((existing ?? []).map((e) => e.phone ?? "").filter(Boolean));
 
     let inserted = 0, duplicates = 0, failed = 0;
     const batch: Record<string, unknown>[] = [];
@@ -152,39 +239,102 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
       });
     }
 
+    // ── 3. the precise pre-flight, now that we know what will actually be
+    //       written ────────────────────────────────────────────────────────
+    // `batch` excludes duplicates and rows with no contact details, so this is
+    // the real number of inserts. Refusing HERE, before the first write,
+    // replaces the old behaviour: 1,000 rows committed, 500 silently dropped,
+    // and no record anywhere of which 500 they were.
+    if (batch.length > remaining) {
+      setBusy(false);
+      setProgress(null);
+      setBlocked({
+        title: "This file is larger than the room left on your plan",
+        detail: `${batch.length.toLocaleString("en-IN")} new ${batch.length === 1 ? "record" : "records"} would be imported (${duplicates.toLocaleString("en-IN")} already in your CRM${failed ? `, ${failed.toLocaleString("en-IN")} with no contact details` : ""}), and there is room for ${remaining.toLocaleString("en-IN")} more — ${used.toLocaleString("en-IN")} of ${cap?.toLocaleString("en-IN")} used. Nothing has been imported, because a partial import would leave you unable to tell which rows made it.`,
+        upgrade: true,
+      });
+      return;
+    }
+
     // A rejected batch used to be counted into `failed`, which is rendered as
     // "Rows with no contact" — so hitting the plan limit told the user their
     // CSV was malformed. They would go and edit a perfectly good file.
     // Rejections are now counted and explained separately; guard_lead_limit's
     // message is written to be shown to a person.
     let rejected = 0;
+    let notAttempted = 0;
     let rejectReason: string | null = null;
 
-    // chunked so a large file doesn't hit request limits
+    // chunked so a large file doesn't hit request limits.
+    //
+    // This loop used to CONTINUE past a failed chunk. Every realistic cause of
+    // a chunk failing — the plan cap, a lost connection, an RLS refusal —
+    // applies equally to the chunks after it, so carrying on meant firing seven
+    // more doomed requests and then reporting a number that mixed rows written,
+    // rows refused and rows refused for a second, different reason. It stops on
+    // the first failure now and says precisely how far it got, so re-running
+    // the same file after fixing the cause is a safe, dedupe-protected action.
     for (let i = 0; i < batch.length; i += 200) {
       const chunk = batch.slice(i, i + 200);
+      setProgress({ done: i, total: batch.length, phase: `Importing ${ui.leadNounPlural.toLowerCase()}` });
       const { error, count } = await supabase
         .from("leads")
         .insert(chunk, { count: "exact" });
       if (error) {
-        rejected += chunk.length;
-        rejectReason ??= error.message;
-      } else {
-        inserted += count ?? chunk.length;
+        rejected = chunk.length;
+        rejectReason = error.message;
+        notAttempted = batch.length - i - chunk.length;
+        break;
       }
+      inserted += count ?? chunk.length;
     }
+    setProgress({ done: batch.length, total: batch.length, phase: "Finishing up" });
 
     const { error: importLogErr } = await supabase.from("imports").insert({
       org_id: org.id, user_id: profile?.id ?? null, filename,
       kind: "csv", total: body.length, inserted, duplicates,
     });
-    if (importLogErr) console.error("import history row not saved:", importLogErr.message);
+    // Non-fatal: the records themselves are in. But the import history is the
+    // only place that records this file ever ran, so a failure must not pass
+    // in silence — without it a repeated import looks like a first one.
+    if (importLogErr) {
+      console.error("import history row not saved:", importLogErr.message);
+      toast.error(`Records imported, but this import could not be added to your history: ${importLogErr.message}`);
+    }
 
     setBusy(false);
-    setResult({ inserted, duplicates, failed, rejected, rejectReason });
+    setProgress(null);
+    setResult({ inserted, duplicates, failed, rejected, notAttempted, rejectReason });
   };
 
-  if (busy) return <Spinner />;
+  // A bare <Spinner/> for the whole screen told someone importing 5,000 rows
+  // nothing at all for the better part of a minute — indistinguishable from a
+  // hang, and the obvious response is to reload, which abandons the import
+  // mid-way. Rows done / total, and which phase it is in.
+  if (busy) {
+    const pct = progress && progress.total > 0
+      ? Math.min(100, Math.round((progress.done / progress.total) * 100))
+      : 0;
+    return (
+      <Card title="Importing…">
+        <p className="sub" style={{ marginTop: -8 }}>
+          {progress?.phase ?? "Working"} — {(progress?.done ?? 0).toLocaleString("en-IN")}
+          {progress?.total ? ` of ${progress.total.toLocaleString("en-IN")}` : ""} rows.
+        </p>
+        <div style={{ height: 8, background: "var(--track)", borderRadius: 999, marginTop: 12, overflow: "hidden" }}>
+          <div
+            style={{
+              width: `${pct}%`, height: "100%", background: "var(--grad)",
+              borderRadius: 999, transition: "width var(--t) var(--ease)",
+            }}
+          />
+        </div>
+        <p className="sub" style={{ fontSize: 12, marginTop: 12 }}>
+          Please keep this tab open. Closing it stops the import part-way through.
+        </p>
+      </Card>
+    );
+  }
 
   return (
     <div className="stack">
@@ -193,8 +343,33 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
         <p className="sub" style={{ marginTop: 2 }}>Bring {ui.leadNounPlural.toLowerCase()} in from a CSV file.</p>
       </div>
 
+      {/* Refused before a single row was written. Deliberately not a toast:
+          this needs to persist, explain the arithmetic, and offer the way out. */}
+      {blocked && (
+        <Card>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <span style={{ fontSize: 22 }}>⛔</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700 }}>{blocked.title}</div>
+              <p className="sub" style={{ marginTop: 4 }}>{blocked.detail}</p>
+              <div className="row row-wrap" style={{ marginTop: 12 }}>
+                {blocked.upgrade && (
+                  <button className="btn btn-primary" onClick={() => navigate("/settings")}>
+                    See plans &amp; upgrade →
+                  </button>
+                )}
+                <button className="btn" onClick={() => setBlocked(null)}>Back to the mapping</button>
+              </div>
+              <p className="sub" style={{ fontSize: 12, marginTop: 10 }}>
+                Settings → Plan &amp; Usage shows exactly how much room each plan gives you.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {result ? (
-        <Card title="Import complete">
+        <Card title={result.rejected > 0 ? "Import stopped part-way" : "Import complete"}>
           <div className="grid grid-kpi">
             <div className="kpi">
               <div className="kpi-label"><span>✅</span><span>Imported</span></div>
@@ -210,8 +385,14 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
             </div>
             {result.rejected > 0 && (
               <div className="kpi">
-                <div className="kpi-label"><span>⛔</span><span>Rejected</span></div>
+                <div className="kpi-label"><span>⛔</span><span>Refused</span></div>
                 <div className="kpi-value" style={{ color: "var(--red)" }}>{result.rejected}</div>
+              </div>
+            )}
+            {result.notAttempted > 0 && (
+              <div className="kpi">
+                <div className="kpi-label"><span>⏸</span><span>Not attempted</span></div>
+                <div className="kpi-value" style={{ color: "var(--amber)" }}>{result.notAttempted}</div>
               </div>
             )}
           </div>
@@ -222,17 +403,29 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
               style={{ marginTop: 14, background: "var(--bg)", borderColor: "var(--red)" }}
             >
               <div style={{ fontWeight: 700 }}>
-                {result.rejected} {result.rejected === 1 ? "row was" : "rows were"} refused by the server
+                Stopped after {result.inserted.toLocaleString("en-IN")}{" "}
+                {result.inserted === 1 ? "record" : "records"} were written
               </div>
+              {/* Exact, not approximate. Somebody has to be able to reconcile
+                  this against their file, and "some rows failed" cannot be. */}
               <p className="sub" style={{ marginTop: 4 }}>
-                This is not a problem with your file — those rows had contact details.
+                A batch of {result.rejected} {result.rejected === 1 ? "row was" : "rows were"} refused
+                by the server, so the import stopped there rather than firing the rest at the same
+                wall. That left {result.notAttempted.toLocaleString("en-IN")}{" "}
+                {result.notAttempted === 1 ? "row" : "rows"} never sent.
                 {result.rejectReason ? ` The server said: “${result.rejectReason}”` : ""}
+              </p>
+              <p className="sub" style={{ marginTop: 8 }}>
+                This is not a problem with your file — those rows had contact details. Fix the cause
+                and import <b>the same file</b> again: the{" "}
+                {result.inserted.toLocaleString("en-IN")} already written will be skipped as
+                duplicates, so nothing doubles up.
               </p>
             </div>
           )}
           <div className="row" style={{ marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => navigate("/leads")}>View {ui.leadNounPlural} →</button>
-            <button className="btn" onClick={() => { setRows([]); setResult(null); setFilename(""); }}>Import another</button>
+            <button className="btn" onClick={() => { setRows([]); setResult(null); setFilename(""); setBlocked(null); }}>Import another</button>
           </div>
         </Card>
       ) : rows.length === 0 ? (
@@ -295,7 +488,7 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
           </div>
 
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => { setRows([]); setFilename(""); }}>Cancel</button>
+            <button className="btn" onClick={() => { setRows([]); setFilename(""); setBlocked(null); }}>Cancel</button>
             <button
               className="btn btn-primary"
               onClick={run}

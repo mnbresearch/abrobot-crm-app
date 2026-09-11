@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { FieldDef, Lead, PipelineStage } from "../lib/types";
+// The page size is imported, never retyped. A second copy of the number here is
+// how the button came to offer "Load 2,000 more" and deliver 1,000.
+import { LEAD_PAGE_LIMIT } from "../lib/store";
 
 export function Spinner() {
   return (
@@ -138,7 +141,20 @@ export function Empty({ icon = "📭", title, hint, action }: { icon?: string; t
  * a customer with 4,000 leads gets told they have none, believes it, and
  * calls support.
  */
-export function LoadError({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export function LoadError({
+  message, onRetry, onSignOut,
+}: {
+  message: string;
+  onRetry?: () => void;
+  /**
+   * Offered when this card is the WHOLE screen rather than one panel on it.
+   * Retry alone is a dead end for the failure that produces it most often — a
+   * stale token, where every retry fails the same way — and with no sign-out
+   * and no route to the login form the user is left on a card with one button
+   * that cannot work. Signing out clears the bad token and is the fix.
+   */
+  onSignOut?: () => void;
+}) {
   return (
     <div className="card" style={{ borderColor: "var(--red)" }}>
       <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
@@ -149,8 +165,61 @@ export function LoadError({ message, onRetry }: { message: string; onRetry?: () 
             Nothing has been lost — this screen just can't reach the server right now.
             {message ? ` (${message})` : ""}
           </p>
+          {onSignOut && (
+            <p className="sub" style={{ marginTop: 6, fontSize: 12.5 }}>
+              If retrying keeps failing, signing out and back in clears an expired session.
+            </p>
+          )}
         </div>
-        {onRetry && <button className="btn btn-sm btn-primary" onClick={onRetry}>Retry</button>}
+        <div className="row">
+          {onSignOut && <button className="btn btn-sm" onClick={onSignOut}>Sign out</button>}
+          {onRetry && <button className="btn btn-sm btn-primary" onClick={onRetry}>Retry</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "You are looking at part of your data" — shown whenever a screen renders a
+ * page rather than the whole record set.
+ *
+ * Three screens had a hand-copied version of this banner hardcoded to the words
+ * "your 2,000 most recent records", and Pipeline and Calendar had none at all.
+ * The hardcoded number was wrong twice over: the page limit is not necessarily
+ * what came back (PostgREST's max-rows can clip it), and the org's real total
+ * was never on screen next to it — Leads printed "2,000 total" directly beside
+ * a banner saying there were more than 2,000. Both numbers come from the server
+ * now, and one component means they cannot drift apart again.
+ *
+ * Renders nothing when there is nothing to disclose, so it is safe to place
+ * unconditionally at the top of any screen.
+ */
+export function TruncationNotice({
+  loaded, total, noun, what, onLoadMore, loadingMore,
+}: {
+  loaded: number;
+  total: number | null;
+  noun: string;
+  /** One sentence naming what on THIS screen is affected. */
+  what: string;
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
+}) {
+  if (total === null || total <= loaded) return null;
+  const fmt = (n: number) => n.toLocaleString("en-IN");
+  return (
+    <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
+      <div className="row row-wrap" style={{ alignItems: "flex-start", gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <b>Showing {fmt(loaded)} of your {fmt(total)} {noun}.</b>{" "}
+          <span className="sub">{what} Use ⌘K to search every record, or export from Reports for the full set.</span>
+        </div>
+        {onLoadMore && (
+          <button className="btn btn-sm" onClick={onLoadMore} disabled={loadingMore}>
+            {loadingMore ? "Loading…" : `Load ${fmt(Math.min(total - loaded, LEAD_PAGE_LIMIT))} more`}
+          </button>
+        )}
       </div>
     </div>
   );

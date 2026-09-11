@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, PieChart, Pie, Cell } from "recharts";
-import { useApp, useLeads } from "../lib/store";
+import { useApp, useLeads, useStageCounts } from "../lib/store";
 import { computeKpi } from "../lib/industries";
-import { AnimatedNumber, Card, Empty, ScoreChip, Skeleton, StagePill, timeAgo, LoadError } from "../components/ui";
+import type { KpiDef } from "../lib/industries";
+import { AnimatedNumber, Card, Empty, ScoreChip, Skeleton, StagePill, timeAgo, LoadError, TruncationNotice } from "../components/ui";
 import { HealthCard } from "../components/HealthCard";
 import { SetupChecklist } from "../components/SetupChecklist";
 import type { Lead } from "../lib/types";
@@ -11,14 +12,53 @@ import type { Lead } from "../lib/types";
 // numbers matter, what they are called, and what the funnel looks like. A
 // hospital sees "Currently Admitted"; a recruiter sees "Offers Out".
 
+/**
+ * A KPI computed from exact server-side stage counts, or null if this kind
+ * cannot be derived from them.
+ *
+ * Every KPI on this screen was counted over the loaded page and rendered as if
+ * it were the org's total, so a 5,000-record customer read their dashboard as a
+ * description of 1,000 records with nothing saying so. Three of the seven kinds
+ * are pure functions of per-stage counts, and those are made exact here for the
+ * cost of a few head-only count requests. The rest depend on per-row dates or
+ * custom-field values that no count query can reach — those are labelled as
+ * covering the loaded records rather than quietly overstated.
+ */
+function exactKpi(def: KpiDef, counts: Record<string, number>, stages: { key: string; is_won: boolean; is_lost: boolean }[]): { value: string; raw: number } | null {
+  const fmt = (n: number) => n.toLocaleString("en-IN");
+  const sum = (pick: (s: typeof stages[number]) => boolean) =>
+    stages.filter(pick).reduce((n, s) => n + (counts[s.key] ?? 0), 0);
+
+  switch (def.kind) {
+    case "total": {
+      const n = sum((s) => !s.is_won && !s.is_lost);
+      return { value: fmt(n), raw: n };
+    }
+    case "stage_count": {
+      const n = counts[def.stageKey ?? ""] ?? 0;
+      return { value: fmt(n), raw: n };
+    }
+    case "conversion": {
+      const won = sum((s) => s.is_won);
+      const decided = won + sum((s) => s.is_lost);
+      const pct = decided === 0 ? 0 : Math.round((won / decided) * 100);
+      return { value: `${pct}%`, raw: pct };
+    }
+    default:
+      return null;
+  }
+}
+
 export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
-  const { leads, loading, error: leadsError, reload, truncated } = useLeads(org?.id);
+  const { leads, loading, error: leadsError, reload, truncated, totalLeads } = useLeads(org?.id);
 
   const stageMeta = useMemo(
     () => stages.map((s) => ({ key: s.key, is_won: s.is_won, is_lost: s.is_lost })),
     [stages],
   );
+
+  const exactCounts = useStageCounts(org?.id, stages.map((s) => s.key), truncated);
 
   const funnel = useMemo(
     () =>
@@ -61,25 +101,15 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
 
   return (
     <div className="stack">
+      <TruncationNotice
+        loaded={leads.length}
+        total={totalLeads}
+        noun={ui.leadNounPlural.toLowerCase()}
+        what={exactCounts
+          ? "Stage and conversion figures below are exact; the charts and the ranked list cover these records."
+          : "The figures and charts below cover only these."}
+      />
 
-
-    {/* The page limit is 2,000 records but the Business plan sells 50,000.
-
-        Without this, these figures silently describe only the newest 2,000 and
-
-        look complete. */}
-
-    {truncated && (
-
-      <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
-
-        <b>Showing your 2,000 most recent records.</b>{" "}
-
-        <span className="sub">You have more than that, so these figures cover only these. Narrow the date range, or export in batches.</span>
-
-      </div>
-
-    )}
       <div>
         <h1>{ui.icon} {org?.name}</h1>
         <p className="sub" style={{ marginTop: 3 }}>{ui.dashboardNote}</p>
@@ -91,7 +121,11 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
 
       <div className="grid grid-kpi stagger">
         {ui.kpis.map((k) => {
-          const { value, raw } = computeKpi(k, leads, stageMeta);
+          const exact = exactCounts ? exactKpi(k, exactCounts, stageMeta) : null;
+          const { value, raw } = exact ?? computeKpi(k, leads, stageMeta);
+          // Only the numbers we could NOT make exact get qualified. Labelling
+          // an exact figure "of the N loaded" would be its own kind of lie.
+          const partial = truncated && !exact;
           // Overdue is the one number that should feel uncomfortable when it
           // isn't zero — everything else stays in the industry accent.
           const isAlert = k.kind === "overdue" && raw > 0;
@@ -102,8 +136,13 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
               <div className="kpi-label"><span aria-hidden="true">{k.icon}</span><span>{k.label}</span></div>
               <div className="kpi-value" style={isAlert ? undefined : { color: accent }}>
                 <AnimatedNumber value={value} />
+                {partial && <span className="sub" style={{ fontSize: 13, fontWeight: 600 }}>&nbsp;+</span>}
               </div>
-              {k.hint && <div className="kpi-hint">{k.hint}</div>}
+              {partial ? (
+                <div className="kpi-hint" title="This figure needs each record's dates or field values, which cannot be counted without reading the rows.">
+                  {k.hint ? `${k.hint} · ` : ""}of the {leads.length.toLocaleString("en-IN")} loaded
+                </div>
+              ) : k.hint ? <div className="kpi-hint">{k.hint}</div> : null}
             </div>
           );
         })}

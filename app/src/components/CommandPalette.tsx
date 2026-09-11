@@ -20,6 +20,7 @@ export function CommandPalette({ navigate }: { navigate: (to: string) => void })
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [results, setResults] = useState<Lead[]>([]);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -40,6 +41,7 @@ export function CommandPalette({ navigate }: { navigate: (to: string) => void })
     if (open) {
       setQ("");
       setResults([]);
+      setSearchError(null);
       setCursor(0);
       setTimeout(() => inputRef.current?.focus(), 20);
     }
@@ -51,13 +53,23 @@ export function CommandPalette({ navigate }: { navigate: (to: string) => void })
     if (!open || !org || q.trim().length < 2) { setResults([]); return; }
     const t = setTimeout(async () => {
       const term = q.trim().replace(/[%,()]/g, "");
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("leads")
         .select("id, name, email, phone, score, stage_key, stage")
         .eq("org_id", org.id)
         .or(`name.ilike.%${term}%,email.ilike.%${term}%,phone.ilike.%${term}%`)
         .limit(8);
-      setResults((data as Lead[]) ?? []);
+      // The error was dropped, so a failed search fell through to "Nothing
+      // found" — a flat statement that the customer being searched for is not
+      // in the CRM. This is the fastest route to any record in the product;
+      // the one thing it must never do is deny a record exists.
+      if (error) {
+        setSearchError(error.message);
+        setResults([]);
+      } else {
+        setSearchError(null);
+        setResults((data as Lead[]) ?? []);
+      }
       setCursor(0);
     }, 250);
     return () => clearTimeout(t);
@@ -140,7 +152,16 @@ export function CommandPalette({ navigate }: { navigate: (to: string) => void })
         />
 
         <div style={{ maxHeight: "52vh", overflowY: "auto", padding: 7 }}>
-          {all.length === 0 && (
+          {searchError && (
+            <div style={{ padding: "14px 16px", color: "var(--red)", fontSize: 13 }}>
+              <b>Couldn't search your records.</b>{" "}
+              <span className="sub">
+                Nothing is missing — this search just couldn't reach the server, so treat the
+                results below as pages only. ({searchError})
+              </span>
+            </div>
+          )}
+          {all.length === 0 && !searchError && (
             <div className="sub" style={{ padding: 22, textAlign: "center" }}>
               {q.trim().length < 2 ? "Type at least two characters" : "Nothing found"}
             </div>

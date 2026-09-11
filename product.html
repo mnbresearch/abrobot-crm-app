@@ -149,6 +149,74 @@
   .win{color:#1a9e54;font-weight:700;}
   @media(max-width:720px){.ctrow{grid-template-columns:1.4fr 1fr;}.ctrow .hide{display:none;}}
 
+  /* FAQ — the stage that was missing between "interested" and "buying".
+     Every question here is one that was actually costing a sale: people do not
+     abandon a ₹999 CRM over features, they abandon it over "will my data be
+     stuck in there" and "why is there no trial". */
+  .faq{padding:12vh 5vw;border-top:1px solid var(--line);}
+  .faq h2{font-size:clamp(28px,5vw,72px);letter-spacing:-.03em;font-weight:600;margin-bottom:8px;}
+  .faq .note{color:var(--mut);margin-bottom:40px;}
+  .qa{border-top:1px solid var(--ink);}
+  .qa details{border-bottom:1px solid var(--line);}
+  .qa summary{list-style:none;cursor:pointer;padding:22px 0;font-size:clamp(16px,2.2vw,21px);
+    font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:20px;}
+  .qa summary::-webkit-details-marker{display:none;}
+  .qa summary::after{content:"+";font-size:26px;font-weight:400;color:var(--accent);
+    transition:transform .3s cubic-bezier(.16,1,.3,1);flex:none;}
+  .qa details[open] summary::after{transform:rotate(45deg);}
+  .qa .a{padding:0 0 24px;color:var(--mut);max-width:760px;font-size:15.5px;line-height:1.65;}
+  .qa .a b{color:var(--ink);}
+
+  /* CAPTURE — the whole point. Until this existed every button on this page
+     sent the visitor somewhere else, so a product that sells lead capture
+     captured none of its own. */
+  .capture{padding:14vh 5vw;background:var(--card);border-top:1px solid var(--line);}
+  .cap-grid{display:grid;grid-template-columns:1fr 1fr;gap:60px;align-items:start;max-width:1240px;}
+  @media(max-width:900px){.cap-grid{grid-template-columns:1fr;gap:38px;}}
+  .capture h2{font-size:clamp(30px,5vw,64px);letter-spacing:-.03em;font-weight:600;line-height:1.02;}
+  .capture h2 .serif{color:var(--accent);}
+  .capture .why{color:var(--mut);margin-top:20px;font-size:16px;max-width:440px;line-height:1.6;}
+  .promise{list-style:none;margin-top:26px;display:grid;gap:12px;font-size:14.5px;}
+  .promise li{display:flex;gap:11px;align-items:flex-start;}
+  .promise li b{color:var(--accent);flex:none;font-weight:700;}
+  .form{background:var(--bg);border:1px solid var(--line);border-radius:22px;padding:32px 30px;}
+  @media(max-width:520px){.form{padding:24px 20px;}}
+  .f2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media(max-width:520px){.f2{grid-template-columns:1fr;}}
+  .fld{margin-bottom:14px;}
+  .fld label{display:block;font-size:12.5px;font-weight:600;letter-spacing:.04em;
+    text-transform:uppercase;color:var(--mut);margin-bottom:6px;}
+  .fld input,.fld select,.fld textarea{width:100%;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;padding:13px 14px;font-family:inherit;font-size:15px;color:var(--ink);
+    transition:border-color .2s,background .2s;}
+  .fld textarea{min-height:84px;resize:vertical;}
+  .fld input:focus,.fld select:focus,.fld textarea:focus{outline:none;border-color:var(--accent);background:var(--bg);}
+  .fld input[aria-invalid="true"],.fld select[aria-invalid="true"]{border-color:var(--accent2);}
+  .err{color:var(--accent2);font-size:12.5px;margin-top:5px;display:none;}
+  .fld.bad .err{display:block;}
+  /* Honeypot. Off-screen rather than display:none — some bots skip hidden
+     inputs but fill positioned ones, and real screen readers get the label. */
+  .hp{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
+  .submit{width:100%;border:none;background:var(--ink);color:var(--bg);padding:17px;
+    border-radius:44px;font-family:inherit;font-weight:600;font-size:15.5px;cursor:pointer;
+    transition:background .3s;margin-top:6px;}
+  .submit:hover{background:var(--accent);}
+  .submit[disabled]{opacity:.6;cursor:progress;}
+  .formnote{color:var(--mut);font-size:12.5px;margin-top:14px;line-height:1.55;text-align:center;}
+  .formnote a{text-decoration:underline;}
+  .formfail{background:rgba(255,77,46,.09);border:1px solid rgba(255,77,46,.35);color:#8f2a15;
+    border-radius:12px;padding:13px 15px;font-size:14px;margin-bottom:16px;display:none;}
+  .formfail.on{display:block;}
+  .done{display:none;text-align:center;padding:14px 0;}
+  .done.on{display:block;}
+  .done .tick{width:56px;height:56px;border-radius:50%;background:var(--accent);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-size:27px;margin:0 auto 18px;}
+  .done h3{font-size:25px;font-weight:600;margin-bottom:10px;letter-spacing:-.02em;}
+  .done p{color:var(--mut);font-size:15px;margin-bottom:20px;line-height:1.6;}
+  .done .steps3{text-align:left;background:var(--card);border-radius:14px;padding:18px 20px;
+    margin-bottom:22px;display:grid;gap:9px;font-size:14px;color:var(--mut);}
+  .done .steps3 b{color:var(--ink);}
+
   /* final */
   .final{min-height:88vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:0 5vw;background:var(--ink);color:var(--bg);}
   .final h2{font-size:clamp(40px,10vw,150px);line-height:.94;letter-spacing:-.04em;font-weight:600;}
@@ -188,7 +256,7 @@
       <p>An AI agent lives on your website and WhatsApp — capturing leads 24/7, pinging your phone the second one lands, and running your entire pipeline. Flat pricing. No per-user tax.</p>
       <div class="cta">
         <a class="btn btn-fill" data-hover data-mag href="https://crm.mnbresearch.com/get" target="_blank" rel="noopener">Get started — ₹999/mo →</a>
-        <a class="btn btn-line" data-hover data-mag href="https://wa.me/919711488481?text=Hi%20—%20I'd%20like%20a%20demo%20of%20AbroBot%20CRM." target="_blank" rel="noopener">Book a demo</a>
+        <a class="btn btn-line" data-hover data-mag data-plan="Not sure yet" href="#start">Talk to us first</a>
       </div>
     </div>
     <div class="scrollcue">Scroll</div>
@@ -214,8 +282,8 @@
     <div class="frow rv" data-hover><div class="num">03</div><h3>Instant phone alerts</h3><p>Every new lead pings your phone the second it lands — any source.</p></div>
     <div class="frow rv" data-hover><div class="num">04</div><h3>Smart visual pipeline</h3><p>Drag-and-drop kanban, auto scoring, round-robin — nothing sits unowned.</p></div>
     <div class="frow rv" data-hover><div class="num">05</div><h3>Who to call next</h3><p>A ranked queue that surfaces the hottest leads first, every morning.</p></div>
-    <div class="frow rv" data-hover><div class="num">06</div><h3>Analytics &amp; forecasting</h3><p>Funnel, source ROI, revenue forecast and a team scorecard.</p></div>
-    <div class="frow rv" data-hover><div class="num">07</div><h3>Email nurture &amp; campaigns</h3><p>Automated drips and one-click broadcasts from your own domain.</p></div>
+    <div class="frow rv" data-hover><div class="num">06</div><h3>Reports that answer questions</h3><p>Created vs won, funnel by stage, leads by source, and a team leaderboard.</p></div>
+    <div class="frow rv" data-hover><div class="num">07</div><h3>Email nurture &amp; campaigns</h3><p>Automated drips and one-click broadcasts under your brand name, with replies going to your inbox.</p></div>
     <div class="frow rv" data-hover><div class="num">08</div><h3>API &amp; webhooks</h3><p>Scoped API keys to read and push records, and signed callbacks when anything changes.</p></div>
   </section>
 
@@ -224,7 +292,7 @@
     <div class="stcell rv"><b data-count="24" data-suffix="/7">24/7</b><span>Always-on lead capture</span></div>
     <div class="stcell rv"><b data-count="3" data-suffix="">3</b><span>Channels — web · WhatsApp · forms</span></div>
     <div class="stcell rv"><b data-count="60" data-suffix="s">60s</b><span>Lead reaches your phone</span></div>
-    <div class="stcell rv"><b data-count="1" data-suffix="">1</b><span>Login for all your brands</span></div>
+    <div class="stcell rv"><b data-count="15" data-suffix="">15</b><span>Industry setups — stages &amp; fields, ready made</span></div>
   </section>
 
   <!-- STEPS -->
@@ -246,33 +314,264 @@
       <div class="plan rv" data-hover><div class="tag">Starter</div><h3>Solo</h3><div class="for">Solopreneurs &amp; small shops</div>
         <div class="amt">₹999<small>/mo</small></div>
         <ul><li><b>+</b>3 users · 1,000 records</li><li><b>+</b>1,000 AI replies/mo</li><li><b>+</b>AI agent + form capture</li><li><b>+</b>Pipeline, alerts, CSV export</li></ul>
-        <a class="buy" data-hover href="https://wa.me/919711488481?text=Interested%20in%20AbroBot%20CRM%20Starter%20(₹999/mo)." target="_blank" rel="noopener">Inquire</a></div>
+        <a class="buy" data-hover data-plan="Starter — ₹999/mo" href="#start">Get started</a></div>
       <div class="plan pop rv" data-hover><div class="tag">★ Most popular</div><h3>Growth</h3><div class="for">Growing teams</div>
         <div class="amt">₹2,499<small>/mo</small></div>
         <ul><li><b>+</b>10 users · 10,000 records</li><li><b>+</b>1,500 WhatsApp msgs/mo</li><li><b>+</b>WhatsApp capture + auto-reply</li><li><b>+</b>Nurture, analytics, priority queue</li></ul>
-        <a class="buy" data-hover href="https://wa.me/919711488481?text=Interested%20in%20AbroBot%20CRM%20Growth%20(₹2,499/mo)." target="_blank" rel="noopener">Inquire</a></div>
+        <a class="buy" data-hover data-plan="Growth — ₹2,499/mo" href="#start">Get started</a></div>
       <div class="plan rv" data-hover><div class="tag">Business</div><h3>Scale</h3><div class="for">Larger sales teams</div>
         <div class="amt">₹4,999<small>/mo</small></div>
         <ul><li><b>+</b>30 users · 50,000 records</li><li><b>+</b>3,000 WhatsApp msgs/mo</li><li><b>+</b>Full REST API &amp; webhooks</li><li><b>+</b>Custom AI, API &amp; webhooks</li></ul>
-        <a class="buy" data-hover href="https://wa.me/919711488481?text=Interested%20in%20AbroBot%20CRM%20Business%20(₹4,999/mo)." target="_blank" rel="noopener">Inquire</a></div>
+        <a class="buy" data-hover data-plan="Business — ₹4,999/mo" href="#start">Get started</a></div>
       <div class="plan rv" data-hover><div class="tag">Enterprise</div><h3>Custom</h3><div class="for">Large organisations</div>
         <div class="amt">Let's talk</div>
-        <ul><li><b>+</b>Unlimited everything</li><li><b>+</b>Custom integrations &amp; SLAs</li><li><b>+</b>Dedicated manager &amp; SLAs</li></ul>
-        <a class="buy" data-hover href="https://wa.me/919711488481?text=I'd%20like%20to%20discuss%20an%20Enterprise%20AbroBot%20CRM%20plan." target="_blank" rel="noopener">Talk to sales</a></div>
+        <ul><li><b>+</b>Limits set to fit your volume</li><li><b>+</b>Custom integrations, scoped with you</li><li><b>+</b>A named person you deal with directly</li></ul>
+        <a class="buy" data-hover data-plan="Enterprise — custom" href="#start">Talk to sales</a></div>
     </div>
-    <p class="addons rv">Add-ons — extra user ₹199/mo · +10,000 records ₹999/mo · WhatsApp API number ₹1,499/mo. White-label and multi-brand are on the roadmap, not available today — ask us for timelines before buying on that basis.</p>
+    <p class="addons rv">Need more users, more records or your own WhatsApp number than a plan carries? There is no self-serve add-on to buy today — talk to us and we'll quote it. White-label and multi-brand are on the roadmap, not available today, and one account belongs to one business — ask us for timelines before buying on that basis.</p>
   </section>
 
   <!-- COMPARE -->
   <section class="cmp">
     <h2 class="rv">Flat pricing beats the per-user tax.</h2>
-    <div class="note rv">What an 8-person team actually pays each month.</div>
+    <div class="note rv">What an 8-person team pays each month at published list prices. Licence cost only — this is not a feature comparison, and every tool here does things we don't.</div>
     <div class="ctbl rv">
-      <div class="ctrow h"><div>Tool</div><div>8-user / month</div><div class="hide">Model</div><div class="hide">AI agent + WhatsApp</div></div>
-      <div class="ctrow you"><div>AbroBot CRM — Growth</div><div class="win">₹2,499</div><div class="hide">Flat, per business</div><div class="hide win">Included</div></div>
-      <div class="ctrow"><div>Zoho CRM — Professional</div><div>₹11,200</div><div class="hide">Per user (₹1,400)</div><div class="hide">Not bundled</div></div>
-      <div class="ctrow"><div>Freshsales — Pro</div><div>₹28,792</div><div class="hide">Per user (₹3,599)</div><div class="hide">Not bundled</div></div>
-      <div class="ctrow"><div>Kylas</div><div>₹12,999</div><div class="hide">Flat, unlimited</div><div class="hide">Not bundled</div></div>
+      <div class="ctrow h"><div>Tool</div><div>8-user / month</div><div class="hide">Model</div><div class="hide">Price as published</div></div>
+      <div class="ctrow you"><div>AbroBot CRM — Growth</div><div class="win">₹2,499</div><div class="hide">Flat, per business</div><div class="hide win">On this page</div></div>
+      <div class="ctrow"><div>Zoho CRM — Professional</div><div>₹11,200</div><div class="hide">₹1,400 × 8 users</div><div class="hide">zoho.com, Sep 2026</div></div>
+      <div class="ctrow"><div>Kylas — Elevate</div><div>₹12,999</div><div class="hide">Flat, unlimited users</div><div class="hide">kylas.io, Sep 2026</div></div>
+    </div>
+    <div class="note rv">Prices as published September 2026, in INR and excluding GST — please check the current vendor pricing page before you decide, because theirs changes and so does ours. We've dropped a third comparison we previously showed because we could not verify that vendor's published rupee price.</div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="faq">
+    <h2 class="rv">The questions people actually ask.</h2>
+    <div class="note rv">Answered plainly, including the ones with awkward answers.</div>
+    <div class="qa rv">
+      <details>
+        <summary>Is there a free trial?</summary>
+        <div class="a">
+          Not a time-limited one, and we'd rather say why than pretend. A 7-day trial of a CRM is
+          long enough to look around and nowhere near long enough to see whether it changes how you
+          sell — so it mostly teaches people to rush. <b>Instead, signing up is free and stays
+          free.</b> You can build your pipeline, add your fields and tune the AI agent without
+          paying anything, and a small free allowance — 50 records and 50 AI replies — lets you put
+          a handful of real leads through it and watch what happens. What ₹999 switches on is
+          capturing records at volume, bringing your existing list in, AI replies at volume and
+          sending. So you get to try the part that matters — does this fit how my business works —
+          before any money changes hands, and you're never mid-setup when a clock runs out.
+        </div>
+      </details>
+      <details>
+        <summary>Why ₹999? What's the catch?</summary>
+        <div class="a">
+          There isn't one, but here's the arithmetic so you can check. ₹999 is flat for the whole
+          business — three users, 1,000 records, 1,000 AI replies a month. The comparable plan at
+          Zoho, Professional, is listed at ₹1,400 <i>per user</i> per month on zoho.com as of
+          September 2026, so an eight-person team pays ₹11,200. We can charge less
+          because we don't have a sales team, the AI runs on models we host efficiently, and one
+          engineer maintains the product. What Starter genuinely does not include is WhatsApp
+          sending and the REST API — those cost us real money per message, so they start at Growth
+          (₹2,499). We'd rather name that than have you find out after paying.
+        </div>
+      </details>
+      <details>
+        <summary>Who owns the data, and can I get it out?</summary>
+        <div class="a">
+          You own it. <b>Every record, every custom field and every note exports to CSV from the
+          Reports screen, any time, at no charge</b> — not a support ticket, not a fee, not a
+          30-day notice. On a paid plan the REST API reads the same data programmatically. We say
+          this loudly because the honest test of a CRM is how easy it is to leave, and a company
+          that makes leaving hard is telling you something about how it plans to keep you.
+        </div>
+      </details>
+      <details>
+        <summary>How hard is it to move off my current CRM or spreadsheet?</summary>
+        <div class="a">
+          Export a CSV from wherever you are now, import it here, and map your columns on screen
+          before anything saves. Then paste one line of code into your website for the AI agent.
+          Most businesses are running the same day. Being straight about the order: building your
+          pipeline and fields is free, and the free allowance covers 50 records, so you can prove
+          the mapping on a sample — but <b>bringing your full list across needs a paid plan</b>,
+          because that is the storage you're actually buying. If you'd like, send us your export
+          first and we'll tell you honestly whether it maps cleanly, before you pay anything.
+        </div>
+      </details>
+      <details>
+        <summary>Can I cancel? What happens to my records?</summary>
+        <div class="a">
+          <b>There is nothing to cancel.</b> A payment buys one month and then simply stops — we
+          create no recurring mandate on your card, so there is no renewal to catch and no notice
+          period or exit fee. If you don't want another month, don't pay for one. When a plan
+          lapses the account goes read-only rather than being deleted: you keep seeing everything
+          and can still export the lot. <b>Nothing is destroyed because you stopped paying.</b>
+          Coming back later just means picking a plan again.
+        </div>
+      </details>
+      <details>
+        <summary>Are WhatsApp messages really included?</summary>
+        <div class="a">
+          Included up to a monthly count — 1,500 on Growth, 3,000 on Business — and the reason
+          there's a number at all is that Meta charges us per message, so "unlimited WhatsApp" from
+          anyone is either a bluff or a bill waiting to arrive. Your usage is shown live in
+          <b>Settings → Plan &amp; usage</b>. When the allowance is spent, WhatsApp sending pauses
+          until the reset or an upgrade — <b>we never quietly bill you for overage.</b> Everything
+          else keeps working. From 1 October 2026 Meta also starts charging for service messages,
+          which is priced into these numbers already.
+        </div>
+      </details>
+      <details>
+        <summary>Is my customers' data separated from other businesses'?</summary>
+        <div class="a">
+          Yes, and it's enforced in the database rather than in application code — every record
+          carries an organisation, and row-level security means a query from your account cannot
+          return another business's rows even if the app asked it to. We test this with a script
+          that attempts real cross-tenant reads, inserts, updates and deletes and requires every
+          one of them to fail. Data is hosted in the cloud on Supabase (Postgres). On backups we'd
+          rather be exact than reassuring: we take a nightly database dump and keep it for 90 days,
+          which is a real copy but a modest one — it is not point-in-time recovery, and we have not
+          yet rehearsed a full restore, so we don't claim a recovery time. That is also why CSV
+          export is free and always available: your own copy is the backup you control.
+        </div>
+      </details>
+      <details>
+        <summary>Do I need a developer?</summary>
+        <div class="a">
+          For the normal setup, no. The AI agent is one line of code pasted before
+          <code>&lt;/body&gt;</code> — the same shape as a Google Analytics tag, and your web person
+          or site builder will recognise it instantly. Everything after that is configured from the
+          CRM: greeting, tone, what the agent knows, your pipeline stages, your fields. A developer
+          only becomes useful on Business, where the REST API and webhooks let you wire the CRM
+          into other systems.
+        </div>
+      </details>
+      <details>
+        <summary>What if the AI answers something wrong?</summary>
+        <div class="a">
+          You control what it knows and what it may not say — there's a guardrails box for exactly
+          this, and the sensible default is that it never invents prices or promises, and offers to
+          have a human confirm instead. Every conversation is saved in full under Conversations, so
+          you can read what it actually said rather than hope. If it gets something wrong, you edit
+          the knowledge and it's fixed for the next visitor. It's a well-briefed receptionist, not
+          an oracle, and it should be set up that way.
+        </div>
+      </details>
+      <details>
+        <summary>What isn't ready yet?</summary>
+        <div class="a">
+          White-label and multi-brand are on the roadmap and <b>not available today</b>, so please
+          don't buy on that basis — ask us for timelines first. There's no native mobile app; the
+          CRM is a web app that works on a phone browser, and lead alerts arrive on Telegram, which
+          is what makes the 60-second number real. If something you need is missing, ask before you
+          pay and we'll tell you straight whether it exists, whether it's coming, or whether we
+          aren't the right fit.
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- CAPTURE -->
+  <section class="capture" id="start">
+    <div class="cap-grid">
+      <div class="rv">
+        <h2>Tell us what you need. <span class="serif">We'll reply within a day.</span></h2>
+        <p class="why">
+          A real person reads this — not a ticket queue. Say what your business does and what's
+          slipping through, and you'll get a straight answer about whether AbroBot CRM fits, including
+          if the answer is no.
+        </p>
+        <ul class="promise">
+          <li><b>→</b><span>A reply within 1 business day, from a person.</span></li>
+          <li><b>→</b><span>No obligation, no call unless you ask for one.</span></li>
+          <li><b>→</b><span>We'll say plainly if we're not the right fit for you.</span></li>
+          <li><b>→</b><span>Prefer to just look? <a href="https://crm.mnbresearch.com/get" target="_blank" rel="noopener" style="text-decoration:underline">Sign up free</a> — setup costs nothing.</span></li>
+        </ul>
+        <p class="why" style="margin-top:26px;font-size:14px">
+          This form runs on AbroBot CRM. Your enquiry lands in our own pipeline, scores itself and
+          pings our phone in about a minute — which is the product, working on the company that
+          makes it.
+        </p>
+      </div>
+
+      <div class="rv">
+        <form class="form" id="capform" novalidate>
+          <div class="formfail" id="capfail"></div>
+
+          <div class="f2">
+            <div class="fld" id="w-name">
+              <label for="c-name">Your name</label>
+              <input id="c-name" name="name" type="text" autocomplete="name" placeholder="Priya Sharma">
+              <div class="err">Please tell us your name.</div>
+            </div>
+            <div class="fld" id="w-phone">
+              <label for="c-phone">Phone / WhatsApp</label>
+              <input id="c-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="98765 43210">
+              <div class="err">A 10-digit Indian mobile, or a number with country code.</div>
+            </div>
+          </div>
+
+          <div class="fld" id="w-email">
+            <label for="c-email">Email</label>
+            <input id="c-email" name="email" type="email" autocomplete="email" placeholder="priya@yourbusiness.in">
+            <div class="err">That doesn't look like a working email address.</div>
+          </div>
+
+          <div class="f2">
+            <div class="fld" id="w-company">
+              <label for="c-company">Business name <span style="text-transform:none;font-weight:400">(optional)</span></label>
+              <input id="c-company" name="company" type="text" autocomplete="organization" placeholder="Sharma Interiors">
+            </div>
+            <div class="fld" id="w-plan">
+              <label for="c-plan">Plan you're looking at</label>
+              <select id="c-plan" name="plan">
+                <option value="Not sure yet">Not sure yet — help me pick</option>
+                <option value="Starter — ₹999/mo">Starter — ₹999/mo</option>
+                <option value="Growth — ₹2,499/mo">Growth — ₹2,499/mo</option>
+                <option value="Business — ₹4,999/mo">Business — ₹4,999/mo</option>
+                <option value="Enterprise — custom">Enterprise — custom</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="fld">
+            <label for="c-msg">What do you want it to do? <span style="text-transform:none;font-weight:400">(optional)</span></label>
+            <textarea id="c-msg" name="message" placeholder="We get enquiries on Instagram and WhatsApp and lose half of them. About 40 a week."></textarea>
+          </div>
+
+          <!-- Bots fill every field they find. A human never sees this one, so
+               anything in it is automated, and we drop the submission without
+               telling the sender — a bot that learns it failed simply retries. -->
+          <div class="hp" aria-hidden="true">
+            <label for="c-website">Leave this empty</label>
+            <input id="c-website" name="website" type="text" tabindex="-1" autocomplete="off">
+          </div>
+
+          <button class="submit" type="submit" id="capsend">Send my enquiry →</button>
+
+          <p class="formnote">
+            Or WhatsApp us on
+            <a href="https://wa.me/919711488480?text=Hi%20%E2%80%94%20I'd%20like%20to%20know%20more%20about%20AbroBot%20CRM." target="_blank" rel="noopener">+91 97114 88480</a>.
+            We use your details only to reply to this enquiry — see our
+            <a href="https://crm.mnbresearch.com/terms-and-conditions" target="_blank" rel="noopener">terms</a>.
+          </p>
+        </form>
+
+        <div class="form done" id="capdone">
+          <div class="tick">✓</div>
+          <h3>Got it — it's in our pipeline.</h3>
+          <p id="capdonemsg">A real person will come back to you within 1 business day.</p>
+          <div class="steps3">
+            <div><b>1.</b> Your enquiry has already pinged our phone.</div>
+            <div><b>2.</b> You'll get a reply within 1 business day, from a person, not a template.</div>
+            <div><b>3.</b> Want to look around meanwhile? Signing up is free.</div>
+          </div>
+          <div class="cta" style="justify-content:center">
+            <a class="btn btn-fill" data-hover href="https://crm.mnbresearch.com/get" target="_blank" rel="noopener">Sign up free →</a>
+            <a class="btn btn-line" data-hover href="https://wa.me/919711488480?text=Hi%20%E2%80%94%20I%20just%20sent%20an%20enquiry%20about%20AbroBot%20CRM." target="_blank" rel="noopener">WhatsApp us</a>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -282,7 +581,7 @@
     <p>Put an AI agent on your site in minutes. Free to sign up and set up — from ₹999/month to go live.</p>
     <div class="cta">
       <a class="btn btn-fill" data-hover data-mag href="https://crm.mnbresearch.com/get" target="_blank" rel="noopener">Get started — ₹999/mo →</a>
-      <a class="btn btn-line" data-hover data-mag href="https://crm.mnbresearch.com/pricing" target="_blank" rel="noopener">See all plans</a>
+      <a class="btn btn-line" data-hover data-mag data-plan="Not sure yet" href="#start">Ask us a question</a>
     </div>
   </section>
 
@@ -378,5 +677,268 @@
   }
 })();
 </script>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     The funnel.
+
+     Kept in its own IIFE, deliberately. The script above owns a smooth-scroll
+     shell that transforms #content and fakes body height; a bug in the form
+     must not be able to take scrolling down with it, and vice versa.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  // ── Capture key ───────────────────────────────────────────────────────────
+  // Run supabase/migrations/20260908120000_nurture_segments.sql and paste the
+  // key it prints here. It is a capture-only credential: it can create records
+  // in this one organisation and can read nothing at all, which is why it is
+  // safe in page source — the same posture as a Google Analytics ID.
+  var CAPTURE_KEY = "crmweb_560a2c65a93948d68afcd4348433a875";
+
+  var ENDPOINT = "https://pomsltnrxvbcafwtbtlc.supabase.co/functions/v1/lead-webhook";
+  var WA = "https://wa.me/919711488480";
+
+  var form = document.getElementById("capform");
+  var done = document.getElementById("capdone");
+  var fail = document.getElementById("capfail");
+  var btn  = document.getElementById("capsend");
+  var plan = document.getElementById("c-plan");
+  if (!form) return;
+
+  // ── Scrolling to the form ─────────────────────────────────────────────────
+  // Cannot use a plain anchor jump or scrollIntoView. In smooth mode #content
+  // is position:fixed and moved by transform, so the browser's idea of where
+  // an element sits is meaningless — offsetTop chained through offsetParent is
+  // the honest measurement in both modes.
+  function docTop(el){ var t = 0; while (el) { t += el.offsetTop; el = el.offsetParent; } return t; }
+
+  function openForm(planLabel){
+    var target = document.getElementById("start");
+    if (!target) return;
+
+    // Coming back after a successful send — someone clicking a second plan
+    // wants to ask a second question, not stare at their own receipt.
+    if (done.classList.contains("on")) {
+      done.classList.remove("on");
+      form.style.display = "";
+    }
+
+    if (planLabel && plan) {
+      var matched = false;
+      for (var i = 0; i < plan.options.length; i++) {
+        if (plan.options[i].value === planLabel) { plan.selectedIndex = i; matched = true; break; }
+      }
+      // A plan card whose label we do not have an option for must not silently
+      // select the wrong one. Leave the default and let them choose.
+      if (!matched) plan.selectedIndex = 0;
+    }
+
+    var y = Math.max(0, docTop(target) - 40);
+
+    // Ask for an animated scroll only when nothing else is animating and the
+    // visitor has not asked us to stop. In the smooth-shell mode the RAF loop
+    // does the easing, so "auto" here is what produces the glide; and someone
+    // with prefers-reduced-motion set gets an instant jump, which is the whole
+    // point of the setting. Checking the media query directly rather than the
+    // shell class — the shell is also off on touch devices, where a smooth
+    // scroll is fine and expected.
+    var still = document.documentElement.classList.contains("smooth");
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var behavior = (still || reduce) ? "auto" : "smooth";
+    try { window.scrollTo({ top: y, behavior: behavior }); }
+    catch (e) { window.scrollTo(0, y); }   // older Safari has no options object
+
+    // Focus the first empty field, but only after the scroll has been asked
+    // for — focusing first makes the browser jump, fighting the animation.
+    setTimeout(function(){
+      var first = document.getElementById("c-name");
+      if (first && !first.value) first.focus({ preventScroll: true });
+    }, 520);
+  }
+
+  document.querySelectorAll("[data-plan]").forEach(function(el){
+    el.addEventListener("click", function(e){
+      e.preventDefault();
+      openForm(el.getAttribute("data-plan"));
+    });
+  });
+
+  // Deep links: /product.html?plan=Growth lets an ad or an email point straight
+  // at the form with the right plan already chosen.
+  (function(){
+    var q = new URLSearchParams(location.search).get("plan");
+    if (!q) return;
+    var want = q.toLowerCase();
+    for (var i = 0; i < plan.options.length; i++) {
+      if (plan.options[i].value.toLowerCase().indexOf(want) === 0) { plan.selectedIndex = i; break; }
+    }
+    // After load, not on a guessed timer. docTop() reads offsetTop, and in the
+    // smooth-shell mode the page height is only set in the load handler — so a
+    // fixed 300ms delay measures a half-laid-out page on a slow connection and
+    // scrolls to the wrong place, which on this page means landing in the
+    // middle of the FAQ instead of on the form.
+    var go = function(){ setTimeout(function(){ openForm(null); }, 120); };
+    if (document.readyState === "complete") go();
+    else window.addEventListener("load", go);
+  })();
+
+  // ── Validation ────────────────────────────────────────────────────────────
+  var EMAIL = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
+
+  function mark(id, bad){
+    var w = document.getElementById(id);
+    w.classList.toggle("bad", bad);
+    var input = w.querySelector("input, select");
+    if (input) input.setAttribute("aria-invalid", bad ? "true" : "false");
+    return !bad;
+  }
+
+  function phoneOk(v){
+    var d = v.replace(/[^\d+]/g, "");
+    if (/^\d{10}$/.test(d)) return true;                 // Indian mobile
+    return /^\+\d{10,15}$/.test(d) || /^\d{11,15}$/.test(d);
+  }
+
+  function validate(){
+    var ok = true;
+    ok = mark("w-name",  document.getElementById("c-name").value.trim().length < 2) && ok;
+    ok = mark("w-phone", !phoneOk(document.getElementById("c-phone").value.trim())) && ok;
+    ok = mark("w-email", !EMAIL.test(document.getElementById("c-email").value.trim())) && ok;
+    return ok;
+  }
+
+  // Clear a field's error as soon as it is corrected. Leaving errors up while
+  // someone fixes them makes a form feel like it is arguing with you.
+  ["c-name","c-phone","c-email"].forEach(function(id){
+    document.getElementById(id).addEventListener("input", function(){
+      var w = document.getElementById(id.replace("c-", "w-"));
+      if (w.classList.contains("bad")) validate();
+    });
+  });
+
+  // ── Submit ────────────────────────────────────────────────────────────────
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    fail.classList.remove("on");
+
+    if (!validate()) {
+      var firstBad = form.querySelector(".fld.bad input");
+      if (firstBad) firstBad.focus();
+      return;
+    }
+
+    // Honeypot: behave exactly like success, send nothing.
+    if (document.getElementById("c-website").value) { finish("Thanks — we'll be in touch."); return; }
+
+    if (CAPTURE_KEY.indexOf("PASTE_") === 0) {
+      // Better a visible, actionable failure than a form that swallows real
+      // enquiries because a deploy step was missed.
+      showFail(
+        "This form isn't connected yet. Please WhatsApp us on +91 97114 88480 — " +
+        "we'll reply straight away.",
+        "Send my enquiry →"
+      );
+      console.error("[AbroBot] CAPTURE_KEY has not been set in product.html.");
+      return;
+    }
+
+    var name    = document.getElementById("c-name").value.trim();
+    var email   = document.getElementById("c-email").value.trim();
+    var phone   = document.getElementById("c-phone").value.trim();
+    var company = document.getElementById("c-company").value.trim();
+    var chosen  = plan.value;
+    var note    = document.getElementById("c-msg").value.trim();
+
+    // The plan lands in two places on purpose: `custom.interested_in`, so it is
+    // a field on the record you can filter and merge into the follow-up copy;
+    // and the message, because that is what the Telegram alert quotes and what
+    // the dedupe path files as a note when this person has enquired before.
+    //
+    // NOT in `subject` as well. lead-webhook prepends subject to message, so
+    // sending both put the plan in the record twice — once in the alert, once
+    // in the note, reading like a bug to whoever picks the enquiry up.
+    var message =
+      "Plan of interest: " + chosen +
+      (company ? "\nBusiness: " + company : "") +
+      (note ? "\n\n" + note : "");
+
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+
+    // A hung request must not leave someone staring at "Sending…" forever.
+    var ctl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = setTimeout(function(){ if (ctl) ctl.abort(); }, 15000);
+
+    fetch(ENDPOINT + "?key=" + encodeURIComponent(CAPTURE_KEY), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: ctl ? ctl.signal : undefined,
+      body: JSON.stringify({
+        name: name, email: email, phone: phone,
+        message: message,
+        custom: { interested_in: chosen, company: company || undefined }
+      })
+    })
+    .then(function(r){ return r.json().then(function(j){ return { ok: r.ok, body: j }; }); })
+    .then(function(res){
+      clearTimeout(timer);
+      if (res.ok && res.body && res.body.ok) {
+        finish(
+          res.body.deduped
+            ? "You've reached us before, so this is on your existing thread — we'll pick it up from there within 1 business day."
+            : "A real person will come back to you within 1 business day."
+        );
+      } else {
+        // Never show the raw server message: it is written for an integrator,
+        // not for a prospect, and on this endpoint it can name plan limits.
+        showFail("Something went wrong at our end. Please WhatsApp us on +91 97114 88480 — that always works.");
+        console.error("[AbroBot] capture failed:", res.body);
+      }
+    })
+    .catch(function(err){
+      clearTimeout(timer);
+      showFail(
+        "We couldn't reach our server — that's us, not you. " +
+        "Please WhatsApp +91 97114 88480 and we'll pick it up immediately."
+      );
+      console.error("[AbroBot] capture error:", err);
+    });
+  });
+
+  // `label` distinguishes a request that failed from one that was never made.
+  // The unset-key branch reaches showFail before the button was ever disabled,
+  // and "Try again" on an attempt that did not happen invites someone to press
+  // it repeatedly against the same broken deploy.
+  function showFail(msg, label){
+    fail.innerHTML = msg.replace(
+      "+91 97114 88480",
+      '<a href="' + WA + '" target="_blank" rel="noopener" style="text-decoration:underline">+91 97114 88480</a>'
+    );
+    fail.classList.add("on");
+    btn.disabled = false;
+    btn.textContent = label || "Try again →";
+  }
+
+  function finish(msg){
+    document.getElementById("capdonemsg").textContent = msg;
+    form.style.display = "none";
+    done.classList.add("on");
+    // Reset the button. openForm() deliberately brings this form back when
+    // someone clicks a second plan to ask a second question — and without this
+    // it returned disabled, still reading "Sending…", making one enquiry per
+    // visit the hard limit.
+    btn.disabled = false;
+    btn.textContent = "Send my enquiry →";
+    // The smooth-scroll shell sized the page before this element appeared, so
+    // without this the last section becomes unreachable on desktop.
+    window.dispatchEvent(new Event("resize"));
+  }
+})();
+</script>
+
+<!-- Our own AI agent, on our own website. It was on neither marketing page —
+     a product that sells "an AI agent on your site in minutes" was the one site
+     not running one. data-org points at MNB Research, whose knowledge base
+     already carries the current AbroBot CRM tiers. -->
+<script src="https://crm.mnbresearch.com/widget.js" data-org="mnb-research"></script>
 </body>
 </html>

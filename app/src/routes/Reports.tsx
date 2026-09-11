@@ -3,8 +3,8 @@ import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
-import { useApp, useLeads } from "../lib/store";
-import { Card, Empty, Spinner, useToast , LoadError } from "../components/ui";
+import { fetchAllLeads, useApp, useLeads } from "../lib/store";
+import { Card, Empty, Spinner, useToast, LoadError, TruncationNotice } from "../components/ui";
 import type { Lead, Profile } from "../lib/types";
 import { supabase } from "../lib/supabase";
 import { useEffect } from "react";
@@ -22,15 +22,26 @@ const RANGES = [
 
 export function Reports() {
   const { org, ui, stages } = useApp();
-  const { leads, loading, error, reload, truncated } = useLeads(org?.id);
+  const { leads, loading, error, reload, truncated, totalLeads } = useLeads(org?.id);
   const [range, setRange] = useState<string>("90");
   const [team, setTeam] = useState<Profile[]>([]);
+  const [teamError, setTeamError] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
     if (!org) return;
     void supabase.from("profiles").select("*").eq("org_id", org.id)
-      .then(({ data }) => setTeam((data as Profile[]) ?? []));
+      .then(({ data, error: teamErr }) => {
+        // The error was dropped, so a failed read produced an empty team — and
+        // the leaderboard below is built by mapping over that array. An entire
+        // sales team rendered as a blank table headed "🏆 Team leaderboard",
+        // which reads as "nobody has closed anything", not as a failed request.
+        // The export also resolves owner names from it, so every row's owner
+        // column silently became "(removed user)".
+        if (teamErr) { setTeamError(teamErr.message); return; }
+        setTeamError(null);
+        setTeam((data as Profile[]) ?? []);
+      });
   }, [org]);
 
   const scoped = useMemo(() => {
@@ -101,12 +112,48 @@ export function Reports() {
   //    a dental clinic and a law firm each get their own columns;
   //  * fetches notes, in chunks, because ids go in the URL and a 10,000-record
   //    export would otherwise produce a request no server will accept.
+  //
+  // And the fourth thing, which mattered most: it exported `scoped` — the same
+  // in-memory page the charts are drawn from. product.html promises "every
+  // record, every custom field and every note exports to CSV… we say this
+  // loudly because the honest test of a CRM is how easy it is to leave", while
+  // Business sells 50,000 records and this file stopped at whatever one request
+  // returned. It now pages through the whole set server-side before writing
+  // anything, and reports progress, because a 50,000-row export takes long
+  // enough that a silent button reads as a broken one.
   const [exporting, setExporting] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number | null; phase: string } | null>(null);
 
   const exportCsv = async () => {
-    if (exporting || scoped.length === 0) return;
+    if (exporting || !org) return;
     setExporting(true);
+    setProgress({ done: 0, total: null, phase: "Reading records" });
     try {
+      // Scoped server-side rather than downloading everything and discarding
+      // most of it — a "30 days" export on a 50,000-record org should be a
+      // small request, not a large one followed by a filter.
+      const createdAfter = range === "all"
+        ? null
+        : new Date(Date.now() - Number(range) * 86400000).toISOString();
+
+      const { leads: allRows, error: fetchErr, warning: fetchWarning } = await fetchAllLeads(org.id, {
+        createdAfter,
+        onProgress: (done, total) => setProgress({ done, total, phase: "Reading records" }),
+      });
+
+      // Short of the org's own count, or stopped at the safety limit. The file
+      // is still worth writing — it is most of their data — but it must not go
+      // out silently, which is the whole failure this export exists to end.
+      if (fetchWarning) toast.error(fetchWarning);
+
+      if (fetchErr) {
+        // Writing a short file here is the failure mode this whole change
+        // exists to prevent: the customer gets something that opens fine and is
+        // missing records they will never know about.
+        toast.error(`Export stopped after ${allRows.length.toLocaleString("en-IN")} records: ${fetchErr}. No file was written — please try again.`);
+        return;
+      }
+
       const stageLabel = new Map(stages.map((s) => [s.key, s.label]));
       const owner = new Map(team.map((p) => [p.id, p.full_name || p.email || p.id]));
 
@@ -116,8 +163,9 @@ export function Reports() {
       // at the proxy rather than an error we can show.
       const notes = new Map<string, string[]>();
       let notesFailed = false;
-      const ids = scoped.map((l) => l.id);
+      const ids = allRows.map((l) => l.id);
       for (let i = 0; i < ids.length; i += 100) {
+        setProgress({ done: i, total: ids.length, phase: "Reading notes" });
         const { data, error } = await supabase
           .from("activities")
           .select("lead_id, type, content, created_at")
@@ -131,11 +179,12 @@ export function Reports() {
           notes.set(a.lead_id, list);
         }
       }
+      setProgress({ done: ids.length, total: ids.length, phase: "Building file" });
 
       // Union of custom keys across the rows being exported, in first-seen
       // order so the columns are stable between exports of the same data.
       const customKeys: string[] = [];
-      for (const l of scoped) {
+      for (const l of allRows) {
         for (const k of Object.keys(l.custom ?? {})) {
           if (!customKeys.includes(k)) customKeys.push(k);
         }
@@ -185,7 +234,7 @@ export function Reports() {
       };
 
       const rows = [cols.map((c) => c.header).join(",")].concat(
-        scoped.map((l) => cols.map((c) => esc(c.get(l))).join(",")),
+        allRows.map((l) => cols.map((c) => esc(c.get(l))).join(",")),
       );
 
       // BOM so Excel on Windows reads it as UTF-8. Without it, every name with
@@ -208,11 +257,12 @@ export function Reports() {
 
       toast.show(
         notesFailed
-          ? `Exported ${scoped.length} rows — notes could not be read, so that column is empty`
-          : `Exported ${scoped.length} rows, ${cols.length} columns`,
+          ? `Exported ${allRows.length.toLocaleString("en-IN")} rows — notes could not be read, so that column is empty`
+          : `Exported ${allRows.length.toLocaleString("en-IN")} rows, ${cols.length} columns`,
       );
     } finally {
       setExporting(false);
+      setProgress(null);
     }
   };
 
@@ -232,29 +282,25 @@ export function Reports() {
 
   return (
     <div className="stack">
+      {/* The export is explicitly excluded from this warning now — it pages
+          through everything server-side, so it is the one thing on this screen
+          that is NOT limited to the loaded records. */}
+      <TruncationNotice
+        loaded={leads.length}
+        total={totalLeads}
+        noun={ui.leadNounPlural.toLowerCase()}
+        what="The charts and leaderboard below cover only these — the CSV export covers every record."
+      />
 
+      {teamError && <LoadError message={`Team could not be loaded: ${teamError}. The leaderboard below is empty for that reason, not because nobody has closed anything.`} />}
 
-    {/* The page limit is 2,000 records but the Business plan sells 50,000.
-
-        Without this, these charts and this export silently describe only the newest 2,000 and
-
-        look complete. */}
-
-    {truncated && (
-
-      <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
-
-        <b>Showing your 2,000 most recent records.</b>{" "}
-
-        <span className="sub">You have more than that, so these charts and this export cover only these. Narrow the date range, or export in batches.</span>
-
-      </div>
-
-    )}
       <div className="row">
         <div>
           <h1>Reports</h1>
-          <p className="sub" style={{ marginTop: 2 }}>{scoped.length} {ui.leadNounPlural.toLowerCase()} in range</p>
+          <p className="sub" style={{ marginTop: 2 }}>
+            {scoped.length.toLocaleString("en-IN")} {ui.leadNounPlural.toLowerCase()} in range
+            {truncated ? ` · of ${(totalLeads ?? 0).toLocaleString("en-IN")} total` : ""}
+          </p>
         </div>
         <div className="spacer" />
         <div className="row row-wrap">
@@ -267,8 +313,17 @@ export function Reports() {
               {r.label}
             </button>
           ))}
-          <button className="btn btn-sm" onClick={() => void exportCsv()} disabled={exporting}>
-            {exporting ? "Exporting…" : "⬇ Export CSV"}
+          <button
+            className={`btn btn-sm${exporting ? " btn-busy" : ""}`}
+            onClick={() => void exportCsv()}
+            disabled={exporting}
+            title="Exports every record in the selected range, not just the ones shown on this screen"
+          >
+            {exporting
+              ? progress
+                ? `${progress.phase}… ${progress.done.toLocaleString("en-IN")}${progress.total ? ` / ${progress.total.toLocaleString("en-IN")}` : ""}`
+                : "Exporting…"
+              : "⬇ Export CSV"}
           </button>
         </div>
       </div>

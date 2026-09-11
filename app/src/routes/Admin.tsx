@@ -366,11 +366,27 @@ function PlanModal({
         </div>
       )}
 
+      {/* These two used to be described together as "read-only … capture, AI
+          and sending stop". That is still exactly right for `expired`, but
+          `free` stopped being read-only in
+          20260911090000_tenant_agent_defaults.sql — it is now 50 records, 50 AI
+          replies and 20 emails. An operator parking an org on free while
+          believing it kills their widget will hand out the wrong answer on the
+          phone, so the two are described separately. */}
       {parking && (
         <p className="sub" style={{ marginBottom: 12 }}>
-          <b>{plan === "free" ? "Not activated" : "Expired"}</b> is read-only: their data stays and
-          they can still sign in and export, but capture, AI and sending stop. The subscription
-          period is cleared.
+          {plan === "free" ? (
+            <>
+              <b>Free</b> is a small working allowance, not a lock: 50 records, 50 AI replies and
+              20 emails, one seat, no automations. Their data stays, they keep signing in, and
+              capture and AI keep working up to those numbers. The subscription period is cleared.
+            </>
+          ) : (
+            <>
+              <b>Expired</b> is read-only: their data stays and they can still sign in and export,
+              but capture, AI and sending stop. The subscription period is cleared.
+            </>
+          )}
         </p>
       )}
 

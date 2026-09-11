@@ -36,9 +36,41 @@ const GROQ_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
 // schedule. So: a chain. If one model is gone, the next is tried, and the
 // failure is logged loudly instead of silently becoming an apology to a
 // customer.
+// 2026-09-11 correction. The chain above was written after that incident and
+// then rotted in exactly the same way it was meant to prevent:
+//
+//   llama-3.1-8b-instant  — shut down by Groq on 2026-08-16, the same day as
+//                           llama-3.3-70b. It has been a dead entry in the
+//                           fallback chain ever since, so the chain was really
+//                           two models, not three.
+//   qwen/qwen3.6-27b      — alive, but a PREVIEW model, which Groq's own
+//                           deprecation policy says is "for evaluation, not
+//                           production, and may be discontinued at short
+//                           notice". It is also a reasoning model priced at
+//                           $0.60/$3.00 — 4x input and 5x output of the
+//                           primary. A month spent on it costs more than the
+//                           subscription it is serving.
+//
+// gpt-oss-20b is the same family as the primary, generally available, and
+// roughly half its price — so falling back now gets CHEAPER rather than 16x
+// more expensive, which is the right direction for an unattended failover.
 const DEFAULT_MODEL = "openai/gpt-oss-120b";
-const FALLBACK_MODELS = ["qwen/qwen3.6-27b", "llama-3.1-8b-instant"];
-const BOOKING_URL = Deno.env.get("BOOKING_URL") || "https://calendly.com/mridulnanda2004/abrobot-meet";
+const FALLBACK_MODELS = ["openai/gpt-oss-20b"];
+
+// There is deliberately NO cross-tenant booking fallback any more — not a
+// hardcoded one, and not an environment one either.
+//
+// This used to be `Deno.env.get("BOOKING_URL") || "<AbroBot's Calendly>"`.
+// Removing only the literal would have changed nothing: BOOKING_URL is a
+// deployed secret on this project (app-signup relies on it), so every tenant
+// with a NULL booking_url — which was all of them, since nothing seeded it —
+// would still have had an AI offering AbroBot's calendar to their own
+// customers. The env var is now read by the functions that legitimately act
+// as AbroBot, and by nothing that acts on a tenant's behalf.
+//
+// A missing booking link is a small gap, and publicConfig returns null so the
+// widget simply hides the button. Another company's booking link on your
+// website is not a gap, it is an incident.
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -104,38 +136,74 @@ function parseChips(text?: string | null): { label: string; prompt: string }[] {
 }
 
 // Public widget config (no secrets) — used by widget.js to render itself.
+//
+// ── Every default in here used to be AbroBot's ──────────────────────────────
+// Not as an error path: as the SUCCESS path for every organisation on the
+// platform. create_organisation seeds four fields and apply_industry_pack two
+// more; everything else was NULL, and NULL fell through to this function's
+// study-abroad copy. A dental clinic's website showed "Study-abroad assistant ·
+// online", greeted patients about universities and visas, and offered AbroBot's
+// Calendly.
+//
+// 20260911090000 fixes the data half — industry packs now seed greeting,
+// subtitle, chips and knowledge, and every existing org was backfilled. This is
+// the other half: what is left when even that has not run. The rule now is that
+// a default must be true for ANY business, or it must be absent. An empty
+// booking link is a gap; another company's booking link is an incident.
 function publicConfig(org: any, cfg: any) {
-  const brand = cfg?.brand_name || org?.name || "AbroBot";
+  const brand = (cfg?.brand_name || org?.name || "").trim();
+  const named = brand || "our team";
   return {
     enabled: cfg?.enabled !== false,
-    agent_name: cfg?.agent_name || `${brand} AI`,
-    header_title: cfg?.header_title || `${brand} AI`,
-    header_subtitle: cfg?.header_subtitle || "Study-abroad assistant · online",
+    agent_name: cfg?.agent_name || (brand ? `${brand} Assistant` : "Assistant"),
+    header_title: cfg?.header_title || (brand ? brand : "Assistant"),
+    header_subtitle: cfg?.header_subtitle || "Online",
     greeting: cfg?.greeting ||
-      `Hi there! 👋 I'm the ${brand} AI assistant. Ask me anything about universities, scholarships, visas or SOPs — or tell me your goal and I'll guide you personally.`,
-    teaser: cfg?.teaser || `Hi there 👋 I'm ${brand} AI — ask me anything!`,
-    quick_replies: parseChips(cfg?.quick_replies) .length ? parseChips(cfg?.quick_replies) : [
-      { label: "🎓 Universities", prompt: "Which universities suit my profile?" },
-      { label: "💰 Scholarships", prompt: "What scholarships can I get for studying abroad?" },
-      { label: "🛂 Visa help", prompt: "Can you help me with my student visa?" },
+      `Hi 👋 How can we help? Tell me what you're looking for and I'll point you the right way.`,
+    teaser: cfg?.teaser || (brand ? `Hi 👋 Ask ${brand} anything` : "Hi 👋 How can we help?"),
+    // No industry-flavoured fallback chips. Generic openers work for a clinic,
+    // a dealership and a law firm alike; "🎓 Scholarships" works for one
+    // business in fourteen and is actively wrong for the other thirteen.
+    quick_replies: parseChips(cfg?.quick_replies).length ? parseChips(cfg?.quick_replies) : [
+      { label: "💬 What you do", prompt: "What do you do?" },
+      { label: "💰 Pricing", prompt: "How much does it cost?" },
+      { label: "📅 Talk to someone", prompt: "I'd like to speak to someone." },
     ],
-    cta_text: cfg?.cta_text || "📅 Book a free call",
-    booking_url: cfg?.booking_url || BOOKING_URL,
-    contact_url: cfg?.contact_url || "https://www.abrobot.ai/contactus",
+    cta_text: cfg?.cta_text || "📅 Book a call",
+    // Null rather than a fallback, on both of these. widget.js hides the button
+    // when there is no URL, which is the correct behaviour for a business that
+    // has not set one.
+    booking_url: cfg?.booking_url || null,
+    contact_url: cfg?.contact_url || null,
     whatsapp: cfg?.whatsapp || null,
-    widget_color: cfg?.widget_color || "#f97316",
+    // A neutral slate rather than AbroBot orange. apply_industry_pack does not
+    // set a colour, so this is what most tenants will actually render until
+    // they pick one in Settings.
+    widget_color: cfg?.widget_color || "#2f3a4a",
     widget_position: cfg?.widget_position === "left" ? "left" : "right",
     logo_url: cfg?.logo_url || null,
-    brand: brand,
+    brand: named,
     away_message: cfg?.away_message || null,
   };
 }
 
 function buildSystemPrompt(cfg: any, brand: string, bookingUrl: string): string {
   const parts: string[] = [];
-  parts.push(cfg?.knowledge || `You are a helpful, knowledgeable study-abroad counsellor for ${brand}.`);
+  // `knowledge` is seeded as '' by create_organisation, and '' is falsy — so
+  // this fallback was reached by EVERY new tenant, and it told all of them they
+  // were study-abroad counsellors. The industry packs now seed real knowledge
+  // (20260911090000); this is what is left if even that is missing, and it has
+  // to be true of any business at all.
+  parts.push(
+    cfg?.knowledge ||
+      `You are the assistant on ${brand}'s website. You help visitors with what ${brand} offers ` +
+      `and take their enquiry. You have NOT been told the specifics of this business, so do not ` +
+      `invent any: no prices, services, timings, availability, locations or credentials. When you ` +
+      `do not know something, say so plainly and offer to take their details so a colleague can ` +
+      `answer properly.`,
+  );
   if (cfg?.persona) parts.push(`Persona: ${cfg.persona}`);
-  parts.push(`You are "${cfg?.agent_name || brand + " AI"}", chatting with a visitor on the ${brand} website.`);
+  parts.push(`You are "${cfg?.agent_name || brand + " Assistant"}", chatting with a visitor on the ${brand} website.`);
   parts.push(
     `STYLE — BE VERY BRIEF. This is a chat, not an essay. Reply in AT MOST 2–3 short sentences or 3–4 one-line bullets. ` +
     `Never write long paragraphs or repeat yourself. Get to the point in the first line; easy to scan on a phone.`,
@@ -150,13 +218,25 @@ function buildSystemPrompt(cfg: any, brand: string, bookingUrl: string): string 
       `Ask once, don't nag; if they skip it, keep helping and ask again later.`,
     );
   }
+  // This block used to be unconditional and entirely study-abroad: it told a
+  // dental clinic's model to establish the patient's "target country and study
+  // level", assess "visa/admission competitiveness", suggest "university/course
+  // directions" and offer AbroBot's Calendly. The industry persona was appended
+  // AFTER it, producing a genuinely self-contradictory prompt.
+  //
+  // What is actually generic about a good closer is: give a useful answer, then
+  // offer the concrete next step this business has configured.
   parts.push(
-    `CLOSER BEHAVIOUR: (1) INSTANT FREE ASSESSMENT — once you know their target country, study level and rough background, give a tight structured read: a one-line fit note, a cautious sense of visa/admission competitiveness (never a guarantee), 1–2 example university/course directions, and the single most important next step. ` +
+    `CLOSER BEHAVIOUR: (1) BE USEFUL FIRST — answer the question properly before steering anywhere. ` +
+    `Once you understand what the visitor needs, give the single most useful next step. ` +
     (bookingUrl
-      ? `(2) BOOK A FREE CALL — when engaged or asked about applications/packages/visas/scholarships, warmly offer to book a free counselling call here: ${bookingUrl} . Frame it as help, not a sale. Offer once, don't nag.`
-      : `(2) NEXT STEP — when engaged, warmly offer to connect them with a ${brand} counsellor.`),
+      ? `(2) OFFER THE NEXT STEP — when they are engaged, warmly offer to book a call here: ${bookingUrl} . Frame it as help, not a sale. Offer once, don't nag.`
+      : `(2) OFFER THE NEXT STEP — when they are engaged, offer to have someone from ${brand} follow up, and take their contact details.`),
   );
-  parts.push(`Never guarantee visas, admissions or scholarships. If unsure, say details vary and recommend speaking to the ${brand} team.`);
+  parts.push(
+    `Never guarantee an outcome, a result, an approval or a price. If you are unsure, say details vary ` +
+    `and recommend speaking to the ${brand} team rather than guessing.`,
+  );
   if (cfg?.guardrails) parts.push(`STRICT RULES — never break these: ${cfg.guardrails}`);
   return parts.join("\n\n");
 }
@@ -175,10 +255,14 @@ Deno.serve(async (req) => {
 
   // ---------- public widget config (GET) ----------
   if (req.method === "GET") {
-    // GET has no body, so the legacy "abrobot" default is preserved here or
-    // any old embed without ?org= would silently render nothing.
-    const gslug = slug || "abrobot";
-    const { data: org } = await supabase.from("organizations").select("id, name, active").eq("slug", gslug).single();
+    // No org named, no config. This used to default to "abrobot", which meant
+    // a request with no ?org= received AbroBot's greeting, colour, logo and
+    // booking link — a cross-tenant default on a public endpoint. widget.js
+    // already refuses to render without data-org, so nothing legitimate relies
+    // on the fallback; anything that hits it is misconfigured and should be
+    // told so rather than handed a stranger's branding.
+    if (!slug) return json({ enabled: false, error: "no organisation specified" });
+    const { data: org } = await supabase.from("organizations").select("id, name, active").eq("slug", slug).single();
     if (!org?.active) return json({ enabled: false });
     const { data: cfg } = await supabase.from("agent_config").select(
       "agent_name, enabled, greeting, teaser, header_title, header_subtitle, quick_replies, cta_text, widget_color, widget_position, booking_url, contact_url, whatsapp, brand_name, logo_url, away_message",
@@ -193,8 +277,10 @@ Deno.serve(async (req) => {
   const message = (body.message ?? "").toString().slice(0, 2000).trim();
   if (!message) return json({ error: "empty message" }, 400);
 
-  // Query string wins; body is the fallback; "abrobot" only if neither is given.
-  slug = slug || (body.org ?? "").toString().toLowerCase().trim() || "abrobot";
+  // Query string wins, body is the fallback, and there is no third option —
+  // see the GET branch above for why defaulting to a real tenant is not one.
+  slug = slug || (body.org ?? "").toString().toLowerCase().trim();
+  if (!slug) return json({ error: "no organisation specified" }, 400);
 
   // `plan` is selected for the usage-limit check further down.
   const { data: org } = await supabase.from("organizations").select("id, name, active, plan").eq("slug", slug).single();
@@ -224,7 +310,7 @@ Deno.serve(async (req) => {
   };
 
   const brand = cfg?.brand_name || cfg?.agent_name || org.name || "our team";
-  const bookingUrl = cfg?.booking_url || BOOKING_URL;
+  const bookingUrl = cfg?.booking_url || "";
   const waLine = cfg?.whatsapp ? ` or WhatsApp us at ${cfg.whatsapp}` : "";
 
   if (cfg && cfg.enabled === false) {
@@ -233,6 +319,57 @@ Deno.serve(async (req) => {
 
   const groqKey = (cfg?.groq_api_key || GROQ_KEY).trim();
 
+  // --- rate limit ---
+  //
+  // This endpoint has to stay open: the widget runs on a visitor's browser and
+  // the org comes from the page, so there is no key to require. But org slugs
+  // are public — they are in the embed snippet — and there was no limit of any
+  // kind. Anyone could drain a competitor's monthly AI allowance to zero, at
+  // which point their widget starts telling real prospects it is "taking a
+  // short break", and burn the Groq key they pay for.
+  //
+  // MOVED ABOVE THE WRITES (2026-09-11). This used to sit ~90 lines further
+  // down, after the conversation insert, the history read, the user-message
+  // insert and — on a first message that contains contact details — a lead
+  // insert, an activity insert and a Telegram alert. So a request that was
+  // about to be REFUSED still did six writes and burned an edge invocation.
+  //
+  // At 20/min that is 864,000 refused requests a month from a single IP, each
+  // leaving rows behind: enough to fill the 500 MB free database and consume
+  // the entire 500k free edge-function quota — breaking the platform for every
+  // other tenant, not just the one being targeted. Refusing before we write is
+  // the difference between a rate limit and an expensive way to say no.
+  //
+  // Per org+IP+minute. Not a defence against a distributed attacker, but it
+  // turns "one script, one afternoon" into something requiring real effort.
+  {
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+    const { data: rl, error: rlErr } = await supabase.rpc("hit_rate_limit", {
+      p_key: `chat:${org.id}:${ip}`, p_limit: 20, p_window_seconds: 60,
+    });
+    // Fail CLOSED, the same posture as consume_usage below. The error used to
+    // be discarded, so an RPC failure left `rl` undefined and the request sailed
+    // through — meaning the one condition most likely to coincide with an
+    // attack (a database under load) was also the condition that switched the
+    // rate limiter off.
+    if (rlErr) {
+      console.error("chat-agent: rate limit check failed, refusing:", rlErr.message);
+      return json({
+        reply: "We're having a busy moment — please try again in a few seconds.",
+        rate_limited: true,
+      }, 503);
+    }
+    if (rl && rl.allowed === false) {
+      // No conversation_id: we deliberately have not created one. The widget
+      // treats a missing id as "keep the one you have", so a real visitor who
+      // types too fast keeps their thread.
+      return json({
+        reply: "You're sending messages very quickly — give me a moment and try again.",
+        rate_limited: true,
+      }, 429);
+    }
+  }
+
   // Get or create conversation
   let convId: string | null = body.conversation_id ?? null;
   if (convId) {
@@ -240,8 +377,19 @@ Deno.serve(async (req) => {
     if (!data) convId = null;
   }
   if (!convId) {
-    const { data } = await supabase.from("conversations").insert({ org_id: org.id, page_url: body.page_url ?? null }).select("id").single();
-    convId = data!.id;
+    const { data, error } = await supabase.from("conversations")
+      .insert({ org_id: org.id, page_url: body.page_url ?? null }).select("id").single();
+    // Was `data!.id`. A non-null assertion on an insert that can fail turns a
+    // recoverable database hiccup into an unhandled TypeError, a 500, and
+    // "Connection issue" in the visitor's chat window — for a conversation we
+    // could simply have carried on without persisting.
+    if (error || !data) {
+      console.error("chat-agent: could not open a conversation:", error?.message);
+      return json({
+        reply: `Sorry — I couldn't start a chat session just now. Please reach ${brand}${waLine} and someone will help you.`,
+      });
+    }
+    convId = data.id;
   }
 
   const { data: history } = await supabase.from("chat_messages")
@@ -312,31 +460,6 @@ Deno.serve(async (req) => {
       }
     }
     if (leadId) await supabase.from("conversations").update({ lead_id: leadId }).eq("id", convId);
-  }
-
-  // --- rate limit ---
-  //
-  // This endpoint has to stay open: the widget runs on a visitor's browser and
-  // the org comes from the page, so there is no key to require. But org slugs
-  // are public — they are in the embed snippet — and there was no limit of any
-  // kind. Anyone could drain a competitor's monthly AI allowance to zero, at
-  // which point their widget starts telling real prospects it is "taking a
-  // short break", and burn the Groq key they pay for.
-  //
-  // Per org+IP+minute. Not a defence against a distributed attacker, but it
-  // turns "one script, one afternoon" into something requiring real effort.
-  {
-    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-    const { data: rl } = await supabase.rpc("hit_rate_limit", {
-      p_key: `chat:${org.id}:${ip}`, p_limit: 20, p_window_seconds: 60,
-    });
-    if (rl && rl.allowed === false) {
-      return json({
-        reply: "You're sending messages very quickly — give me a moment and try again.",
-        conversation_id: convId,
-        rate_limited: true,
-      }, 429);
-    }
   }
 
   // --- plan limit enforcement ---

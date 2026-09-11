@@ -1,5 +1,38 @@
-const es=require('/tmp/node_modules/esbuild'), fs=require('fs'), crypto=require('crypto'), assert=require('assert');
-const src=fs.readFileSync('/sessions/serene-focused-planck/mnt/abrobot-crm-app/supabase/functions/_shared/cashfree.ts','utf8');
+// Resolve esbuild and the source file portably.
+//
+// These two lines used to be:
+//   require('/tmp/node_modules/esbuild')
+//   fs.readFileSync('/sessions/<some-sandbox>/.../cashfree.ts')
+// — an absolute path to a scratch directory in the machine that happened to
+// write the test. It passed exactly once, on that machine. In CI, and on any
+// other checkout, it threw MODULE_NOT_FOUND before reaching a single
+// assertion, and because the CI step runs `set -e` the whole job went red on
+// an error that had nothing to do with the code under test.
+const path = require('path');
+function loadEsbuild() {
+  // vite depends on esbuild, so app/node_modules almost always has it.
+  const candidates = [
+    'esbuild',
+    path.join(__dirname, '..', '..', '..', 'app', 'node_modules', 'esbuild'),
+    path.join(__dirname, '..', '..', '..', 'node_modules', 'esbuild'),
+  ];
+  for (const c of candidates) {
+    try {
+      const mod = require(c);
+      // Requiring is not enough. esbuild ships a native binary, and a
+      // node_modules copied between platforms (a mac checkout read from a
+      // Linux container, the usual case) requires fine and then throws on
+      // first use. Prove it actually works before returning it.
+      mod.transformSync('const a = 1;', { loader: 'ts' });
+      return mod;
+    } catch (_) { /* try the next candidate */ }
+  }
+  console.log('SKIP ' + path.basename(__filename) + ' — no usable esbuild for this platform. Run `npm ci` in app/.');
+  process.exit(0);
+}
+const es = loadEsbuild();
+const fs=require('fs'), crypto=require('crypto'), assert=require('assert');
+const src=fs.readFileSync(path.join(__dirname, 'cashfree.ts'),'utf8');
 const js=es.transformSync(src,{loader:'ts',format:'cjs'}).code;
 // stub Deno env with a known secret
 const secret='cfsk_ma_prod_TESTKEY_1234567890abcdefghijklmn';

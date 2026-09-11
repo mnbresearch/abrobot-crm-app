@@ -3,8 +3,13 @@ import { useApp, useLeads } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import {
   Card, Empty, FieldInput, Modal, ScoreChip, Skeleton, StagePill,
-  cellValue, humanize, useToast, LoadError } from "../components/ui";
+  cellValue, humanize, useToast, LoadError, TruncationNotice } from "../components/ui";
 import type { Lead } from "../lib/types";
+
+// How many matches a server-side search returns. Deliberately larger than the
+// command palette's 8 — this is the screen people come to when they want to
+// work through a set, not jump to one record.
+const SEARCH_LIMIT = 200;
 
 // Columns are resolved at runtime: the industry registry proposes defaults and
 // any custom field marked show_in_list is appended. Nothing is hardcoded,
@@ -14,7 +19,12 @@ type SortKey = "created" | "score" | "name" | "follow_up";
 
 export function Leads({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages, fields, profile } = useApp();
-  const { leads, loading, error: leadsError, reload, truncated } = useLeads(org?.id);
+  const {
+    leads, loading, error: leadsError, reload,
+    // <TruncationNotice/> decides for itself from loaded vs total, so there is
+    // no second copy of that comparison to fall out of sync.
+    totalLeads, hasMore, loadMore, loadingMore,
+  } = useLeads(org?.id);
   const [q, setQ] = useState("");
   const [stageFilter, setStageFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
@@ -22,6 +32,54 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const toast = useToast();
+
+  // ── search ───────────────────────────────────────────────────────────────
+  // This filtered `leads` in memory, which meant it searched the loaded page
+  // and nothing else. Type a customer's name from eight months ago and the
+  // screen answered "Nothing matches that filter" — not "not in what's
+  // loaded", but a flat statement that the record does not exist. The command
+  // palette had been querying the server correctly all along; this is the same
+  // query, with the same debounce, on the screen where people expect to search.
+  const [hits, setHits] = useState<Lead[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  // Retry needs something that CHANGES. The button was `setQ((s) => s)`, which
+  // sets state to the identical value — React bails out of that render
+  // entirely, the effect below never re-runs, and the only control on a failed
+  // search did nothing at all when pressed. A counter is the state the user's
+  // intent actually maps to: "ask again", not "change the term".
+  const [retry, setRetry] = useState(0);
+  const term = q.trim();
+  const serverMode = term.length >= 2;
+
+  useEffect(() => {
+    if (!org || !serverMode) { setHits(null); setSearching(false); setSearchError(null); return; }
+    setSearching(true);
+    const t = setTimeout(async () => {
+      // %,() are stripped because they are PostgREST filter syntax, not text —
+      // an unescaped one turns a search into a malformed query. Same treatment
+      // as CommandPalette.
+      const safe = term.replace(/[%,()]/g, "");
+      const { data, error } = await supabase
+        .from("leads")
+        .select("*")
+        .eq("org_id", org.id)
+        .or(`name.ilike.%${safe}%,email.ilike.%${safe}%,phone.ilike.%${safe}%`)
+        .order("created_at", { ascending: false })
+        .limit(SEARCH_LIMIT);
+      if (error) {
+        // Never fall back to the in-memory list on failure: that would render
+        // a short result set as though the search had succeeded.
+        setSearchError(error.message);
+        setHits([]);
+      } else {
+        setSearchError(null);
+        setHits((data as Lead[]) ?? []);
+      }
+      setSearching(false);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [term, serverMode, org, retry]);
 
   const columns = useMemo(() => {
     const extra = fields.filter((f) => f.show_in_list).map((f) => f.key);
@@ -35,15 +93,20 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
   }, [leads]);
 
   const filtered = useMemo(() => {
-    const term = q.trim().toLowerCase();
-    const rows = leads.filter((l) => {
+    // In server mode the text match already happened in Postgres, over every
+    // record rather than the page. Stage, tag and sort still apply on top —
+    // they operate on at most SEARCH_LIMIT rows, which is cheap and keeps the
+    // controls behaving identically in both modes.
+    const source = serverMode ? (hits ?? []) : leads;
+    const needle = serverMode ? "" : q.trim().toLowerCase();
+    const rows = source.filter((l) => {
       if (stageFilter && (l.stage_key ?? l.stage) !== stageFilter) return false;
       if (tagFilter && !(Array.isArray(l.tags) ? l.tags : []).includes(tagFilter)) return false;
-      if (!term) return true;
+      if (!needle) return true;
       return (
-        l.name.toLowerCase().includes(term) ||
-        (l.email ?? "").toLowerCase().includes(term) ||
-        (l.phone ?? "").includes(term)
+        l.name.toLowerCase().includes(needle) ||
+        (l.email ?? "").toLowerCase().includes(needle) ||
+        (l.phone ?? "").includes(needle)
       );
     });
 
@@ -60,7 +123,7 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
       });
     } else sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     return sorted;
-  }, [leads, q, stageFilter, tagFilter, sort]);
+  }, [leads, hits, serverMode, q, stageFilter, tagFilter, sort]);
 
   // Selecting rows then filtering them away would leave invisible records in
   // the selection — and a bulk action would hit records the user can't see.
@@ -104,32 +167,32 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
 
   return (
     <div className="stack">
+      {/* Search is unaffected by truncation now, so the notice says what is
+          actually still limited: the list itself. It used to sit directly above
+          a subtitle reading "2,000 total" — a banner saying there are more than
+          2,000 records, and a count saying there are exactly 2,000. */}
+      {!serverMode && (
+        <TruncationNotice
+          loaded={leads.length}
+          total={totalLeads}
+          noun={ui.leadNounPlural.toLowerCase()}
+          what="Search covers all of them; this list is the most recent."
+          onLoadMore={hasMore ? () => void loadMore() : undefined}
+          loadingMore={loadingMore}
+        />
+      )}
 
-
-    {/* The page limit is 2,000 records but the Business plan sells 50,000.
-
-        Without this, this list silently describe only the newest 2,000 and
-
-        look complete. */}
-
-    {truncated && (
-
-      <div className="card" style={{ borderLeft: "3px solid var(--amber)" }}>
-
-        <b>Showing your 2,000 most recent records.</b>{" "}
-
-        <span className="sub">You have more than that, so this list cover only these. Narrow the date range, or export in batches.</span>
-
-      </div>
-
-    )}
       <div className="row">
         <div>
           <h1>{ui.leadNounPlural}</h1>
           <p className="sub" style={{ marginTop: 2 }}>
-            {filtered.length === leads.length
-              ? `${leads.length} total`
-              : `${filtered.length} of ${leads.length}`}
+            {/* The denominator is the org's true total, from a count query —
+                never the length of the slice that happens to be in memory. */}
+            {serverMode
+              ? `${filtered.length}${hits && hits.length >= SEARCH_LIMIT ? "+" : ""} matching “${term}”`
+              : filtered.length === leads.length
+                ? `${(totalLeads ?? leads.length).toLocaleString("en-IN")} total`
+                : `${filtered.length.toLocaleString("en-IN")} of ${(totalLeads ?? leads.length).toLocaleString("en-IN")}`}
           </p>
         </div>
         <div className="spacer" />
@@ -165,16 +228,35 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
             Clear
           </button>
         )}
+        {serverMode && (
+          <span className="sub" style={{ fontSize: 12 }}>
+            {searching ? "Searching all records…" : "Searched all records"}
+          </span>
+        )}
       </div>
+
+      {/* A failed search must not look like "no such customer". */}
+      {searchError && <LoadError message={searchError} onRetry={() => setRetry((n) => n + 1)} />}
 
       {filtered.length === 0 ? (
         <Card>
           <Empty
             icon={ui.icon}
-            title={leads.length === 0 ? `No ${ui.leadNounPlural.toLowerCase()} yet` : "Nothing matches that filter"}
-            hint={leads.length === 0
-              ? "They'll appear here automatically once your widget or webhook is live."
-              : "Try clearing the filters."}
+            title={
+              searching ? "Searching…"
+              : serverMode ? `No ${ui.leadNounPlural.toLowerCase()} match “${term}”`
+              : leads.length === 0 ? `No ${ui.leadNounPlural.toLowerCase()} yet`
+              : "Nothing matches that filter"
+            }
+            hint={
+              searching ? undefined
+              // The old copy here said "Try clearing the filters" for a record
+              // that existed but sat outside the loaded page. It now searches
+              // everything, so this statement is finally true.
+              : serverMode ? `We searched every record in your workspace — name, email and phone. ${stageFilter || tagFilter ? "The stage and tag filters also apply; try clearing those." : "Check the spelling, or try part of a phone number."}`
+              : leads.length === 0 ? "They'll appear here automatically once your widget or webhook is live."
+              : "Try clearing the filters."
+            }
           />
         </Card>
       ) : (
@@ -240,6 +322,24 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
             </tbody>
           </table>
         </div>
+      )}
+
+      {/* Range-based pagination. Before this there was no offset, no cursor and
+          no "load more" anywhere in the app, so a Business customer who bought
+          50,000 records had no route to record 2,001 through the UI at all. */}
+      {!serverMode && hasMore && (
+        <div className="row" style={{ justifyContent: "center", paddingBottom: 6 }}>
+          <button className={`btn${loadingMore ? " btn-busy" : ""}`} onClick={() => void loadMore()} disabled={loadingMore}>
+            {loadingMore
+              ? "Loading…"
+              : `Load more — ${((totalLeads ?? 0) - leads.length).toLocaleString("en-IN")} older ${ui.leadNounPlural.toLowerCase()} remaining`}
+          </button>
+        </div>
+      )}
+      {serverMode && hits && hits.length >= SEARCH_LIMIT && (
+        <p className="sub" style={{ textAlign: "center", fontSize: 12.5 }}>
+          Showing the first {SEARCH_LIMIT} matches. Add more of the name, email or number to narrow it.
+        </p>
       )}
 
       {selected.size > 0 && (
@@ -343,10 +443,16 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
     if (error) { setErr(error.message); return; }
 
     if (data?.id) {
-      await supabase.from("activities").insert({
+      // Secondary to the record that has already been created, so a failure
+      // here must not fail the save — but it must not be invisible either. An
+      // unread error meant the Activity feed quietly stopped matching what
+      // happened, and a record with no "added" entry reads as one that arrived
+      // by some route nobody can account for.
+      const { error: actErr } = await supabase.from("activities").insert({
         org_id: orgId, lead_id: data.id, user_id: userId,
         type: "system", content: `${ui.leadNoun} added manually.`,
       });
+      if (actErr) console.warn("lead creation logged nowhere:", actErr.message);
     }
     onSaved();
   };

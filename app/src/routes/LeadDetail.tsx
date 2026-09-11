@@ -52,7 +52,19 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (!org) return;
     void supabase.from("message_templates")
       .select("id, name, body, channel, subject").eq("org_id", org.id).order("name")
-      .then(({ data }) => setTemplates(data ?? []));
+      .then(({ data, error }) => {
+        // The error was dropped, so a failed read left `templates` empty — and
+        // an empty array renders as no template picker at all in the WhatsApp
+        // and email composers. An org that had carefully written a library of
+        // templates simply found them absent, with nothing to distinguish that
+        // from never having created any.
+        if (error) {
+          console.error("lead detail: templates unavailable —", error.message);
+          toast.error(`Your message templates couldn't be loaded (${error.message}) — the picker below will be empty.`);
+          return;
+        }
+        setTemplates(data ?? []);
+      });
   }, [org]);
 
   // Preview-only substitution. The server does this again on send, from

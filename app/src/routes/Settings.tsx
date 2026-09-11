@@ -83,16 +83,29 @@ function UsageTab() {
 
   return (
     <div className="stack">
+      {/* This card used to say "Capturing records, AI replies and sending are
+          off until you pick a plan below", and it was locked shut. That was
+          true while `free` meant 0 records / 0 AI replies / 0 emails; since
+          20260911090000_tenant_agent_defaults.sql it is 50 / 50 / 20, and the
+          sentence became the most expensive kind of wrong copy — it tells a new
+          customer their widget is dead at exactly the moment they are deciding
+          whether to paste it on their site, so they never see the product
+          actually work. The allowance is named in words here and metered
+          exactly below, from plan_limits, so the two cannot drift. */}
       {snap.not_activated && (
         <Card>
           <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
-            <span style={{ fontSize: 22 }}>🔒</span>
+            <span style={{ fontSize: 22 }}>🎁</span>
             <div>
-              <div style={{ fontWeight: 700 }}>Choose a plan to switch everything on</div>
+              <div style={{ fontWeight: 700 }}>
+                You're on {snap.label} — a small allowance that really works
+              </div>
               <p className="sub" style={{ marginTop: 4 }}>
-                Your workspace is set up and yours to explore — pipeline, fields, the AI agent's
-                settings, everything. Capturing records, AI replies and sending are off until you
-                pick a plan below. Nothing you configure now is lost.
+                Nothing is switched off. Paste the widget on your site and real enquiries are
+                captured, answered by the AI and emailed out, up to the allowance in the meters
+                below. It is deliberately small — enough to watch a real enquiry arrive on your
+                phone, not enough to run on. A paid plan removes the ceiling and adds seats,
+                automations and WhatsApp. Nothing you set up now is lost.
               </p>
             </div>
           </div>
@@ -670,10 +683,13 @@ function AgentTab() {
   const { org, ui } = useApp();
   const [cfg, setCfg] = useState<Partial<AgentConfig> | null>(null);
   const [saving, setSaving] = useState(false);
+  // The load error, which used to be destructured away entirely. See below.
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
     if (!org) return;
+    setLoadErr(null);
     void supabase
       .from("agent_config")
       // Deliberately NOT selecting the credential columns. This screen has no
@@ -689,17 +705,62 @@ function AgentTab() {
       .select("org_id, enabled, agent_name, greeting, welcome_message, knowledge, persona, tone, quick_replies, cta_text, widget_color, widget_position, away_message, notify_new_leads, nurture_enabled, header_subtitle, logo_url, contact_url, booking_url, model, max_tokens, guardrails")
       .eq("org_id", org.id)
       .single()
-      .then(({ data }) => setCfg((data as Partial<AgentConfig>) ?? { org_id: org.id, enabled: true }));
+      // `error` was destructured away here and never read, which made a failed
+      // read indistinguishable from a fresh org: `data` came back null, `??`
+      // substituted an empty config, and the form rendered every field blank —
+      // reading, convincingly, as "nothing is configured yet".
+      //
+      // The damage was on the way back out. Save is an upsert of that whole
+      // object, so pressing it wrote NULL over every column: the industry-
+      // seeded persona, the guardrails that stop a clinic's agent giving
+      // clinical advice, the knowledge base, the widget colour. A transient
+      // network failure plus one click and a customer's agent configuration was
+      // gone, with no undo and no copy of it anywhere.
+      //
+      // PGRST116 is "no rows", which for this table genuinely means "not
+      // configured yet" and is the one case that legitimately starts blank.
+      .then(({ data, error }) => {
+        if (error && error.code !== "PGRST116") {
+          setLoadErr(error.message);
+          setCfg(null);
+          return;
+        }
+        setLoadErr(null);
+        setCfg((data as Partial<AgentConfig>) ?? { org_id: org.id, enabled: true });
+      });
   }, [org]);
 
   const save = async () => {
-    if (!org || !cfg) return;
+    // Belt and braces alongside the guard below: nothing may upsert a config
+    // that was never successfully read.
+    if (!org || !cfg || loadErr) return;
     setSaving(true);
     const { error } = await supabase.from("agent_config").upsert({ ...cfg, org_id: org.id }, { onConflict: "org_id" });
     setSaving(false);
     if (error) { toast.error(error.message); return; }
     toast.show("Agent saved");
   };
+
+  if (loadErr) {
+    return (
+      <Card>
+        <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+          <span style={{ fontSize: 22 }}>⚠️</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700 }}>Couldn't load your assistant's settings</div>
+            <p className="sub" style={{ marginTop: 4 }}>
+              Nothing has been changed or lost. The form is hidden deliberately: if it appeared
+              blank and you saved it, that would overwrite your real configuration — your persona,
+              guardrails and knowledge base — with empty values. ({loadErr})
+            </p>
+            <button className="btn btn-sm btn-primary" style={{ marginTop: 12 }} onClick={() => window.location.reload()}>
+              Retry
+            </button>
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   if (!cfg) return <Card><p className="sub">Loading…</p></Card>;
 
@@ -735,9 +796,32 @@ function AgentTab() {
             <label className="label">Knowledge / instructions</label>
             <textarea className="textarea" value={cfg.knowledge ?? ""} onChange={(e) => set({ knowledge: e.target.value })} placeholder="Services, pricing, timings, locations…" />
           </div>
+          {/* This was a single-line <input> labelled "comma separated", and the
+              backend has never parsed it that way. parseChips() in
+              chat-agent/index.ts splits on NEWLINES and takes `|` as the
+              separator between the chip's label and the prompt it sends. A
+              one-line input physically cannot contain a newline, so whatever a
+              customer typed became exactly one chip — "🎓 Universities, 💰
+              Scholarships, 🛂 Visa help" rendered as a single button with that
+              whole string on it. Quick replies could not be configured at all,
+              and the preview beside this form showed three neat chips, so
+              nothing on this screen revealed the problem. */}
           <div className="field">
-            <label className="label">Quick replies (comma separated)</label>
-            <input className="input" value={cfg.quick_replies ?? ""} onChange={(e) => set({ quick_replies: e.target.value })} />
+            <label className="label" htmlFor="agent-chips">Quick replies — one per line</label>
+            <textarea
+              id="agent-chips"
+              className="textarea"
+              rows={4}
+              value={cfg.quick_replies ?? ""}
+              onChange={(e) => set({ quick_replies: e.target.value })}
+              placeholder={"🦷 Book a check-up | I'd like to book a dental check-up\n💰 Treatment costs | What do your treatments cost?\n📍 Find us | Where is your clinic?"}
+            />
+            <p className="sub" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7 }}>
+              One chip per line. Put <code>|</code> between the button's text and the question it
+              asks — for example <code>💰 Treatment costs | What do your treatments cost?</code>.
+              Leave out the <code>|</code> and the button text is sent as the question.
+              First 8 lines are used; longer labels are shortened on the button.
+            </p>
           </div>
 
           <div className="field">
@@ -793,7 +877,7 @@ function AgentTab() {
             name={cfg.agent_name || `${org?.name} Assistant`}
             greeting={cfg.greeting || "Hi! How can we help?"}
             color={cfg.widget_color || (ui.accent ?? "#b45309")}
-            replies={(cfg.quick_replies ?? "").split(",").map((s) => s.trim()).filter(Boolean)}
+            replies={parseChips(cfg.quick_replies)}
           />
           <div className="field" style={{ marginTop: 14 }}>
             <label className="label">Widget colour</label>
@@ -903,6 +987,31 @@ function AgentTab() {
   );
 }
 
+/**
+ * The chip labels this text will actually produce on the live widget.
+ *
+ * Deliberately a line-for-line mirror of parseChips() in
+ * chat-agent/index.ts — same newline split, same `|` position, same 8-chip cap,
+ * same 26-character truncation. The preview previously split on commas while
+ * the server split on newlines, so it always disagreed with the live widget:
+ * the admin saw three chips on this screen and their visitors saw one. A
+ * preview that does not match production is worse than no preview, because it
+ * is believed.
+ */
+function parseChips(text: string | null | undefined): string[] {
+  if (!text) return [];
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((l) => {
+      const i = l.indexOf("|");
+      if (i > -1) return l.slice(0, i).trim();
+      return l.length > 26 ? l.slice(0, 24) + "…" : l;
+    });
+}
+
 function WidgetPreview({ name, greeting, color, replies }: { name: string; greeting: string; color: string; replies: string[] }) {
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden", background: "var(--bg)" }}>
@@ -916,8 +1025,10 @@ function WidgetPreview({ name, greeting, color, replies }: { name: string; greet
         </div>
         {replies.length > 0 && (
           <div className="row-wrap" style={{ marginTop: 11 }}>
-            {replies.slice(0, 4).map((r) => (
-              <span key={r} className="pill" style={{ background: "#fff", border: `1px solid ${color}`, color }}>{r}</span>
+            {/* Keyed by index, not by label: two chips may legitimately share a
+                label, and duplicate React keys drop one from the preview. */}
+            {replies.slice(0, 4).map((r, i) => (
+              <span key={i} className="pill" style={{ background: "#fff", border: `1px solid ${color}`, color }}>{r}</span>
             ))}
           </div>
         )}
@@ -927,12 +1038,35 @@ function WidgetPreview({ name, greeting, color, replies }: { name: string; greet
 }
 
 // ── install ─────────────────────────────────────────────────────────────────
+
+/**
+ * Where the widget script is served from, for the snippet customers paste onto
+ * their own sites.
+ *
+ * This was `window.location.origin` — whatever host the admin happened to be
+ * looking at became the domain baked into a <script> tag on someone else's
+ * production website. An admin on a Cloudflare branch-preview URL copied a
+ * snippet that 404s the moment that preview is reaped; an admin on `npm run
+ * dev` copied `http://localhost:5173/widget.js`, which works on exactly one
+ * machine in the world. Neither fails loudly — the customer's site just quietly
+ * has no chat widget, and the CRM shows no enquiries.
+ *
+ * A canonical base, overridable per deployment, is the only version of this
+ * that is correct for the person pasting it rather than for the person copying
+ * it. crm.mnbresearch.com is the product domain named in the Terms.
+ */
+const WIDGET_BASE = (import.meta.env.VITE_WIDGET_BASE ?? "https://crm.mnbresearch.com").replace(/\/+$/, "");
+
 function InstallTab() {
   const { org, ui } = useApp();
   const [copied, setCopied] = useState<string | null>(null);
-  const base = window.location.origin;
 
-  const snippet = `<script src="${base}/widget.js" data-org="${org?.slug ?? "your-org"}" defer></script>`;
+  // `org?.slug ?? "your-org"` rendered a literally broken snippet whenever the
+  // store had not loaded, with the Copy button fully enabled next to it — so
+  // the failure mode was an admin pasting data-org="your-org" onto their live
+  // site and getting no widget, no error and no clue why.
+  const slugReady = !!org?.slug;
+  const snippet = `<script src="${WIDGET_BASE}/widget.js" data-org="${org?.slug ?? "your-org"}" defer></script>`;
   const webhook = `${import.meta.env.VITE_SUPABASE_URL ?? "https://pomsltnrxvbcafwtbtlc.supabase.co"}/functions/v1/lead-webhook?key=YOUR_KEY`;
 
   const copy = async (text: string, which: string) => {
@@ -950,9 +1084,19 @@ function InstallTab() {
         </p>
         <div className="code">{snippet}</div>
         <div className="row" style={{ marginTop: 11 }}>
-          <button className="btn btn-primary" onClick={() => void copy(snippet, "widget")}>
+          <button
+            className="btn btn-primary"
+            onClick={() => void copy(snippet, "widget")}
+            disabled={!slugReady}
+            title={slugReady ? undefined : "Waiting for your workspace details to load"}
+          >
             {copied === "widget" ? "✓ Copied" : "Copy snippet"}
           </button>
+          {!slugReady && (
+            <span className="sub" style={{ fontSize: 12.5 }}>
+              Still loading your workspace — the snippet above is a placeholder until it does.
+            </span>
+          )}
         </div>
         <ol className="sub" style={{ marginTop: 15, paddingLeft: 18, lineHeight: 1.75 }}>
           <li>Copy the line above.</li>

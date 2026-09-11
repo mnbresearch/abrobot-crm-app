@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { useApp, useLeads } from "../lib/store";
+import { useApp, useFollowUpCount, useLeads } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Empty, ScoreChip, Spinner, StagePill, useToast , LoadError } from "../components/ui";
+import { Card, Empty, ScoreChip, Spinner, StagePill, useToast, LoadError, TruncationNotice } from "../components/ui";
 import type { Lead } from "../lib/types";
 
 // Follow-up calendar. A month grid plus the selected day's list, because the
@@ -37,15 +37,26 @@ const fromIso = (s: string) => {
 
 export function Calendar({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages } = useApp();
-  const { leads, loading, error, reload } = useLeads(org?.id);
+  const { leads, loading, error, reload, totalLeads, truncated } = useLeads(org?.id);
   const [cursor, setCursor] = useState(() => new Date());
   const [selected, setSelected] = useState(() => iso(new Date()));
   const toast = useToast();
 
+  const doneKeys = useMemo(
+    () => stages.filter((s) => s.is_won || s.is_lost).map((s) => s.key),
+    [stages],
+  );
+
   const openLeads = useMemo(() => {
-    const done = new Set(stages.filter((s) => s.is_won || s.is_lost).map((s) => s.key));
+    const done = new Set(doneKeys);
     return leads.filter((l) => !done.has(l.stage_key ?? l.stage) && l.next_follow_up_at);
-  }, [leads, stages]);
+  }, [leads, doneKeys]);
+
+  // The true number of open records carrying a follow-up date, counted on the
+  // server. The header said "N scheduled follow-ups" from the loaded page —
+  // on the one screen whose entire job is proving nobody has been missed,
+  // which is precisely where an undercount is most expensive.
+  const trueFollowUps = useFollowUpCount(org?.id, doneKeys, truncated);
 
   const byDay = useMemo(() => {
     const m: Record<string, Lead[]> = {};
@@ -103,10 +114,24 @@ export function Calendar({ navigate }: { navigate: (to: string) => void }) {
 
   return (
     <div className="stack">
+      {/* This screen showed no truncation notice at all — the month grid simply
+          omitted every follow-up belonging to an older record, silently. */}
+      <TruncationNotice
+        loaded={leads.length}
+        total={totalLeads}
+        noun={ui.leadNounPlural.toLowerCase()}
+        what="Follow-ups on older records are not plotted on the grid below."
+      />
+
       <div className="row">
         <div>
           <h1>Calendar</h1>
-          <p className="sub" style={{ marginTop: 2 }}>{openLeads.length} scheduled follow-ups</p>
+          <p className="sub" style={{ marginTop: 2 }}>
+            {(trueFollowUps ?? openLeads.length).toLocaleString("en-IN")} scheduled follow-ups
+            {trueFollowUps !== null && trueFollowUps > openLeads.length
+              ? ` · ${openLeads.length.toLocaleString("en-IN")} of them plotted below`
+              : ""}
+          </p>
         </div>
         <div className="spacer" />
         <div className="row">

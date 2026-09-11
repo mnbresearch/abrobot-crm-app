@@ -26,6 +26,12 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { requireCronSecret } from "../_shared/cron-auth.ts";
 import { applyTemplate, escapeHtml, textToHtml } from "../_shared/template.ts";
 import { fetchWithTimeout } from "../_shared/http.ts";
+import {
+  buildSequences,
+  sequenceNames,
+  type NurtureTemplate,
+  type Sequence,
+} from "../_shared/sequences.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -50,7 +56,7 @@ const GAP_HOURS = [1, 72, 96];
 const ORGS_PER_RUN = 25;   // free-tier edge functions have a wall-clock budget
 const LEADS_PER_ORG = 100;
 
-interface Tpl { subject: string | null; body: string; nurture_step: number }
+type Tpl = NurtureTemplate;
 
 // deno-lint-ignore no-explicit-any
 type Lead = any;
@@ -119,7 +125,7 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
 
   const { data: tplRows } = await supabase
     .from("message_templates")
-    .select("subject, body, nurture_step")
+    .select("subject, body, nurture_step, nurture_segment")
     .eq("org_id", org.id)
     .eq("channel", "email")
     .not("nurture_step", "is", null)
@@ -131,8 +137,10 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     // follow-up copy, so there is nothing legitimate to send on their behalf.
     return { org: org.slug, skipped: "no nurture templates written", sent: 0 };
   }
-  const byStep = new Map(templates.map((t) => [t.nurture_step, t]));
-  const maxStep = Math.max(...templates.map((t) => t.nurture_step)) + 1;
+
+  // Grouping rules, and the reasoning behind them, live in _shared/sequences.ts
+  // where they are covered by tests.
+  const seqs = buildSequences(templates);
 
   const key = (cfg.resend_api_key || "").trim() || PLATFORM_RESEND_KEY;
   if (!key) return { org: org.slug, skipped: "no Resend key", sent: 0 };
@@ -178,67 +186,170 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     .eq("org_id", org.id).or("is_won.eq.true,is_lost.eq.true");
   const stop = new Set((terminal ?? []).map((s: { key: string }) => s.key));
 
-  let q = supabase.from("leads")
-    .select("id, name, email, phone, target_country, course, course_level, intake, custom, stage_key, nurture_step, nurture_last_sent_at, nurture_token, created_at")
-    .eq("org_id", org.id)
-    .not("email", "is", null)
-    .eq("nurture_opted_out", false)
-    .lt("nurture_step", maxStep)
-    .limit(LEADS_PER_ORG);
-  if (stop.size) {
-    // Quoted: a stage key is normally a slug, but nothing enforces that, and an
-    // unquoted comma or parenthesis in one key would silently reshape the
-    // filter — which here means emailing people who have already converted.
-    const list = [...stop].map((k) => `"${k.replace(/"/g, '""')}"`).join(",");
-    q = q.or(`stage_key.is.null,stage_key.not.in.(${list})`);
-  }
+  // ── Who to consider, one sequence at a time ───────────────────────────────
+  //
+  // This used to be a single unordered `.limit(100)` over every record below
+  // the org's longest sequence, with the sequence choice made in the loop. That
+  // is a starvation bug, and a bad one. Records that can NEVER be sent — a
+  // segment nobody wrote copy for, or one that finished a shorter sequence —
+  // still satisfied the query, so they were re-fetched every hour forever. Once
+  // a hundred of them accumulate, the page is entirely full of them and records
+  // that SHOULD receive an email are never fetched at all. Follow-up stops, and
+  // the run report says "candidates: 100" the whole time.
+  //
+  // MNB Research is exactly that shape today: a crm-website sequence and no
+  // default, so every consulting enquiry in the org is permanently ineligible.
+  //
+  // So the filtering moves into the query. Each sequence gets its own pass,
+  // bounded by ITS OWN maxStep, and only fetches records it could actually
+  // send to. Ordered oldest-first so the page is deterministic rather than
+  // whatever Postgres felt like returning.
+  const named = [...seqs.bySegment.keys()];
+  const quotedSegments = named.map((s) => `"${s.replace(/"/g, '""')}"`).join(",");
 
-  const { data: leads, error: leadErr } = await q;
-  if (leadErr) return { org: org.slug, error: leadErr.message, sent: 0 };
+  // deno-lint-ignore no-explicit-any
+  type Q = any;
+  const passes: { label: string; seq: Sequence; narrow: (q: Q) => Q }[] = [
+    ...named.map((s) => ({
+      label: s,
+      seq: seqs.bySegment.get(s)!,
+      narrow: (q: Q) => q.eq("segment", s),
+    })),
+    // The default sequence covers two disjoint groups, queried separately.
+    // They could be one `.or()`, but a second or() alongside the terminal-stage
+    // one relies on PostgREST's AND-ing of repeated params, and `segment not in
+    // (...)` is NULL for a NULL segment — the classic trap that would silently
+    // drop every unsegmented record. Two plain filters cannot be misread.
+    ...(seqs.def
+      ? [
+        { label: "default", seq: seqs.def, narrow: (q: Q) => q.is("segment", null) },
+        ...(named.length
+          ? [{
+            label: "default (unwritten segments)",
+            seq: seqs.def,
+            narrow: (q: Q) => q.not("segment", "in", `(${quotedSegments})`),
+          }]
+          : []),
+      ]
+      : []),
+  ];
 
   const now = Date.now();
   let sent = 0;
+  let considered = 0;
+  let quota = LEADS_PER_ORG;   // shared across passes: the per-org work budget
   const errors: string[] = [];
+  const perSequence: Record<string, number> = {};
 
-  for (const l of (leads ?? []) as Lead[]) {
-    if (budget !== null && budget <= 0) break;   // allowance exhausted mid-run
+  for (const pass of passes) {
+    if (quota <= 0) break;
+    if (budget !== null && budget <= 0) break;
 
-    const tpl = byStep.get(l.nurture_step);
-    if (!tpl) continue;   // gap in the sequence — skip rather than substitute
+    let q = supabase.from("leads")
+      .select("id, name, email, phone, target_country, course, course_level, intake, custom, segment, stage_key, nurture_step, nurture_last_sent_at, nurture_token, created_at")
+      .eq("org_id", org.id)
+      .not("email", "is", null)
+      .eq("nurture_opted_out", false)
+      .lt("nurture_step", pass.seq.maxStep)
+      .order("created_at", { ascending: true })
+      .limit(quota);
 
-    const gapH = GAP_HOURS[l.nurture_step] ?? GAP_HOURS[GAP_HOURS.length - 1];
-    const since = l.nurture_last_sent_at
-      ? now - new Date(l.nurture_last_sent_at).getTime()
-      : now - new Date(l.created_at).getTime();
-    if (since < gapH * 3600_000) continue;
+    q = pass.narrow(q);
 
-    try {
-      const unsubUrl = `${FN_BASE}/nurture?unsub=${l.nurture_token}`;
-      const { subject, html } = buildEmail(tpl, l, brand, unsubUrl, (cfg.contact_url || "").trim());
+    if (stop.size) {
+      // Quoted: a stage key is normally a slug, but nothing enforces that, and an
+      // unquoted comma or parenthesis in one key would silently reshape the
+      // filter — which here means emailing people who have already converted.
+      const list = [...stop].map((k) => `"${k.replace(/"/g, '""')}"`).join(",");
+      q = q.or(`stage_key.is.null,stage_key.not.in.(${list})`);
+    }
 
-      await sendEmail(key, from, l.email, replyTo, subject, html, unsubUrl);
+    const { data: leads, error: leadErr } = await q;
+    if (leadErr) {
+      // One pass failing must not silently cancel the others.
+      errors.push(`${pass.label}: ${leadErr.message}`);
+      continue;
+    }
+    considered += leads?.length ?? 0;
 
-      // Advance the step BEFORE anything else can fail. If the activity insert
-      // errors after a successful send, the worst outcome must be a missing
-      // log line, never the same email again on the next run.
-      const { error: stepErr } = await supabase.from("leads").update({
-        nurture_step: l.nurture_step + 1,
-        nurture_last_sent_at: new Date().toISOString(),
-      }).eq("id", l.id);
-      if (stepErr) {
-        // Cannot record that we sent → we would resend. Say so loudly.
-        console.error(`nurture: SENT to ${l.email} but could not advance step:`, stepErr.message);
-        errors.push(`${l.id}: sent but step not advanced (${stepErr.message})`);
+    for (const l of (leads ?? []) as Lead[]) {
+      if (budget !== null && budget <= 0) break;
+      if (quota <= 0) break;
+
+      // NOTE: quota is spent on WORK DONE, not on rows looked at.
+      //
+      // Decrementing here — one per lead examined — reintroduced the exact
+      // starvation this rewrite removed, one level down. A first pass whose
+      // leads are all still inside their gap window would `continue` a hundred
+      // times, burn the entire per-org budget on doing nothing, and every later
+      // pass would be skipped because quota hit zero. Segment A's not-yet-due
+      // records would silently starve segment B's due ones, every run, forever.
+      //
+      // Skipping a lead is nearly free (no write, no send), so it should not
+      // cost budget. The `.limit(quota)` above still bounds how much we fetch.
+      const seq = pass.seq;
+      const tpl = seq.byStep.get(l.nurture_step);
+
+      const gapH = GAP_HOURS[l.nurture_step] ?? GAP_HOURS[GAP_HOURS.length - 1];
+      const since = l.nurture_last_sent_at
+        ? now - new Date(l.nurture_last_sent_at).getTime()
+        : now - new Date(l.created_at).getTime();
+      // Checked BEFORE the hole-advance below. A gap at step 0 would otherwise
+      // advance a record seconds after it was created, collapsing the deliberate
+      // one-hour wait before the first email.
+      if (since < gapH * 3600_000) continue;
+
+      if (!tpl) {
+        // A hole in the sequence — someone deleted step 2 of three. Advance
+        // past it WITHOUT sending, so step 3 is still reachable. Simply
+        // skipping (what this did before) left every mid-sequence record
+        // stalled on the missing step permanently, and re-fetched it hourly
+        // for good measure. nurture_last_sent_at is deliberately untouched, so
+        // the next step's gap is still measured from the last real send.
+        const { error: holeErr } = await supabase.from("leads")
+          .update({ nurture_step: l.nurture_step + 1 }).eq("id", l.id);
+        // Not swallowed: if this write fails the record is re-fetched and
+        // re-advanced on every run for ever, which is a silent infinite loop
+        // dressed up as a no-op.
+        if (holeErr) errors.push(`${l.id}: could not advance past a missing step (${holeErr.message})`);
+        quota--;   // a write happened
+        continue;
       }
 
-      await supabase.from("activities").insert({
-        org_id: org.id, lead_id: l.id, type: "email",
-        content: `Follow-up email ${l.nurture_step + 1} of ${maxStep} sent automatically to ${l.email}.`,
-      });
-      sent++;
-      if (budget !== null) budget--;
-    } catch (e) {
-      errors.push(`${l.email}: ${(e as Error).message}`);
+      try {
+        const unsubUrl = `${FN_BASE}/nurture?unsub=${l.nurture_token}`;
+        const { subject, html } = buildEmail(tpl, l, brand, unsubUrl, (cfg.contact_url || "").trim());
+
+        await sendEmail(key, from, l.email, replyTo, subject, html, unsubUrl);
+
+        // Advance the step BEFORE anything else can fail. If the activity insert
+        // errors after a successful send, the worst outcome must be a missing
+        // log line, never the same email again on the next run.
+        const { error: stepErr } = await supabase.from("leads").update({
+          nurture_step: l.nurture_step + 1,
+          nurture_last_sent_at: new Date().toISOString(),
+        }).eq("id", l.id);
+        if (stepErr) {
+          // Cannot record that we sent → we would resend. Say so loudly.
+          console.error(`nurture: SENT to ${l.email} but could not advance step:`, stepErr.message);
+          errors.push(`${l.id}: sent but step not advanced (${stepErr.message})`);
+        }
+
+        await supabase.from("activities").insert({
+          org_id: org.id, lead_id: l.id, type: "email",
+          // seq.maxStep, not an org-wide bound: telling someone this was "email
+          // 2 of 5" when their sequence has two is a small lie that makes the
+          // history unreadable once an org runs more than one sequence.
+          content: `Follow-up email ${l.nurture_step + 1} of ${seq.maxStep} sent automatically to ${l.email}` +
+            (tpl.nurture_segment ? ` (${tpl.nurture_segment} sequence).` : "."),
+        });
+        sent++;
+        quota--;   // a send happened — this is what the per-org budget is for
+        perSequence[pass.label] = (perSequence[pass.label] ?? 0) + 1;
+        if (budget !== null) budget--;
+      } catch (e) {
+        errors.push(`${l.email}: ${(e as Error).message}`);
+      }
     }
   }
 
@@ -246,7 +357,32 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     await supabase.rpc("consume_usage", { p_org_id: org.id, p_metric: "emails", p_amount: sent });
   }
 
-  return { org: org.slug, candidates: leads?.length ?? 0, sent, errors };
+  // `unaddressed` counts records this org has written nobody's copy for. It is
+  // no longer a loop counter — those records are now excluded by the query, so
+  // it has to be asked for directly. It is worth one extra request per org
+  // because it is the single number that distinguishes "segmentation is
+  // working" from "half my contacts silently stopped receiving follow-up the
+  // day I added an audience", and nothing else on the run report would show it.
+  let unaddressed = 0;
+  if (named.length && !seqs.def) {
+    const { count } = await supabase.from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id)
+      .not("email", "is", null)
+      .eq("nurture_opted_out", false)
+      .or(`segment.is.null,segment.not.in.(${quotedSegments})`);
+    unaddressed = count ?? 0;
+  }
+
+  return {
+    org: org.slug,
+    considered,
+    sent,
+    sequences: sequenceNames(seqs),
+    ...(Object.keys(perSequence).length ? { by_sequence: perSequence } : {}),
+    ...(unaddressed ? { unaddressed } : {}),
+    errors,
+  };
 }
 
 

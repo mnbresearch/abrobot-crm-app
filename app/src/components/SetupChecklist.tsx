@@ -18,9 +18,28 @@ interface Step {
 }
 
 export function SetupChecklist({ navigate }: { navigate: (to: string) => void }) {
-  const { org, ui, isAdmin } = useApp();
+  const { org, ui, isAdmin, plan } = useApp();
   const [steps, setSteps] = useState<Step[] | null>(null);
+  // Steps this plan cannot support, named so they can be explained rather than
+  // just vanishing. See the gating note below.
+  const [gated, setGated] = useState<string[]>([]);
   const [hidden, setHidden] = useState(false);
+
+  // `free` is max_seats = 1 and max_automations = 0. "Invite your team" needs a
+  // second active profile and "Switch on one automation" needs an enabled
+  // automation, so on that plan neither can EVER be ticked — and because the
+  // card only hides itself once every step is done, it became a permanent
+  // fixture on every free org's dashboard, offering two buttons to screens that
+  // refuse the work. A checklist with an unreachable item stops being a
+  // checklist; people learn to ignore the whole thing.
+  //
+  // null limit means unlimited, not none — and a null `plan` means
+  // usage_snapshot could not be read, in which case we gate nothing rather than
+  // hiding steps from a customer who has paid for them.
+  const seatsLimit = plan?.seatsLimit ?? null;
+  const autosLimit = plan?.automationsLimit ?? null;
+  const seatsCapped = plan !== null && seatsLimit !== null && seatsLimit <= 1;
+  const autosCapped = plan !== null && autosLimit !== null && autosLimit < 1;
 
   useEffect(() => {
     if (!org || !isAdmin) return;
@@ -88,7 +107,7 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
           " — those steps are shown as complete rather than nagging you to redo them.");
       }
 
-      setSteps([
+      const all: Step[] = [
         {
           key: "industry",
           label: "Choose your industry",
@@ -143,11 +162,21 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
           done: anyAutos ?? true,
           action: { label: "See recipes", path: "/automations" },
         },
-      ]);
-    })();
-  }, [org, isAdmin, ui.leadNounPlural]);
+      ];
 
-  if (!isAdmin || !steps || hidden) return null;
+      // Drop what this plan cannot do, and remember what was dropped so it can
+      // be stated once at the bottom with a live route to the plans — rather
+      // than left in the list as a tick box that will never tick.
+      const blocked: string[] = [];
+      if (seatsCapped) blocked.push("Inviting teammates");
+      if (autosCapped) blocked.push("Automations");
+      setGated(blocked);
+      setSteps(all.filter((s) =>
+        !(s.key === "team" && seatsCapped) && !(s.key === "automation" && autosCapped)));
+    })();
+  }, [org, isAdmin, ui.leadNounPlural, seatsCapped, autosCapped]);
+
+  if (!isAdmin || !steps || !steps.length || hidden) return null;
 
   const done = steps.filter((s) => s.done).length;
   if (done === steps.length) return null; // finished — stop showing it
@@ -193,6 +222,23 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
           </div>
         ))}
       </div>
+
+      {gated.length > 0 && (
+        <div
+          className="row row-wrap"
+          style={{ marginTop: 12, paddingTop: 11, borderTop: "1px solid var(--border)", alignItems: "center" }}
+        >
+          <div className="sub" style={{ flex: 1, minWidth: 200, fontSize: 12.5 }}>
+            {gated.join(" and ")} {gated.length > 1 ? "come" : "comes"} with a paid plan — your
+            current plan includes {seatsCapped && autosCapped
+              ? "a single seat and no automations"
+              : seatsCapped ? "a single seat" : "no automations"}. Everything else above works today.
+          </div>
+          <button className="btn btn-sm" onClick={() => navigate("/settings?tab=usage")}>
+            See plans
+          </button>
+        </div>
+      )}
     </div>
   );
 }

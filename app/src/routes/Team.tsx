@@ -27,7 +27,7 @@ interface Invite {
  * auth provider and authorisation with us, which is the right split.
  */
 function InviteCard({ onChanged }: { onChanged: () => void }) {
-  const { org, profile } = useApp();
+  const { org, profile, plan } = useApp();
   const [invites, setInvites] = useState<Invite[]>([]);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<UserRole>("counsellor");
@@ -36,7 +36,11 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
 
   const load = async () => {
     if (!org) return;
-    const { data } = await supabase.from("invites").select("*").eq("org_id", org.id).order("created_at", { ascending: false });
+    const { data, error } = await supabase.from("invites").select("*").eq("org_id", org.id).order("created_at", { ascending: false });
+    // An unread error rendered no "Waiting to join" list — which reads as "that
+    // invite was never created" and invites the admin to send it a second time,
+    // or to conclude the invite system is broken and chase the person manually.
+    if (error) { toast.error(`Could not load pending invites: ${error.message}`); return; }
     setInvites((data as Invite[]) ?? []);
   };
 
@@ -56,7 +60,9 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
     setEmail("");
     await load();
     onChanged();
-    toast.show("Invite created");
+    // Says what actually happened. "Invite created" left people expecting an
+    // email to have gone out.
+    toast.show(`Invite created for ${clean} — send them the link yourself`);
   };
 
   const revoke = async (id: string) => {
@@ -68,9 +74,38 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
 
   const pending = invites.filter((i) => !i.accepted_at);
 
+  // Seat awareness. `max_seats` is enforced server-side at SIGN-IN, not at
+  // invite time — so on free (max_seats = 1) every invite "succeeded", the
+  // admin told their colleague they were in, and the colleague was refused
+  // when they tried to log in. The admin heard about it from the colleague.
+  // The arithmetic is: seats already taken, plus everyone still to accept.
+  const seatsLimit = plan?.seatsLimit ?? null;
+  const seatsUsed = plan?.seatsUsed ?? 0;
+  const committed = seatsUsed + pending.length;
+  const seatsFull = seatsLimit !== null && committed >= seatsLimit;
+
   return (
     <>
       <Card title="Invite a teammate">
+        {seatsLimit !== null && (
+          <div
+            className="card"
+            style={{
+              marginBottom: 14, padding: 12, background: "var(--bg)",
+              borderColor: seatsFull ? "var(--amber)" : "var(--border)",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              {seatsFull ? "⚠️ No seats left on your plan" : `${committed} of ${seatsLimit} seats used`}
+            </div>
+            <p className="sub" style={{ fontSize: 12.5, marginTop: 3 }}>
+              {seatsFull
+                ? `Your ${plan?.effective ?? "current"} plan allows ${seatsLimit} ${seatsLimit === 1 ? "person" : "people"}, and you have ${seatsUsed} active${pending.length ? ` plus ${pending.length} waiting to join` : ""}. You can still create an invite, but whoever you send it to will be turned away at sign-in until you upgrade — so tell them, or upgrade first.`
+                : `Active members and pending invites both count. ${seatsLimit - committed} left.`}
+            </p>
+          </div>
+        )}
+
         <div className="row row-wrap" style={{ marginBottom: 6 }}>
           <input
             className="input"
@@ -85,14 +120,20 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
             <option value="counsellor">Counsellor</option>
             <option value="org_admin">Admin</option>
           </select>
+          {/* "Send invite" was a straight untruth: nothing is sent. No email,
+              no SMS, no notification — the button writes a row that waits for
+              that address to sign in, and the small print two lines below
+              admitted as much. An admin who reads the button and not the small
+              print waits for a colleague who was never contacted. */}
           <button className={`btn btn-primary${busy ? " btn-busy" : ""}`} onClick={invite} disabled={busy}>
-            {busy ? "Inviting…" : "Send invite"}
+            {busy ? "Creating…" : "Create invite"}
           </button>
         </div>
 
         <p className="sub" style={{ fontSize: 12.5, marginTop: 10 }}>
-          They sign in at <b>{window.location.host}</b> with this exact email and join automatically —
-          no admin step afterwards. Send them the link yourself; we don't email it for you yet.
+          <b>No email is sent — you need to tell them yourself.</b> This reserves their place.
+          Ask them to sign in at <b>{window.location.host}</b> using this exact address and they
+          join automatically, with no further step from you.
         </p>
 
         {pending.length > 0 && (

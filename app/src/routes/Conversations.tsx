@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase, callFunction } from "../lib/supabase";
-import { Card, Empty, Spinner, timeAgo, useToast } from "../components/ui";
+import { Card, Empty, LoadError, Spinner, timeAgo, useToast } from "../components/ui";
 
 // Website chat transcripts captured by the chat-agent edge function.
 // Two panes: conversation list, and the selected transcript.
@@ -30,6 +30,7 @@ export function Conversations({ navigate }: { navigate: (to: string) => void }) 
   const [convos, setConvos] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [msgError, setMsgError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<string | null>(null);
   const [summarising, setSummarising] = useState(false);
@@ -55,11 +56,21 @@ export function Conversations({ navigate }: { navigate: (to: string) => void }) 
   const open = useCallback(async (c: Conversation) => {
     setSelected(c);
     setSummary(null);
-    const { data } = await supabase
+    setMessages([]);
+    const { data, error } = await supabase
       .from("chat_messages")
       .select("id, role, content, created_at")
       .eq("conversation_id", c.id)
       .order("created_at");
+    // The error was dropped, so a failed read rendered the transcript pane
+    // empty — which reads as "this visitor said nothing", on a conversation the
+    // list beside it says has messages. Worse, "Summarise" was still offered
+    // over what looked like an empty chat.
+    if (error) {
+      setMsgError(error.message);
+      return;
+    }
+    setMsgError(null);
     setMessages((data as ChatMessage[]) ?? []);
   }, []);
 
@@ -175,7 +186,11 @@ export function Conversations({ navigate }: { navigate: (to: string) => void }) 
                     </div>
                   );
                 })}
-                {messages.length === 0 && <p className="sub">No messages in this conversation.</p>}
+                {/* "No messages" and "we could not read the messages" are very
+                    different statements about a customer's data. */}
+                {msgError
+                  ? <LoadError message={msgError} onRetry={() => void open(selected)} />
+                  : messages.length === 0 && <p className="sub">No messages in this conversation.</p>}
               </div>
             </Card>
           ) : (

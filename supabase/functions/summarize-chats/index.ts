@@ -35,13 +35,36 @@ const MAX_CONVOS = 150;     // cap per export request
 const BATCH = 8;            // conversations per Groq call
 const MAX_CHARS = 1800;     // transcript trim per conversation
 
+/**
+ * Summarise a batch of website chat transcripts.
+ *
+ * The prompt used to open "You summarise STUDY-ABROAD website chat
+ * conversations … for counsellors in India" and asked for study-abroad tags by
+ * name — country, programme level, intake, scholarships, visa, tests. This
+ * function runs on a cron for every organisation on the platform, so a dental
+ * clinic's patient enquiries were being summarised by a model told to look for
+ * a target country and an intake, and tagged accordingly.
+ *
+ * Same cross-tenant class of bug as the widget defaults; it survived the first
+ * sweep because nothing a visitor sees comes from here — only what the
+ * CUSTOMER reads in their own Conversations screen.
+ *
+ * The replacement names no industry and prescribes no tag vocabulary. The
+ * transcript already contains the subject matter, and a model asked for "the
+ * topics that actually came up" will produce "root canal · Tuesday · cost" for
+ * a clinic and "Canada · Masters · scholarships" for a consultancy without
+ * being told which it is.
+ */
 async function summariseBatch(items: { id: string; transcript: string }[]) {
   const sys =
-    "You summarise study-abroad website chat conversations for a CRM used by counsellors in India. " +
-    "For EACH conversation produce: a 'summary' of at most 2 short sentences capturing what the visitor " +
-    "wants (country, program level, intake, topics like scholarships/visa/fees/tests) and whether they " +
-    "shared contact details / became a lead; and 'interest' as short middot-separated tags " +
-    "(e.g. 'Canada · Masters · scholarships'). Be factual, no fluff. " +
+    "You summarise website chat conversations for a business's CRM. The business may be in any " +
+    "industry — a clinic, a dealership, a law firm, a school, a consultancy — so take the subject " +
+    "matter entirely from the transcript and never assume what the business sells. " +
+    "For EACH conversation produce: a 'summary' of at most 2 short sentences capturing what the " +
+    "visitor wants and whether they shared contact details; and 'interest' as short " +
+    "middot-separated tags drawn from the topics that actually came up in that conversation " +
+    "(e.g. 'root canal · Tuesday · cost' or 'Canada · Masters · scholarships'). " +
+    "Be factual, no fluff, and never invent a detail the transcript does not contain. " +
     'Return ONLY valid JSON of the form {"summaries":[{"id":"...","summary":"...","interest":"..."}]}.';
   const user = JSON.stringify(items.map((it) => ({ id: it.id, transcript: it.transcript.slice(0, MAX_CHARS) })));
 
@@ -122,9 +145,19 @@ Deno.serve(async (req) => {
     .select("id, active")
     // Same pin as run-automations: the token decides the org for a person,
     // the body only decides it for the scheduler.
-    .eq(callerOrgId ? "id" : "slug", callerOrgId ?? (body.org ?? "abrobot"))
+    // Defaulting to "abrobot" made a multi-tenant scheduled job single-tenant:
+    // an unattended run with no org named summarised AbroBot's conversations
+    // and nobody else's, on every other customer's schedule.
+    .eq(callerOrgId ? "id" : "slug", callerOrgId ?? (body.org ?? ""))
     .single();
+  if (!callerOrgId && !body.org) return json({ error: "no organisation specified" }, 400);
   if (!org?.active) return json({ error: "org unavailable" }, 404);
+
+  // Metering happens further down, once we know how many batches will ACTUALLY
+  // reach Groq. Charging here — off the raw body length — bills a caller for
+  // junk: the ids are unvalidated at this point, so fifty made-up ids, or fifty
+  // belonging to another organisation, would debit fifty summaries and produce
+  // none. See the block above `items`.
 
   const ids: string[] = Array.isArray(body.conversation_ids)
     ? body.conversation_ids.filter((x: unknown) => typeof x === "string").slice(0, MAX_CONVOS)
@@ -138,6 +171,35 @@ Deno.serve(async (req) => {
 
   const byConv: Record<string, { role: string; content: string }[]> = {};
   (msgs ?? []).forEach((m) => { (byConv[m.conversation_id] ||= []).push(m); });
+
+  // ── Metering ──────────────────────────────────────────────────────────────
+  // This function calls Groq and, until now, charged nobody for it. Every other
+  // AI path on the platform — chat-agent, whatsapp-send, nurture, send-campaign
+  // — calls consume_usage; this one was billed to the platform and attributed
+  // to no customer, so it appeared in neither the margin model nor the
+  // customer's usage meter. It runs on a cron, in batches, unattended, which is
+  // precisely the shape of spend that goes unnoticed until the invoice.
+  //
+  // Charged HERE, after `byConv` has been built from an org-scoped read, so the
+  // count reflects conversations that really exist and really belong to this
+  // organisation. One unit per batch, matching what is actually sent to Groq.
+  //
+  // Fails CLOSED: an org that cannot pay for a summary does not get one.
+  // Summaries are a convenience, so refusing is a strictly better failure than
+  // silent unbilled spend.
+  const realIds = ids.filter((id) => byConv[id]?.length);
+  if (!realIds.length) return json({ summaries: {} });
+
+  const { data: usage, error: usageErr } = await supabase.rpc("consume_usage", {
+    p_org_id: org.id, p_metric: "ai_messages", p_amount: Math.ceil(realIds.length / BATCH),
+  });
+  if (usageErr) {
+    console.error("summarize-chats: consume_usage failed, refusing:", usageErr.message);
+    return json({ error: "could not check this organisation's allowance" }, 503);
+  }
+  if (usage && (usage as { allowed?: boolean }).allowed === false) {
+    return json({ summaries: {}, skipped: "monthly AI allowance used up" });
+  }
 
   const items = ids
     .filter((id) => byConv[id]?.length)

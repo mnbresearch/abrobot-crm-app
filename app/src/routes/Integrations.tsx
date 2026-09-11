@@ -21,7 +21,13 @@ interface ApiKey {
   id: string; name: string; key_prefix: string; scopes: string[];
   last_used_at: string | null; use_count: number; created_at: string; expires_at: string | null;
 }
-interface WebhookKey { id: string; key: string; label: string; source: string; active: boolean; created_at: string }
+interface WebhookKey {
+  id: string; key: string; label: string; source: string; active: boolean; created_at: string;
+  // Free-text audience. Records captured on this key inherit it, and Templates
+  // can then address them with their own follow-up sequence. Deliberately not
+  // `source`, which is a fixed enum shared by every tenant on the platform.
+  segment: string | null;
+}
 interface Endpoint {
   id: string; url: string; secret: string; events: string[]; active: boolean;
   description: string | null; failure_count: number; last_status: number | null;
@@ -76,6 +82,7 @@ export function Integrations() {
   const [keyName, setKeyName] = useState("");
   const [keyScopes, setKeyScopes] = useState<string[]>(["leads:read"]);
   const [hookLabel, setHookLabel] = useState("");
+  const [hookSegment, setHookSegment] = useState("");
   const [epUrl, setEpUrl] = useState("");
   const [epEvents, setEpEvents] = useState<string[]>(["lead.created"]);
 
@@ -117,8 +124,20 @@ export function Integrations() {
       const s = await callFunction<IntegrationStatus>("save-integration", { action: "status" });
       setStatus(s);
       if (org) {
-        const { data: snap } = await supabase.rpc("usage_snapshot", { p_org_id: org.id });
-        setApiAccess((snap as { api_access?: boolean } | null)?.api_access ?? null);
+        const { data: snap, error: snapErr } = await supabase.rpc("usage_snapshot", { p_org_id: org.id });
+        // The error was dropped and `?? null` swallowed the result, so a failed
+        // RPC set apiAccess to null — the same value as "we haven't checked".
+        // Whichever way the UI reads null, it is asserting something about the
+        // customer's entitlements that it does not actually know. Left null,
+        // but said out loud, so the screen can stay non-committal rather than
+        // guess in either direction.
+        if (snapErr) {
+          console.error("integrations: plan entitlements unavailable —", snapErr.message);
+          toast.error(`Couldn't check what your plan includes (${snapErr.message}) — API access is shown as unconfirmed below.`);
+          setApiAccess(null);
+        } else {
+          setApiAccess((snap as { api_access?: boolean } | null)?.api_access ?? null);
+        }
       }
       if (s?.whatsapp?.display_number) setWaNumber(s.whatsapp.display_number);
     } catch {
@@ -166,12 +185,17 @@ export function Integrations() {
     if (!hookLabel.trim()) { toast.error("Name it — 'Website form', 'Facebook Ads'…"); return; }
     setBusy(true);
     const key = "wh_" + crypto.randomUUID().replace(/-/g, "");
+    // Normalised to a slug. The value is matched exactly against a template's
+    // audience, so "CRM Website" and "crm website" being different audiences —
+    // with the difference invisible on screen — is a trap not worth leaving out.
+    const segment = hookSegment.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 40) || null;
     const { error } = await supabase.from("webhook_keys").insert({
-      org_id: org.id, key, label: hookLabel.trim(), source: "website", active: true,
+      org_id: org.id, key, label: hookLabel.trim(), source: "website", active: true, segment,
     });
     setBusy(false);
     if (error) { toast.error(error.message); return; }
     setHookLabel("");
+    setHookSegment("");
     toast.show("Capture URL created");
     await load();
   };
@@ -554,13 +578,22 @@ export function Integrations() {
           these. Anything that arrives is scored, assigned and alerted like any other record.
         </p>
 
-        <div className="row row-wrap" style={{ marginTop: 12, marginBottom: 10 }}>
+        <div className="row row-wrap" style={{ marginTop: 12, marginBottom: 6 }}>
           <input className="input" style={{ maxWidth: 260 }}
             placeholder="Where from? e.g. Website contact form"
             value={hookLabel} onChange={(e) => setHookLabel(e.target.value)} />
+          <input className="input" style={{ maxWidth: 200 }}
+            placeholder="Audience (optional)"
+            value={hookSegment} onChange={(e) => setHookSegment(e.target.value)} />
           <button className={`btn btn-primary${busy ? " btn-busy" : ""}`}
             onClick={() => void createHook()} disabled={busy}>Create capture URL</button>
         </div>
+        <p className="sub" style={{ fontSize: 12, marginBottom: 12 }}>
+          <b>Audience</b> is optional and only affects automatic follow-up. Give one, and you can
+          write a follow-up sequence in <b>Templates</b> just for the {ui.leadNounPlural.toLowerCase()}{" "}
+          that arrive here — useful when one form asks about a different product than another.
+          Leave it blank and they join your normal sequence.
+        </p>
 
         {hooks.length === 0 ? (
           <Empty icon="📥" title="No capture URLs yet"
@@ -573,6 +606,7 @@ export function Integrations() {
                 <span className={h.active ? "pill pill-green" : "pill pill-muted"}>
                   {h.active ? "active" : "paused"}
                 </span>
+                {h.segment && <span className="pill pill-muted" style={{ marginLeft: 5 }}>🎯 {h.segment}</span>}
               </div>
               <div className="row">
                 <button className="btn btn-sm" onClick={() => void copy(captureUrl(h.key), "URL")}>Copy</button>
