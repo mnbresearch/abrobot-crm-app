@@ -122,7 +122,7 @@
         .replace(/</g, "&lt;").replace(/>/g, "&gt;");
     };
     var logoImg = function () {
-      return LOGO ? '<img alt="chat" src="' + LOGO + '" onerror="this.onerror=null;this.replaceWith(document.createTextNode(\'\\uD83D\\uDCAC\'))"/>' : "💬";
+      return LOGO ? '<img alt="chat" src="' + escAttr(LOGO) + '" onerror="this.onerror=null;this.replaceWith(document.createTextNode(\'\\uD83D\\uDCAC\'))"/>' : "💬";
     };
 
     var css = document.createElement("style");
