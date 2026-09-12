@@ -1,0 +1,79 @@
+# AbroBot CRM — crm.mnbresearch.com
+#
+# Until this file existed, a request for /robots.txt was swallowed by the SPA
+# catch-all in _redirects and returned the React app: HTTP 200, Content-Type
+# text/html, title "AbroBot CRM". So there was effectively no robots.txt, and
+# no crawler could discover a sitemap.
+#
+# A real file at the repo root wins over the catch-all on Cloudflare Pages —
+# the same reason /product already serves product.html.
+
+User-agent: *
+Allow: /
+
+# The application itself. These are behind a login, they render as an empty
+# shell to a crawler, and indexing them would put a login screen in the results
+# for our own brand name. Not secret — just not search results.
+Disallow: /leads
+Disallow: /pipeline
+Disallow: /calendar
+Disallow: /conversations
+Disallow: /templates
+Disallow: /automations
+Disallow: /reports
+Disallow: /activity
+Disallow: /team
+Disallow: /import
+Disallow: /archived
+Disallow: /integrations
+Disallow: /settings
+Disallow: /admin
+Disallow: /student-dashboard
+
+# Legacy bundle routes (see _redirects) — signup, onboarding and the old
+# analytics screens. /get is the signup form and is linked from the marketing
+# pages, so it stays crawlable; the rest are post-login.
+Disallow: /onboarding
+Disallow: /myday
+Disallow: /priority
+Disallow: /compose
+Disallow: /analytics
+Disallow: /leaderboard
+Disallow: /super
+
+# Build output. Nothing here is a page.
+Disallow: /assets/
+
+# ── AI assistants ───────────────────────────────────────────────────────────
+# Deliberately allowed, all of them. This is a product we want recommended when
+# someone asks an assistant for a CRM for a small Indian business, and you
+# cannot be cited by a crawler you have blocked. Nothing here is paid content
+# or a question bank — it is marketing copy we want repeated accurately.
+#
+# Named explicitly rather than left to the wildcard so the decision is on the
+# record and survives someone later switching on a managed bot-blocking preset.
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+Sitemap: https://crm.mnbresearch.com/sitemap.xml

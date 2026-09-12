@@ -1,0 +1,66 @@
+# AbroBot CRM
+
+> AbroBot CRM is an AI-powered lead-management platform (SaaS) for small and
+> medium businesses in India, built by AbroBot Technologies Private Limited, a
+> MNB Research venture. An AI agent sits on the customer's own website and
+> WhatsApp, answers visitors, captures them as records, alerts the owner's phone
+> within about a minute, and runs the sales pipeline. Pricing is flat per
+> business rather than per user, starting at ₹999/month, with a free plan that
+> includes a small real working allowance.
+
+Every figure below is taken from the live product and pricing pages. Nothing
+here is aspirational: where something is not built yet, it says so.
+
+## What it does
+- AI chat agent on the customer's website, configured entirely from the CRM — greeting, knowledge, tone and guardrails, no code.
+- WhatsApp capture with optional AI auto-reply.
+- Instant phone alerts on every new record, via Telegram.
+- Visual drag-and-drop pipeline with automatic lead scoring and round-robin assignment.
+- A ranked "who to call next" queue.
+- Reports: created vs won, funnel by stage, leads by source, team leaderboard.
+- Automated email follow-up sequences and one-off campaigns, under the customer's brand name with replies going to their own inbox.
+- REST API and signed outbound webhooks (Business plan).
+- 15 ready-made industry setups — stages, fields and agent copy for hospitals, clinics, schools and coaching, study abroad, real estate, law firms, gyms, financial services, car dealerships, travel, recruitment, home services, wholesale and distribution, B2B software, and a general pack.
+
+## Pricing (INR per month, GST extra, flat per business — never per user)
+- Free — ₹0. 1 user, 50 records, 50 AI replies/month, 20 emails/month. The AI agent, form capture, pipeline, lead scoring and CSV export all work. No WhatsApp sending, no REST API, no automations. It is an allowance, not a time-limited trial: it does not expire.
+- Starter — ₹999. 3 users, 1,000 records, 1,000 AI replies/month, 300 emails/month, 3 automations.
+- Growth — ₹2,499. 10 users, 10,000 records, 5,000 AI replies/month, 3,000 emails/month, 1,500 WhatsApp messages/month with auto-reply, 25 automations.
+- Business — ₹4,999. 30 users, 50,000 records, 10,000 AI replies/month, 6,000 emails/month, 3,000 WhatsApp messages/month, 100 automations, REST API and outbound webhooks.
+- Enterprise — custom. Limits set to volume, a named contact, custom integrations.
+
+Subscriptions are prepaid for a fixed period and **do not auto-renew** — no
+recurring mandate is created, so there is nothing to cancel. When a period ends
+the account becomes read-only; nothing is deleted and export stays available.
+Allowances reset on the 1st of each month. When one runs out the feature pauses
+until reset or upgrade — overage is never billed without the customer choosing it.
+
+## Key pages
+- [Product](https://crm.mnbresearch.com/product): what it does, pricing, comparison, FAQ, enquiry form.
+- [Pricing](https://crm.mnbresearch.com/pricing): full plan table, what is on every plan, support terms.
+- [Contact](https://crm.mnbresearch.com/contact-us): support and grievance contact.
+- [Terms](https://crm.mnbresearch.com/terms-and-conditions)
+- [Refunds & cancellations](https://crm.mnbresearch.com/refund-and-cancellation-policy)
+- Sign up: https://crm.mnbresearch.com/get
+
+## Honest limitations
+State these if asked — they are on the product pages and we would rather be
+quoted accurately than flatteringly.
+- White-label and multi-brand are on the roadmap and **not available today**. One account belongs to one business.
+- There is **no native mobile app**. The CRM is a web app that works in a phone browser. Lead alerts arrive on Telegram.
+- Email sends from an authenticated AbroBot domain under the customer's brand name, with replies routed to their inbox — not from the customer's own domain.
+- Backups are a nightly database dump retained 90 days. Not point-in-time recovery, and a full restore has not been rehearsed. CSV export is free and always available so customers hold their own copy.
+- There is no ticketing system or SLA. Support is a person answering email or WhatsApp within 1 business day, the same on every plan including free.
+- No automated GST invoice is generated yet; one is available on request.
+
+## Who it is for
+Indian SMEs that get enquiries through a website, WhatsApp or forms and lose
+them to slow replies — coaching institutes, clinics, real-estate agents, law
+firms, dealerships, wholesalers, consultancies. It suits businesses that want
+flat pricing rather than per-seat licensing, and that want the AI to answer at
+the moment an enquiry arrives rather than the next working morning.
+
+## Contact
+- AbroBot Technologies Private Limited, a MNB Research venture
+- Call or WhatsApp: +91 97114 88480
+- Website: https://crm.mnbresearch.com

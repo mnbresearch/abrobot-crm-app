@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AbroBot CRM — crm.mnbresearch.com
+
+  Only the five marketing pages. The application at / and its routes are
+  deliberately absent: they render as an empty React shell to a crawler and
+  resolve to a login screen, so indexing them would put a sign-in form in the
+  results for our own brand name.
+
+  Extensionless URLs throughout. Cloudflare Pages normalises .html away, so
+  /product is the address that answers 200 and /product.html 308-redirects to
+  it — listing the .html form would advertise a redirect as a canonical.
+
+  Note there is no <loc> for /. That is intentional while the app owns the root;
+  /product carries the canonical for the product itself.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+
+  <url>
+    <loc>https://crm.mnbresearch.com/product</loc>
+    <lastmod>2026-09-12</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+
+  <url>
+    <loc>https://crm.mnbresearch.com/pricing</loc>
+    <lastmod>2026-09-12</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.9</priority>
+  </url>
+
+  <url>
+    <loc>https://crm.mnbresearch.com/contact-us</loc>
+    <lastmod>2026-09-12</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+  </url>
+
+  <url>
+    <loc>https://crm.mnbresearch.com/terms-and-conditions</loc>
+    <lastmod>2026-09-12</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.3</priority>
+  </url>
+
+  <url>
+    <loc>https://crm.mnbresearch.com/refund-and-cancellation-policy</loc>
+    <lastmod>2026-09-12</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.3</priority>
+  </url>
+
+</urlset>

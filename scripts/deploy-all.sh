@@ -146,8 +146,15 @@ echo
 # ── 4. Ship ─────────────────────────────────────────────────────────────────
 echo "==> Committing"
 git add -A
-git commit -m "Strip model reasoning from replies; render markdown in widget; enforce plan limits and expiry; add MNB Research org" \
-  || echo "    (nothing to commit)"
+# The message was hardcoded to one release's description, so every deploy since
+# has been committed as "Strip model reasoning from replies…" regardless of what
+# actually changed. Pass one as the first argument:
+#
+#   bash scripts/deploy-all.sh "SEO foundation: robots, sitemap, meta, schema"
+#
+# Falls back to a dated message rather than a misleading one.
+MSG="${1:-Deploy $(date +%Y-%m-%d)}"
+git commit -m "$MSG" || echo "    (nothing to commit)"
 
 echo "==> Pushing"
 git push

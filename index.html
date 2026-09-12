@@ -3,7 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AbroBot CRM</title>
+    <title>AbroBot CRM — Sign in</title>
+
+    <!--
+      noindex, and it is doing two jobs.
+
+      This file is served for the app itself (/, /leads, /settings …) AND, via
+      the `/* /index.html 200` catch-all in _redirects, for every URL that does
+      not exist. So /pricng, /prodcut and any typo anyone ever links returns
+      HTTP 200 with this exact shell — which Google treats as a soft 404 and
+      which, left alone, lets a five-page site look like unlimited duplicate
+      pages.
+
+      One meta tag fixes both: the application is kept out of the index (nobody
+      should find a sign-in form when searching our brand), and every soft 404
+      is dropped rather than accumulating.
+
+      The marketing pages are real files — product.html, pricing.html and the
+      rest — so they are served directly, never through this shell, and are
+      unaffected.
+    -->
+    <meta name="robots" content="noindex, follow" />
+    <meta
+      name="description"
+      content="Sign in to AbroBot CRM. See the product at https://crm.mnbresearch.com/product"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

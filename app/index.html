@@ -3,7 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AbroBot CRM</title>
+    <title>AbroBot CRM — Sign in</title>
+
+    <!--
+      THIS is the file that must carry the noindex, not the copy at the repo
+      root. deploy-all.sh ends with `cp app/dist/index.html index.html`, so the
+      root file is a build artifact and anything edited there is silently
+      overwritten by the next deploy.
+
+      Why noindex at all — it does two jobs:
+
+      1. The application is served from this shell (/, /leads, /settings …).
+         Indexing it puts a sign-in form in the results for our own brand name.
+      2. `_redirects` ends with `/* /index.html 200`, so EVERY url that does not
+         exist also returns this shell with HTTP 200. /pricng, /prodcut, any
+         typo anyone ever links. Google calls those soft 404s, and left alone
+         they let a five-page site look like unlimited duplicate pages.
+
+      `follow` is deliberate: links out of here still pass value to the
+      marketing pages. Those are real files at the root — product.html,
+      pricing.html and the rest — served directly, never through this shell,
+      and indexed normally.
+    -->
+    <meta name="robots" content="noindex, follow" />
+    <meta
+      name="description"
+      content="Sign in to AbroBot CRM. See the product at https://crm.mnbresearch.com/product"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
