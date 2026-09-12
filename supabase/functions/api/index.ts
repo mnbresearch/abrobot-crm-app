@@ -271,8 +271,17 @@ Deno.serve(async (req) => {
 
       // Dedupe rather than creating a second copy of a person you already have.
       let dq = admin.from("leads").select("id").eq("org_id", auth.orgId);
-      dq = email && phone ? dq.or(`email.eq.${email},phone.eq.${phone}`)
-                          : (email ? dq.eq("email", email) : dq.eq("phone", phone!));
+      // Escaped for the same reason as the search filter above: these values
+      // arrive in an API caller's request body, so unlike the search path they
+      // are attacker-chosen rather than merely user-typed.
+      //
+      // The org filter is ANDed separately and cannot be escaped from, so the
+      // worst case was never a cross-tenant read — it was a reshaped dedupe
+      // query matching the wrong record inside the caller's own org, or a 500.
+      const noDelims = (v: string) => v.replace(/[,()"']/g, "");
+      dq = email && phone
+        ? dq.or(`email.eq.${noDelims(email)},phone.eq.${noDelims(phone)}`)
+        : (email ? dq.eq("email", email) : dq.eq("phone", phone!));
       const { data: existing } = await dq.limit(1);
       if (existing?.length) {
         return json({ ok: true, deduped: true, id: existing[0].id,

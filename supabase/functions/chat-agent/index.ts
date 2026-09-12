@@ -410,7 +410,17 @@ Deno.serve(async (req) => {
   if (email || phone) {
     await supabase.from("conversations").update({ visitor_name: name, visitor_email: email, visitor_phone: phone }).eq("id", convId);
     let q = supabase.from("leads").select("id").eq("org_id", org.id);
-    if (email && phone) q = q.or(`email.eq.${email},phone.eq.${phone}`);
+    // Strip PostgREST's delimiters before interpolating. or() is a
+    // mini-language: a comma, parenthesis or quote in a value reshapes the
+    // filter rather than being matched literally.
+    //
+    // Not currently exploitable — `email` comes from EMAIL_RE, which cannot
+    // contain any of these, and `phone` from normPhone, which strips to digits
+    // and +. But that is upstream sanitisation two functions away, invisible at
+    // this call site, and one regex tweak from being wrong. lead-webhook
+    // already escapes here for exactly this reason; this makes it consistent.
+    const noDelims = (v: string) => v.replace(/[,()"']/g, "");
+    if (email && phone) q = q.or(`email.eq.${noDelims(email)},phone.eq.${noDelims(phone)}`);
     else if (email) q = q.eq("email", email); else q = q.eq("phone", phone!);
     const { data: existing } = await q.limit(1);
     let leadId = existing?.[0]?.id;

@@ -6,22 +6,24 @@
     <title>AbroBot CRM — Sign in</title>
 
     <!--
-      noindex, and it is doing two jobs.
+      THIS is the file that must carry the noindex, not the copy at the repo
+      root. deploy-all.sh ends with `cp app/dist/index.html index.html`, so the
+      root file is a build artifact and anything edited there is silently
+      overwritten by the next deploy.
 
-      This file is served for the app itself (/, /leads, /settings …) AND, via
-      the `/* /index.html 200` catch-all in _redirects, for every URL that does
-      not exist. So /pricng, /prodcut and any typo anyone ever links returns
-      HTTP 200 with this exact shell — which Google treats as a soft 404 and
-      which, left alone, lets a five-page site look like unlimited duplicate
-      pages.
+      Why noindex at all — it does two jobs:
 
-      One meta tag fixes both: the application is kept out of the index (nobody
-      should find a sign-in form when searching our brand), and every soft 404
-      is dropped rather than accumulating.
+      1. The application is served from this shell (/, /leads, /settings …).
+         Indexing it puts a sign-in form in the results for our own brand name.
+      2. `_redirects` ends with `/* /index.html 200`, so EVERY url that does not
+         exist also returns this shell with HTTP 200. /pricng, /prodcut, any
+         typo anyone ever links. Google calls those soft 404s, and left alone
+         they let a five-page site look like unlimited duplicate pages.
 
-      The marketing pages are real files — product.html, pricing.html and the
-      rest — so they are served directly, never through this shell, and are
-      unaffected.
+      `follow` is deliberate: links out of here still pass value to the
+      marketing pages. Those are real files at the root — product.html,
+      pricing.html and the rest — served directly, never through this shell,
+      and indexed normally.
     -->
     <meta name="robots" content="noindex, follow" />
     <meta
