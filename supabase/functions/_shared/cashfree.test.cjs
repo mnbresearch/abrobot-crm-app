@@ -15,6 +15,10 @@ function loadEsbuild() {
     'esbuild',
     path.join(__dirname, '..', '..', '..', 'app', 'node_modules', 'esbuild'),
     path.join(__dirname, '..', '..', '..', 'node_modules', 'esbuild'),
+    // CI installs esbuild with `npm install --no-save` at the repo root; a
+    // sandbox may only have it in /tmp. Without this last candidate these
+    // suites printed SKIP and exited 0 — a green tick over zero assertions.
+    '/tmp/node_modules/esbuild',
   ];
   for (const c of candidates) {
     try {
@@ -37,7 +41,19 @@ const js=es.transformSync(src,{loader:'ts',format:'cjs'}).code;
 // stub Deno env with a known secret
 const secret='cfsk_ma_prod_TESTKEY_1234567890abcdefghijklmn';
 global.Deno={env:{get:(k)=>({CASHFREE_SECRET_KEY:secret,CASHFREE_APP_ID:'app123',CASHFREE_ENV:'production'})[k]}};
-const m={exports:{}}; new Function('module','exports','Deno',js)(m,m.exports,global.Deno);
+// cashfree.ts imports fetchWithTimeout from ./http.ts. Without a `require`
+// in scope the transpiled module throws "require is not defined" on load —
+// which nobody saw, because this suite could never find esbuild and printed
+// SKIP instead. The signature verification under test does no network I/O, so
+// a throwing stub is honest: if a future change makes it call out, the test
+// fails loudly rather than silently hitting the real Cashfree API.
+const stubRequire=(spec)=>{
+  if(spec.includes('http')) return { fetchWithTimeout: () => {
+    throw new Error('fetchWithTimeout called — this suite must not make network calls');
+  } };
+  throw new Error('unexpected import: '+spec);
+};
+const m={exports:{}}; new Function('module','exports','Deno','require',js)(m,m.exports,global.Deno,stubRequire);
 const {verifyWebhook}=m.exports;
 
 const body=JSON.stringify({type:'PAYMENT_SUCCESS_WEBHOOK',data:{order:{order_id:'abcrm_test'}}});

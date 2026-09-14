@@ -248,6 +248,11 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     let q = supabase.from("leads")
       .select("id, name, email, phone, target_country, course, course_level, intake, custom, segment, stage_key, nurture_step, nurture_last_sent_at, nurture_token, created_at")
       .eq("org_id", org.id)
+      // Deletion is enforced in RLS only, and this runs as the service role.
+      // Without this, the follow-up engine keeps emailing people the customer
+      // deleted — the most visible possible version of this bug, and one with
+      // consent implications rather than merely cosmetic ones.
+      .is("deleted_at", null)
       .not("email", "is", null)
       .eq("nurture_opted_out", false)
       .lt("nurture_step", pass.seq.maxStep)
@@ -368,6 +373,8 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     const { count } = await supabase.from("leads")
       .select("id", { count: "exact", head: true })
       .eq("org_id", org.id)
+      .is("deleted_at", null)   // must match the send query above, or the
+                                // diagnostic counts records it would never mail
       .not("email", "is", null)
       .eq("nurture_opted_out", false)
       .or(`segment.is.null,segment.not.in.(${quotedSegments})`);

@@ -15,6 +15,10 @@ function loadEsbuild() {
     'esbuild',
     path.join(__dirname, '..', '..', '..', 'app', 'node_modules', 'esbuild'),
     path.join(__dirname, '..', '..', '..', 'node_modules', 'esbuild'),
+    // CI installs esbuild with `npm install --no-save` at the repo root; a
+    // sandbox may only have it in /tmp. Without this last candidate these
+    // suites printed SKIP and exited 0 — a green tick over zero assertions.
+    '/tmp/node_modules/esbuild',
   ];
   for (const c of candidates) {
     try {

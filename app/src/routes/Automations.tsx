@@ -168,14 +168,28 @@ export function Automations() {
     if (!org) return;
     setTesting(true);
     try {
-      const r = await callFunction<{ fired: number; report: { automation: string; lead: string }[] }>(
-        "run-automations", { org: org.slug, dry_run: true },
-      );
-      toast.show(
-        r.fired === 0
-          ? "Nothing would fire right now"
-          : `${r.fired} action(s) would fire — e.g. ${r.report[0]?.automation} on ${r.report[0]?.lead}`,
-      );
+      const r = await callFunction<{
+        ok: boolean; fired: number; warnings?: string[];
+        report: { automation: string; lead: string }[];
+      }>("run-automations", { org: org.slug, dry_run: true });
+
+      // A degraded run answers HTTP 200, and callFunction only throws on a
+      // non-2xx status — so without this a test run that skipped every rule
+      // (a failed cooldown lookup, stages that would not load) reported
+      // "Nothing would fire right now". Indistinguishable from a correct
+      // answer, and the one this screen exists to give.
+      const summary = r.fired === 0
+        ? "Nothing would fire right now"
+        : `${r.fired} action(s) would fire — e.g. ${r.report[0]?.automation} on ${r.report[0]?.lead}`;
+
+      // Both halves, not one or the other. Showing only the warning hides the
+      // forty actions four healthy rules would have fired; showing only the
+      // count hides that a fifth rule was skipped entirely.
+      if (r.warnings?.length) {
+        toast.error(`${summary} — but the run was incomplete: ${r.warnings[0]}`);
+      } else {
+        toast.show(summary);
+      }
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -257,7 +271,17 @@ export function Automations() {
             >
               <p style={{ margin: 0 }}>{describe(a)}</p>
               <p className="sub" style={{ fontSize: 12, marginTop: 7 }}>
-                Won't touch the same record twice within {a.cooldown_hours}h
+                {/*
+                  0 is not "no cooldown" any more. A stage_changed rule whose
+                  action is set_stage re-triggers itself, so two such rules with
+                  no cooldown ping-pong a record between stages indefinitely —
+                  one function invocation per hop. The engine enforces a
+                  60-second floor to break that, and the line below says so
+                  rather than leaving the old promise on screen.
+                */}
+                {a.cooldown_hours > 0
+                  ? `Won't touch the same record twice within ${a.cooldown_hours}h`
+                  : "Can run on the same record repeatedly, at most once a minute"}
                 {a.last_run_at ? ` · last checked ${timeAgo(a.last_run_at)}` : " · not run yet"}
               </p>
             </Card>

@@ -182,6 +182,9 @@ Deno.serve(async (req) => {
   let q = admin.from("leads")
     .select("id, name, email, phone, target_country, course, course_level, intake, custom, nurture_token")
     .eq("org_id", orgId)
+    // Deletion lives in RLS, which the service role bypasses. A campaign that
+    // mails deleted contacts is the complaint that ends a customer.
+    .is("deleted_at", null)
     .not("email", "is", null)
     .eq("nurture_opted_out", false);
 

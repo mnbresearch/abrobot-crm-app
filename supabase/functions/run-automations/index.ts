@@ -19,10 +19,9 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { shouldRun, type Automation } from "../_shared/automations.ts";
-import { notifyNewLead } from "../_shared/notify.ts";
 
 import { requireCronOrMember } from "../_shared/cron-auth.ts";
-import { fireEventAutomations } from "../_shared/run-actions.ts";
+import { executeActions, fireEventAutomations, type ExecContext } from "../_shared/run-actions.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -45,9 +44,13 @@ const TIME_TRIGGERS = ["no_contact_for", "follow_up_overdue", "score_above", "sc
 // monitoring was itself the thing that was broken.
 async function heartbeat(status: string, detail?: string) {
   try {
-    await supabase.rpc("record_heartbeat", {
+    // Checked, not just wrapped. postgrest resolves with {error} rather than
+    // throwing, so this catch never fired and a failing record_heartbeat was
+    // invisible — in the one function whose job is reporting health.
+    const { error } = await supabase.rpc("record_heartbeat", {
       p_job: "run-automations", p_status: status, p_detail: detail ?? null,
     });
+    if (error) console.warn("heartbeat not recorded:", error.message);
   } catch (e) {
     // Never let reporting health break the work whose health is reported.
     console.warn("heartbeat failed:", (e as Error).message);
@@ -90,7 +93,8 @@ Deno.serve(async (req) => {
     // callerOrgId is undefined when the database trigger calls this on the
     // service role, which is why the filter is conditional rather than
     // unconditional: the trigger legitimately acts for every org.
-    let leadQ = supabase.from("leads").select("*").eq("id", body.lead_id);
+    // Soft-deleted leads are invisible to the app but not to the service role.
+    let leadQ = supabase.from("leads").select("*").eq("id", body.lead_id).is("deleted_at", null);
     if (callerOrgId) leadQ = leadQ.eq("org_id", callerOrgId);
     const { data: lead, error: leadErr } = await leadQ.maybeSingle();
 
@@ -112,158 +116,415 @@ Deno.serve(async (req) => {
     return json({ ok: true, mode: "event", event: body.event, lead_id: body.lead_id, result });
   }
 
-  let orgQuery = supabase.from("organizations").select("id, slug, name").eq("active", true);
-  // A signed-in caller is pinned to their own org. body.org is only honoured
-  // for the scheduler (callerOrgId undefined), which is trusted. Without this
-  // pin, an admin of org A could POST {"org":"org-b"} and run automations
-  // against another tenant's records — the exact hole the cron secret closed.
-  if (callerOrgId) orgQuery = orgQuery.eq("id", callerOrgId);
-  else if (body?.org) orgQuery = orgQuery.eq("slug", body.org);
-  const { data: orgs } = await orgQuery;
+  // Paged, not `.limit(1000)`.
+  //
+  // A flat limit here is the same max-rows landmine this change set exists to
+  // remove for leads, left in place one level up: org number 1,001 by id would
+  // never be fetched, so its automations would never run, permanently and
+  // silently. Keyset on the primary key, same as the lead walk below.
+  //
+  // The query is REBUILT each iteration rather than reused. postgrest-js
+  // filter methods mutate the builder and return `this`, so chaining .gt() onto
+  // a shared instance would accumulate `id > c1 AND id > c2 AND …` and stack a
+  // fresh .order()/.limit() on every pass.
+  const orgPage = (cursor: string | null) => {
+    // A signed-in caller is pinned to their own org. body.org is only honoured
+    // for the scheduler (callerOrgId undefined), which is trusted. Without this
+    // pin, an admin of org A could POST {"org":"org-b"} and run automations
+    // against another tenant's records — the exact hole the cron secret closed.
+    let q = supabase.from("organizations").select("id, slug, name").eq("active", true);
+    if (callerOrgId) q = q.eq("id", callerOrgId);
+    else if (body?.org) q = q.eq("slug", body.org);
+    if (cursor) q = q.gt("id", cursor);
+    return q.order("id", { ascending: true }).limit(500);
+  };
+
+  const orgRows: { id: string; slug: string; name: string }[] = [];
+  let orgErr: { message: string } | null = null;
+  let orgCursor: string | null = null;
+  for (;;) {
+    const { data, error } = await orgPage(orgCursor);
+    if (error) { orgErr = error; break; }
+    if (!data?.length) break;
+    orgRows.push(...data);
+    orgCursor = data[data.length - 1].id;
+    // Terminates on an EMPTY page, never on a short one — a short page means
+    // "max-rows is lower than I asked for", not "that was the last of them".
+    // One extra empty query is the price of not re-planting the landmine.
+  }
+
+  if (orgErr) {
+    // Unchecked, this returned `orgs === undefined`, the loop never ran, and
+    // the heartbeat cheerfully reported "0 org(s), 0 fired". A total outage
+    // and a quiet night produced identical health records.
+    console.error("run-automations: could not list organisations:", orgErr.message);
+    await heartbeat("error", `organisation lookup failed: ${orgErr.message}`);
+    return json({ ok: false, error: "could not list organisations" }, 500);
+  }
+  const orgs = orgRows;
+
+  // ── Sweep budget ───────────────────────────────────────────────────────
+  //
+  // A sweep that runs past the platform's wall clock is killed mid-batch and
+  // leaves nothing behind, so it stops itself first. But stopping is only safe
+  // because of the RESUME CURSOR below: without one, stopping at a time limit
+  // replaces "an arbitrary thousand leads are visible" with something worse —
+  // the same deterministic prefix visible on every single sweep, and the
+  // records after it never processed at all, forever.
+  const MAX_SWEEP_MS = 45_000;
+  const startedAt = Date.now();
+  const outOfTime = () => Date.now() - startedAt > MAX_SWEEP_MS;
+
+  // ── Which org goes first ────────────────────────────────────────────────
+  //
+  // Least-recently-swept first. The sweep budget below stops the whole run once
+  // it is spent, so a fixed order means the orgs at the end of it are the ones
+  // that get skipped — every single time. Giving a large tenant its own resume
+  // cursor fixed starvation WITHIN an org and moved the same problem up a
+  // level: org A eats the budget, finishes, resets, and eats it again, while
+  // org B is never reached.
+  //
+  // automation_sweep_state.updated_at is stamped on every org the sweep
+  // touches, so ordering by it rotates the queue on its own. Orgs never swept
+  // (no row) sort first.
+  if (!callerOrgId && orgs.length > 1) {
+    // Paged for the same reason as the org list: one row per org, so a flat
+    // limit would hand back a partial map and silently mis-order the queue.
+    const lastSwept = new Map<string, string>();
+    let stateCursor: string | null = null;
+    for (;;) {
+      let q = supabase.from("automation_sweep_state")
+        .select("org_id, updated_at").order("org_id", { ascending: true }).limit(500);
+      if (stateCursor) q = q.gt("org_id", stateCursor);
+      const { data, error } = await q;
+      if (error || !data?.length) break;
+      data.forEach((r) => lastSwept.set(r.org_id, r.updated_at));
+      stateCursor = data[data.length - 1].org_id;
+    }
+    // Plain < / >, not localeCompare. ICU collation does not treat "." and "+"
+    // as ordinary codepoints, so a timestamp Postgres rendered WITHOUT a
+    // fractional part sorts after one with it — "…:00+00:00" vs "…:00.5+00:00"
+    // compares backwards. It bites whenever a stamp lands on exactly .000, and
+    // it is invisible when it does.
+    orgs.sort((a, b) => {
+      const x = lastSwept.get(a.id) ?? "", y = lastSwept.get(b.id) ?? "";
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+  }
 
   const now = new Date();
-  const report: unknown[] = [];
-  let fired = 0;
 
-  for (const org of orgs ?? []) {
-    const { data: autos } = await supabase
+  // Only the SCHEDULED sweep reads or writes the resume cursor. A member
+  // pressing "Test run" expects their rules evaluated from the top, and must
+  // not move the scheduler's bookmark.
+  const scheduled = !callerOrgId && !dryRun;
+
+  /**
+   * Stamp that this sweep visited an org.
+   *
+   * Called on EVERY exit path, including the early ones. The fairness sort
+   * above reads updated_at, and an org that returned early — no enabled rules,
+   * a failed lookup — used to write nothing at all. `lastSwept.get(id) ?? ""`
+   * then sorted it first on every subsequent sweep, permanently, rather than
+   * only while bootstrapping. On a tenancy where most orgs have no automations
+   * that means the empty ones queue-jump ahead of the paying ones forever, and
+   * eat the time budget one round trip at a time.
+   */
+  const touchSweep = (orgId: string, cursor: string | null) =>
+    supabase.from("automation_sweep_state")
+      .upsert({ org_id: orgId, cursor, updated_at: now.toISOString() }, { onConflict: "org_id" });
+
+  // Both arrays are capped. They used to be bounded by accident: the lead
+  // fetch was capped at 1,000 rows, so nothing could push more than that.
+  // Pagination removed the accident — a dry run over 50,000 leads would push
+  // one object per match (each embedding the rule's full action list) and a
+  // persistent cooldown failure would push one warning per rule per page, all
+  // inside a 150 MB runtime.
+  const REPORT_CAP = 200, WARN_CAP = 100;
+  const report: unknown[] = [];
+  // Kept apart from `report`, which is truncated to 50 entries in the response.
+  // A warning that gets sliced off is a warning nobody sees.
+  const warningList: string[] = [];
+  let warnCount = 0, reportCount = 0;
+  const warnings = {
+    push(w: string) { warnCount++; if (warningList.length < WARN_CAP) warningList.push(w); },
+  };
+  const pushReport = (r: unknown) => { reportCount++; if (report.length < REPORT_CAP) report.push(r); };
+  let fired = 0;
+  let degraded = false;
+
+  for (const org of orgs) {
+    // The budget bounds the SWEEP, not one org. Checking it only inside the
+    // page loop let every remaining org run a full page first.
+    if (outOfTime()) {
+      warnings.push(`stopped before ${org.slug}: sweep time budget reached`);
+      degraded = true;
+      break;
+    }
+
+    const { data: autos, error: autoErr } = await supabase
       .from("automations")
       .select("*")
       .eq("org_id", org.id)
       .eq("enabled", true)
       .in("trigger", TIME_TRIGGERS);
 
-    if (!autos?.length) continue;
+    if (autoErr) {
+      // Was a bare `continue`: an org whose rules could not be read looked
+      // exactly like an org with no rules.
+      console.error(`run-automations: rule lookup failed for ${org.slug}:`, autoErr.message);
+      warnings.push(`${org.slug}: rule lookup failed (${autoErr.message})`);
+      degraded = true;
+      if (scheduled) await touchSweep(org.id, null);  // keep the rotation honest
+      continue;
+    }
+    if (!autos?.length) {
+      // Stamped even with nothing to do, or this org sorts to the front of
+      // every future sweep and costs a round trip on each one.
+      if (scheduled) await touchSweep(org.id, null);
+      continue;
+    }
 
-    const { data: stages } = await supabase
+    const { data: stages, error: stageErr } = await supabase
       .from("pipeline_stages").select("key, is_won, is_lost").eq("org_id", org.id);
+
+    if (stageErr) {
+      // This one fails in the dangerous direction. An empty `terminal` set
+      // means no stage counts as won or lost, so every closed record looks
+      // open and time-based rules start chasing leads the customer already
+      // marked lost. Skip the org instead.
+      console.error(`run-automations: stage lookup failed for ${org.slug}:`, stageErr.message);
+      warnings.push(`${org.slug}: stage lookup failed, org skipped (${stageErr.message})`);
+      degraded = true;
+      if (scheduled) await touchSweep(org.id, null);  // keep the rotation honest
+      continue;
+    }
     const terminal = new Set((stages ?? []).filter((s) => s.is_won || s.is_lost).map((s) => s.key));
 
-    const { data: leads } = await supabase
-      .from("leads").select("*").eq("org_id", org.id).limit(5000);
+    // ── Leads, paginated ─────────────────────────────────────────────────
+    //
+    // This was one shot: `.select("*").eq("org_id", org.id).limit(5000)`.
+    // PostgREST's max-rows on this project is 1,000, so the 5,000 was never
+    // honoured. The sweep saw an arbitrary, unordered thousand leads and every
+    // record past that was invisible to time-based rules — permanently, and
+    // silently. "Follow up if nobody has touched this in 7 days" simply never
+    // fired for lead 1,001 onwards. Business plan sells 50,000 records.
+    //
+    // Keyset pagination on the primary key, not .range(): actions mutate
+    // stage_key and assigned_to while we walk, and ordering by anything they
+    // touch would let rows shift between pages. id never changes.
+    const PAGE = 500;
+    let scanned = 0;
+    let budgetHit = false;
+    let pageFailed = false;
+    const skipped = new Set<string>();
+    const evaluated = new Set<string>();
 
-    // Open records only — chasing a won or lost lead is noise.
-    const open = (leads ?? []).filter((l) => !terminal.has(l.stage_key ?? l.stage));
+    // Resume where the last sweep ran out of time. Stored per org, so a tenant
+    // too large to finish in one invocation is walked across several ticks
+    // instead of having its tail permanently starved.
+    //
+    let cursor: string | null = null;
+    if (scheduled) {
+      const { data: state } = await supabase
+        .from("automation_sweep_state")
+        .select("cursor").eq("org_id", org.id).maybeSingle();
+      cursor = state?.cursor ?? null;
+    }
 
-    for (const a of autos as Automation[]) {
-      // Cooldown state for this rule, in one query rather than per lead.
-      const since = new Date(now.getTime() - Math.max(0, a.cooldown_hours) * 3600_000).toISOString();
-      const { data: recent } = await supabase
-        .from("automation_runs")
-        .select("lead_id, created_at")
-        .eq("automation_id", a.id)
-        .gte("created_at", since);
-      const lastRun = new Map<string, string>();
-      (recent ?? []).forEach((r) => { if (r.lead_id) lastRun.set(r.lead_id, r.created_at); });
+    pages: for (;;) {
+      // `.is("deleted_at", null)` is not optional here.
+      //
+      // 20260903150000 made deletion soft and enforced it in RLS ONLY, on the
+      // stated reasoning that then "nobody has to remember to add the filter".
+      // That holds for the app, which reads as the user. It does not hold for
+      // anything running as the service role, which bypasses RLS by design —
+      // so this sweep walked deleted records and fired rules on them: stage
+      // moves, reassignments and Telegram alerts about a lead the customer
+      // deleted. Bounded to an arbitrary 1,000 rows before; pagination would
+      // have guaranteed it reached every one of them.
+      let leadQ = supabase
+        .from("leads").select("*").eq("org_id", org.id)
+        .is("deleted_at", null)
+        .order("id", { ascending: true }).limit(PAGE);
+      if (cursor) leadQ = leadQ.gt("id", cursor);
 
-      for (const lead of open) {
-        if (!shouldRun(a, lead, lastRun.get(lead.id), now)) continue;
+      const { data: page, error: pageErr } = await leadQ;
+      if (pageErr) {
+        console.error(`run-automations: lead page failed for ${org.slug}:`, pageErr.message);
+        warnings.push(`${org.slug}: lead page failed (${pageErr.message})`);
+        degraded = true;
+        // pageFailed, not budgetHit — but the cursor must be PRESERVED either
+        // way. Falling through to the "completed pass" branch would write null
+        // and throw away however many pages this org had already walked across
+        // earlier ticks, restarting it from the top on one flaky fetch.
+        pageFailed = true;
+        break;
+      }
+      if (!page?.length) break;
 
-        if (dryRun) {
-          report.push({ automation: a.name, lead: lead.name, would_run: a.actions });
-          fired++;
-          continue;
-        }
+      cursor = page[page.length - 1].id;
+      scanned += page.length;
 
-        const taken: unknown[] = [];
-        let ok = true;
-        let detail: string | null = null;
+      // Open records only — chasing a won or lost lead is noise.
+      const open = page.filter((l) => !terminal.has(l.stage_key ?? l.stage));
 
-        try {
-          for (const step of a.actions ?? []) {
-            switch (step.action) {
-              case "set_stage": {
-                await supabase.from("leads")
-                  .update({ stage_key: String(step.value), updated_at: now.toISOString() })
-                  .eq("id", lead.id);
-                await supabase.from("activities").insert({
-                  org_id: org.id, lead_id: lead.id, type: "stage_change",
-                  content: `Moved to ${step.value} by automation "${a.name}".`,
-                });
-                break;
-              }
-              case "assign_round_robin": {
-                const { data: team } = await supabase
-                  .from("profiles").select("id").eq("org_id", org.id).eq("status", "active");
-                if (team?.length) {
-                  const { data: openAssigned } = await supabase
-                    .from("leads").select("assigned_to").eq("org_id", org.id).not("assigned_to", "is", null);
-                  const load: Record<string, number> = Object.fromEntries(team.map((t) => [t.id, 0]));
-                  (openAssigned ?? []).forEach((l) => {
-                    if (l.assigned_to && l.assigned_to in load) load[l.assigned_to]++;
-                  });
-                  const pick = team.sort((x, y) => load[x.id] - load[y.id])[0].id;
-                  await supabase.from("leads").update({ assigned_to: pick }).eq("id", lead.id);
-                  await supabase.from("activities").insert({
-                    org_id: org.id, lead_id: lead.id, type: "assignment",
-                    content: `Reassigned by automation "${a.name}".`,
-                  });
-                }
-                break;
-              }
-              case "assign_to": {
-                await supabase.from("leads").update({ assigned_to: String(step.value) }).eq("id", lead.id);
-                break;
-              }
-              case "set_score": {
-                await supabase.from("leads").update({ score: Number(step.value) || 0 }).eq("id", lead.id);
-                break;
-              }
-              case "add_tag": {
-                const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
-                if (!tags.includes(String(step.value))) {
-                  await supabase.from("leads").update({ tags: [...tags, String(step.value)] }).eq("id", lead.id);
-                }
-                break;
-              }
-              case "set_follow_up": {
-                const at = new Date(now.getTime() + (Number(step.value) || 24) * 3600_000);
-                await supabase.from("leads").update({ next_follow_up_at: at.toISOString() }).eq("id", lead.id);
-                break;
-              }
-              case "add_note": {
-                await supabase.from("activities").insert({
-                  org_id: org.id, lead_id: lead.id, type: "note",
-                  content: String(step.value ?? `Flagged by automation "${a.name}".`),
-                });
-                break;
-              }
-              case "notify_telegram": {
-                await notifyNewLead(supabase, org.id, {
-                  id: lead.id, name: lead.name, email: lead.email, phone: lead.phone,
-                  source: lead.source, score: lead.score,
-                  message: `Automation "${a.name}" fired for this record.`,
-                });
-                break;
-              }
-              case "send_email_template": {
-                // Intentionally not implemented here. Sending mail from an
-                // unattended loop needs the same unsubscribe and rate handling
-                // the nurture function already owns; duplicating it would risk
-                // mailing a lead who opted out. Logged so it is visible.
-                detail = "send_email_template is not yet wired to the mailer";
-                ok = false;
-                break;
-              }
-            }
-            taken.push(step);
+      // Fresh per page: assignment counts go stale as the sweep assigns.
+      const pageCtx: ExecContext = {};
+
+      for (const a of autos as Automation[]) {
+        // ── Cooldown ─────────────────────────────────────────────────────
+        //
+        // The dangerous one. This used to read every automation_run in the
+        // cooldown window with no limit, so it too stopped at 1,000 rows — and
+        // a MISSING row here does not mean "skip", it means "never ran". Past
+        // a thousand runs in the window the rule stopped seeing its own
+        // history and fired again for leads it had already processed. Same
+        // lead, same rule, same day: a second Telegram alert, a second stage
+        // move, a second note. Duplicate outbound is the failure mode a
+        // customer notices and does not forgive.
+        //
+        // Now asked per batch, one row per lead, so it cannot overflow.
+        const since = new Date(now.getTime() - Math.max(0, a.cooldown_hours) * 3600_000).toISOString();
+        const lastRun = new Map<string, string>();
+
+        if (open.length) {
+          const { data: runs, error: runErr } = await supabase.rpc("automation_last_runs", {
+            p_automation_id: a.id,
+            p_lead_ids: open.map((l) => l.id),
+            p_since: since,
+          });
+          if (runErr) {
+            // Fail closed. Without cooldown state every lead looks untouched,
+            // and carrying on would re-fire the whole batch. Skipping costs a
+            // delayed follow-up; guessing costs duplicate messages.
+            console.error(`run-automations: cooldown lookup failed for "${a.name}", skipping batch:`, runErr.message);
+            warnings.push(`${org.slug}/"${a.name}": cooldown lookup failed, batch skipped`);
+            degraded = true;
+            skipped.add(a.id);   // this rule only, not the whole org
+            continue;
           }
-        } catch (e) {
-          ok = false;
-          detail = (e as Error).message;
+          (runs as { lead_id: string; last_run_at: string }[] | null ?? [])
+            .forEach((r) => lastRun.set(r.lead_id, r.last_run_at));
         }
 
-        await supabase.from("automation_runs").insert({
-          org_id: org.id, automation_id: a.id, lead_id: lead.id,
-          actions_taken: taken, ok, detail,
-        });
-        fired++;
+        // Only a rule that got this far actually looked at its leads. Rules
+        // that skipped on a cooldown error must NOT be stamped as having run.
+        evaluated.add(a.id);
+
+        for (const lead of open) {
+          if (!shouldRun(a, lead, lastRun.get(lead.id), now)) continue;
+
+          if (dryRun) {
+            pushReport({ automation: a.name, lead: lead.name, would_run: a.actions });
+            fired++;
+            continue;
+          }
+
+          // Executed by the SHARED action runner, not a local copy.
+          //
+          // _shared/run-actions.ts opens by explaining that it was extracted
+          // "so the SAME code path runs whether an automation is fired by cron
+          // (run-automations) or inline by an event" — and then this file kept
+          // a full nine-case duplicate of the switch anyway. Two definitions of
+          // what set_stage means, exactly as that comment warned.
+          //
+          // They had already diverged: the round-robin fix landed in the shared
+          // copy only, so cron-fired assignment was still counting a truncated
+          // thousand rows while event-fired assignment counted properly. A rule
+          // behaving differently depending on whether it fired at intake or at
+          // 3am is the kind of bug nobody can reproduce.
+          // `pageCtx` carries one assignment-load snapshot for this batch.
+          // org_assignment_load() aggregates profiles × leads for the whole
+          // org; calling it per lead meant 500 full aggregations per page.
+          const { taken, ok, detail } = await executeActions(supabase, org.id, lead, a, now, pageCtx);
+
+          // Checked, because THIS ROW IS THE COOLDOWN. If the insert silently
+          // fails, the next sweep sees "never ran" and fires the rule again —
+          // the duplicate-firing bug this whole change exists to remove, left
+          // in the one write that prevents it.
+          const { error: runErr } = await supabase.from("automation_runs").insert({
+            org_id: org.id, automation_id: a.id, lead_id: lead.id,
+            actions_taken: taken, ok, detail,
+          });
+          if (runErr) {
+            console.error(`run-automations: run record failed for "${a.name}" on lead ${lead.id} — it may re-fire:`, runErr.message);
+            warnings.push(`${org.slug}/"${a.name}": run record failed; rule may re-fire`);
+            degraded = true;
+            skipped.add(a.id);
+          }
+          fired++;
+        }
       }
 
-      if (!dryRun) {
-        await supabase.from("automations")
-          .update({ run_count: (a.run_count ?? 0) + 1, last_run_at: now.toISOString() })
-          .eq("id", a.id);
+      // Deliberately NOT `if (page.length < PAGE) break`. PAGE is 500 and
+      // PostgREST's max-rows is 1,000 today — but max-rows is a dashboard
+      // setting. Drop it to 500 or below and every page comes back "short",
+      // the loop exits after one page, and leads past 500 become invisible:
+      // precisely the bug this pagination was written to remove, reintroduced
+      // by a config change nobody would connect to it. One extra empty query
+      // per org is the cost of not having that landmine.
+
+      if (outOfTime()) {
+        budgetHit = true;
+        console.warn(`run-automations: time budget reached for ${org.slug} after ${scanned} leads`);
+        break pages;
+      }
+    }
+
+    // Persist the cursor so the next tick resumes here; clear it on a complete
+    // pass so the following sweep starts from the top again.
+    if (scheduled) {
+      // Cleared only on a pass that genuinely reached the end.
+      const { error: stateErr } = await touchSweep(org.id, (budgetHit || pageFailed) ? cursor : null);
+      if (stateErr) {
+        // Without this the next sweep restarts from the top and re-walks the
+        // same prefix, so the tail starves exactly as it would with no cursor.
+        console.error(`run-automations: could not save resume cursor for ${org.slug}:`, stateErr.message);
+        warnings.push(`${org.slug}: resume cursor not saved (${stateErr.message})`);
+        degraded = true;
+      }
+    }
+
+    if (budgetHit) {
+      warnings.push(`${org.slug}: time budget reached after ${scanned} lead(s); resuming next tick`);
+      degraded = true;
+    }
+
+    // Stamp only the rules that were actually evaluated.
+    //
+    // This used to stamp every enabled rule unconditionally. Combined with the
+    // fail-closed skip above that produced the worst possible display: the
+    // cooldown lookup is down, nothing fires all night, and the Automations
+    // screen shows every rule as having just run.
+    //
+    // run_count is incremented in the database rather than read-modify-written
+    // from the copy fetched at the top of this loop, which lost any concurrent
+    // increment from the event path.
+    // last_run_at answers "did the sweep execute this rule", per rule.
+    //
+    // An earlier version gated this on the whole org's pass completing, which
+    // read as more honest and was in fact a worse lie: an org large enough to
+    // hit the time budget on every tick would NEVER stamp, so the Automations
+    // screen showed "not run yet" forever for the biggest paying tenants —
+    // whose rules were firing hundreds of times an hour. It also let one bad
+    // rule suppress the stamp for every other rule in the org.
+    //
+    // Sweep completeness is a property of the JOB, not of any one rule, and it
+    // already has its own channel: `degraded`, the warnings array, the "warn"
+    // heartbeat, and stale_jobs() reading last_status.
+    //
+    // A rule that completed the whole walk is stamped even if it matched
+    // nothing — "evaluated against zero leads" is still having run.
+    if (!budgetHit && !pageFailed) {
+      for (const a of autos as Automation[]) evaluated.add(a.id);
+    }
+
+    if (!dryRun) {
+      for (const a of autos as Automation[]) {
+        if (!evaluated.has(a.id) || skipped.has(a.id)) continue;
+        const { error } = await supabase.rpc("automation_mark_run", { p_automation_id: a.id });
+        if (error) console.error(`run-automations: could not stamp "${a.name}":`, error.message);
       }
     }
   }
@@ -271,6 +532,23 @@ Deno.serve(async (req) => {
   // Only the scheduled sweep reports health — a member clicking "Test run"
   // is not evidence that cron is alive, and recording it as such would make
   // the staleness check lie in the reassuring direction.
-  if (!callerOrgId && !dryRun) await heartbeat("ok", `${orgs?.length ?? 0} org(s), ${fired} fired`);
-  return json({ ok: true, dry_run: dryRun, orgs: orgs?.length ?? 0, fired, report: report.slice(0, 50) });
+  //
+  // "degraded" matters as much as the schedule. A sweep where every rule
+  // skipped on a failed cooldown lookup previously reported a cheerful
+  // `ok — 3 org(s), 0 fired`, which the staleness check reads as healthy. A
+  // total outage of time-based automations looked exactly like a quiet night.
+  if (!callerOrgId && !dryRun) {
+    await heartbeat(
+      // "warn", not a new word: nurture and system-health already report
+      // "warn", and the health screen only special-cases "ok".
+      degraded ? "warn" : "ok",
+      `${orgs.length} org(s), ${fired} fired` +
+        (warnCount ? ` — ${warnCount} warning(s): ${warningList.slice(0, 3).join("; ")}` : ""),
+    );
+  }
+  return json({
+    ok: !degraded, dry_run: dryRun, orgs: orgs.length, fired,
+    warning_count: warnCount, warnings: warningList,
+    report_count: reportCount, report,
+  });
 });

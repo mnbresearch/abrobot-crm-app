@@ -95,19 +95,38 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
 
+      # The .test.cjs files transpile the TypeScript under test with esbuild.
+      # Without this step there is no esbuild anywhere on the runner, so every
+      # one of them printed "SKIP — no usable esbuild" and exited 0. The job
+      # went green having executed zero assertions, which is worse than having
+      # no tests at all: it looks like coverage.
+      - name: Install esbuild for the test harness
+        run: npm install --no-save --no-audit --no-fund esbuild@0.23.1
+
       - name: Run the committed tests
         run: |
-          # These three test files exist in the repo and were never run by
-          # anything. The scoring and Cashfree signature tests in particular
-          # cover logic that has already caused one live incident each.
+          # These test files exist in the repo and were never run by anything.
+          # The scoring and Cashfree signature tests in particular cover logic
+          # that has already caused one live incident each.
           set -e
           FOUND=0
+          SKIPPED=0
           for t in $(find supabase -name "*.test.cjs" -o -name "*.test.mjs" | sort); do
             echo "--- $t"
-            node "$t"
+            # 2>&1 and an explicit failure branch: the suites print their
+            # assertion failures to STDOUT, so a bare `OUT=$(node "$t")` under
+            # `set -e` aborted before `echo "$OUT"` ever ran. CI went red
+            # showing the filename and nothing else about what broke.
+            if ! OUT=$(node "$t" 2>&1); then echo "$OUT"; exit 1; fi
+            echo "$OUT"
+            case "$OUT" in *"SKIP "*) SKIPPED=1 ;; esac
             FOUND=1
           done
-          [ "$FOUND" = "1" ] || echo "No .cjs/.mjs tests found (score.test.ts is Deno — see below)"
+          [ "$FOUND" = "1" ] || { echo "No .cjs/.mjs tests found — expected several."; exit 1; }
+          # A skip is a failure here. Skipping is the harness's way of coping on
+          # a developer laptop with no node_modules; on CI it means the suite
+          # did not run, and a green tick that means nothing is the problem.
+          [ "$SKIPPED" = "0" ] || { echo "A test SKIPPED on CI — the harness could not load esbuild."; exit 1; }
 
       - uses: denoland/setup-deno@v1
         with:

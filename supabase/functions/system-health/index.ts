@@ -122,6 +122,7 @@ async function checkIntake(orgId: string): Promise<Check> {
 
   const { data: recent } = await supabase
     .from("leads").select("created_at").eq("org_id", orgId)
+    .is("deleted_at", null)   // a deleted record is not evidence intake works
     .order("created_at", { ascending: false }).limit(1);
 
   if (!recent?.length) {

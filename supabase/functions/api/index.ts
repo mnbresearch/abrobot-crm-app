@@ -208,8 +208,14 @@ Deno.serve(async (req) => {
       const limit = Math.min(Math.max(Number(p.get("limit") ?? 50), 1), 200);
       const offset = Math.max(Number(p.get("offset") ?? 0), 0);
 
+      // Soft-deleted records are invisible to the app but NOT to the service
+      // role: 20260903150000 enforces deletion in RLS only, and this function
+      // runs as the service role, which bypasses RLS by design. Without this
+      // filter the public API hands a customer's integrations records that
+      // customer deleted.
       let q = admin.from("leads").select(LEAD_COLS, { count: "exact" })
-        .eq("org_id", auth.orgId);
+        .eq("org_id", auth.orgId)
+        .is("deleted_at", null);
 
       if (p.get("stage"))    q = q.eq("stage_key", p.get("stage"));
       if (p.get("assigned")) q = q.eq("assigned_to", p.get("assigned"));
@@ -240,7 +246,9 @@ Deno.serve(async (req) => {
       const bad = needScope(auth, "leads:read");
       if (bad) return bad;
       const { data, error } = await admin.from("leads").select(LEAD_COLS)
-        .eq("id", one[1]).eq("org_id", auth.orgId).maybeSingle();
+        .eq("id", one[1]).eq("org_id", auth.orgId)
+        .is("deleted_at", null)   // deleted means gone, including over the API
+        .maybeSingle();
       if (error) return err(error.message, 500);
       if (!data) return err("No such record", 404);
       return json(data);
@@ -270,7 +278,10 @@ Deno.serve(async (req) => {
       }
 
       // Dedupe rather than creating a second copy of a person you already have.
-      let dq = admin.from("leads").select("id").eq("org_id", auth.orgId);
+      // Deleted records must not match, or an integration re-creating a
+      // contact silently updates the row the customer deleted instead.
+      let dq = admin.from("leads").select("id").eq("org_id", auth.orgId)
+        .is("deleted_at", null);
       // Escaped for the same reason as the search filter above: these values
       // arrive in an API caller's request body, so unlike the search path they
       // are attacker-chosen rather than merely user-typed.
@@ -339,6 +350,7 @@ Deno.serve(async (req) => {
 
       const { data, error } = await admin.from("leads")
         .update(patch).eq("id", one[1]).eq("org_id", auth.orgId)
+        .is("deleted_at", null)   // a deleted record is not editable over the API
         .select(LEAD_COLS).maybeSingle();
 
       if (error) return err(error.message, 500);

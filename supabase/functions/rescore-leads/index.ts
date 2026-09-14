@@ -58,6 +58,7 @@ Deno.serve(async (req) => {
   const { data: leads, error } = await admin.from("leads")
     .select("id, name, email, phone, budget_inr, target_country, course, course_level, intake, stage, score")
     .eq("org_id", orgId)
+    .is("deleted_at", null)   // don't spend the rescore budget on deleted rows
     .limit(limit);
   if (error) return json({ error: error.message }, 500);
 

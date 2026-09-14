@@ -373,7 +373,11 @@ Deno.serve(async (req) => {
   // Get or create conversation
   let convId: string | null = body.conversation_id ?? null;
   if (convId) {
-    const { data } = await supabase.from("conversations").select("id").eq("id", convId).eq("org_id", org.id).single();
+    // A soft-deleted conversation must not keep accepting messages. Deletion
+    // is enforced in RLS only and this runs as the service role, so without
+    // the filter a thread the customer deleted stays live and keeps growing.
+    const { data } = await supabase.from("conversations").select("id")
+      .eq("id", convId).eq("org_id", org.id).is("deleted_at", null).maybeSingle();
     if (!data) convId = null;
   }
   if (!convId) {
@@ -409,7 +413,10 @@ Deno.serve(async (req) => {
   const name = grabName(convText);
   if (email || phone) {
     await supabase.from("conversations").update({ visitor_name: name, visitor_email: email, visitor_phone: phone }).eq("id", convId);
-    let q = supabase.from("leads").select("id").eq("org_id", org.id);
+    // Excluding deleted records means a returning visitor whose record was
+    // deleted gets a fresh one, rather than silently reviving the old one.
+    let q = supabase.from("leads").select("id").eq("org_id", org.id)
+      .is("deleted_at", null);
     // Strip PostgREST's delimiters before interpolating. or() is a
     // mini-language: a comma, parenthesis or quote in a value reshapes the
     // filter rather than being matched literally.

@@ -53,7 +53,12 @@ Deno.serve(async (req) => {
 
   // lead must belong to the caller's org — this is the tenancy boundary
   const { data: lead } = await admin.from("leads")
-    .select("id, name, phone, org_id").eq("id", leadId).eq("org_id", profile.org_id).single();
+    .select("id, name, phone, org_id").eq("id", leadId).eq("org_id", profile.org_id)
+    // Deletion is enforced in RLS and this runs as the service role, so
+    // without this a deleted record can still be messaged — and each send is
+    // metered and billed against the org's WhatsApp allowance.
+    .is("deleted_at", null)
+    .maybeSingle();
   if (!lead) return json({ error: "lead not found in your org" }, 404);
   if (!lead.phone) return json({ error: "lead has no phone number" }, 422);
 

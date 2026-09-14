@@ -166,7 +166,10 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "no email or phone found" }, 422);
   }
 
-  let q = supabase.from("leads").select("id").eq("org_id", wk.org_id);
+  // Deleted records must not be matched as duplicates: updating one would
+  // send the enquiry into a row nobody can see.
+  let q = supabase.from("leads").select("id").eq("org_id", wk.org_id)
+    .is("deleted_at", null);
   // PostgREST parses or() as a mini-language, so a comma or parenthesis in an
   // interpolated value reshapes the filter. api/index.ts escapes for exactly
   // this reason and nurture quotes its stage keys; this call site was missed.
@@ -217,16 +220,25 @@ Deno.serve(async (req) => {
     return json({ ok: true, deduped: true, lead_id: existing[0].id });
   }
 
+  // Counted in the database — see org_assignment_load() and 20260914090000.
+  //
+  // This was two queries and a tally in JavaScript, with two faults that only
+  // appear with real data. The lead fetch had no `.limit()`, so PostgREST's
+  // max-rows truncated it at 1,000 and assignment skewed from there on. And
+  // `.not("stage","in","(enrolled,lost)")` filtered on the legacy `stage` enum
+  // using two keys that exist only in the study-abroad pack — for a clinic or a
+  // dealership it excluded nothing, so closed leads counted as open and the
+  // person who had closed the most work looked like the busiest.
+  //
+  // Failure is not fatal here: an unassigned lead is recoverable, a rejected
+  // enquiry is not. So on error we leave assignTo null and still save the lead.
   let assignTo: string | null = null;
-  const { data: team } = await supabase.from("profiles")
-    .select("id").eq("org_id", wk.org_id).eq("status", "active");
-  if (team?.length) {
-    const { data: open } = await supabase.from("leads")
-      .select("assigned_to").eq("org_id", wk.org_id)
-      .not("stage", "in", "(enrolled,lost)").not("assigned_to", "is", null);
-    const load: Record<string, number> = Object.fromEntries(team.map((t) => [t.id, 0]));
-    (open ?? []).forEach((l) => { if (l.assigned_to in load) load[l.assigned_to]++; });
-    assignTo = team.sort((a, b) => load[a.id] - load[b.id])[0].id;
+  const { data: load, error: loadErr } = await supabase
+    .rpc("org_assignment_load", { p_org_id: wk.org_id });
+  if (loadErr) {
+    console.error("lead-webhook: assignment load failed, leaving unassigned:", loadErr.message);
+  } else {
+    assignTo = (load as { user_id: string }[] | null)?.[0]?.user_id ?? null;
   }
 
   // score at intake — one inbound message counts as the first engagement signal

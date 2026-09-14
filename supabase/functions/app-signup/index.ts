@@ -96,7 +96,9 @@ Deno.serve(async (req) => {
 
   // dedupe by email
   const { data: existing } = await supabase.from("leads")
-    .select("id, nurture_token").eq("org_id", org.id).eq("email", email).limit(1);
+    .select("id, nurture_token").eq("org_id", org.id).eq("email", email)
+    .is("deleted_at", null)   // a deleted signup can sign up again
+    .limit(1);
   if (existing && existing.length) {
     return json({ ok: true, deduped: true }); // already known — no second welcome
   }
