@@ -10,6 +10,45 @@ inverted one.
 Nothing here is cosmetic. Three of these are invisible today and certain at the
 volume the paid plans sell.
 
+**Do Step 0 first.** Everything below it was fixing a sweep that has not run
+since 6 September.
+
+---
+
+## Step 0 — URGENT: the cron secret was never set
+
+```
+scripts/set-cron-secret.sql
+```
+
+`app_settings.cron_secret` still holds the literal placeholder the 3 September
+migration seeded it with. `call_edge_function` refuses to send when it sees
+that, so since **6 September** every scheduled HTTP call has raised instead of
+firing — 2,502 failed attempts, recorded every fifteen minutes in a table
+nothing reads.
+
+Three jobs are affected. The other four are pure SQL inside the database and
+never stopped, so billing still lapsed correctly, retention still purged, and
+failed webhooks were still retried.
+
+| Job | Every | Down for |
+|---|---|---|
+| `abrobot-run-automations` | 15 min | 8 days — no time-based rule has fired |
+| `nurture-daily` | 03:30 | 8 days — **no follow-up email to any tenant** |
+| `abrobot-system-health` | hourly | 8 days — no operator alerting at all |
+
+`nurture-daily` is the commercially serious one. Follow-up email is a headline
+feature on every paid plan and it has been silently off for eight days across
+every customer.
+
+And the third line is why the first two went unnoticed: the job whose entire
+purpose is telling you a job has stopped was itself one of the stopped jobs.
+
+The file explains the sequence — generate the secret in SQL, paste it into
+**Supabase → Edge Functions → Secrets → `CRON_SECRET`**, redeploy the three
+functions, then run its PART 2 to confirm. The value never needs to leave your
+screen; don't paste it to me.
+
 ---
 
 ## Step 1 — SQL: scale, assignment and the assignee guard
@@ -126,6 +165,11 @@ now" for a sweep that silently skipped everything.
 Unchanged from `RUN-THIS.md`, plus:
 
 - **Meta payment method by 30 September.** Still the hard deadline.
+- **Nothing watches the watchman.** Every alarm in this system — heartbeats,
+  `stale_jobs()`, the operator Telegram alert — is raised by `system-health`,
+  which reaches the database over the same HTTP path that just failed for eight
+  days. A watchdog that runs as pure SQL inside Postgres, with no edge function
+  in the loop, is the missing piece. Say the word and I will build it.
 - The super-admin console's per-org record count still includes deleted rows.
   Deliberate for now — an operator arguably should see everything — but it will
   not match what the customer sees on their own usage screen.
