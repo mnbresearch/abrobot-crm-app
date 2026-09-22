@@ -213,9 +213,41 @@ function buildSystemPrompt(cfg: any, brand: string, bookingUrl: string): string 
 
   const fields = (cfg?.capture_fields || "name,phone,email").split(",").map((s: string) => s.trim()).filter(Boolean);
   if (fields.length) {
+    // ── Ask for ONE field, not the whole set ────────────────────────────────
+    //
+    // This used to say "collect the visitor's name, phone, email in one
+    // friendly message", and the model did exactly that: it rendered a form.
+    // Real transcripts show replies like
+    //
+    //     "To match you with the best scholarships, I'll need a few quick
+    //      details: • Full Name *** • Phone Number with +91 *** • Email ***"
+    //
+    // — three required fields, with asterisks, to a stranger who had asked one
+    // question. Across 139 conversations the bot asked in 110 of them and
+    // **93 of those visitors left without answering**.
+    //
+    // The counter-evidence is in the same data: a visitor who sends three or
+    // more messages converts 14 times out of 20. The bot is good at this once
+    // a conversation exists. The three-field form is what stops one existing —
+    // 97 of 139 conversations are a single message.
+    //
+    // So: still ask early, but ask for one thing, in one sentence, attached to
+    // an answer rather than in place of one. `fields[0]` is the org's own
+    // first choice in capture_fields, so a tenant reorders that column to
+    // change what gets asked for first.
+    const first = fields[0];
+    const rest = fields.slice(1);
     parts.push(
-      `LEAD CAPTURE: naturally collect the visitor's ${fields.join(", ")} in one friendly message before giving detailed personal guidance. ` +
-      `Ask once, don't nag; if they skip it, keep helping and ask again later.`,
+      `LEAD CAPTURE: ask for the visitor's ${first} — and ONLY their ${first} — as a single short ` +
+      `sentence at the end of your reply. Never present a form, a bulleted list of fields, ` +
+      `asterisks, or the word "required", and never ask for more than one detail in a message. ` +
+      (rest.length
+        ? `Once they have given their ${first} and you have helped them further, you may ask for their ` +
+          `${rest.join(" or ")} later in the same natural way — one at a time, never together. `
+        : "") +
+      `If they ignore or decline it, drop it completely and keep helping; ask again at most once, ` +
+      `and only after two more useful exchanges. A visitor who keeps talking is worth far more ` +
+      `than a contact detail extracted early, so never withhold an answer to get one.`,
     );
   }
   // This block used to be unconditional and entirely study-abroad: it told a
@@ -396,8 +428,20 @@ Deno.serve(async (req) => {
     convId = data.id;
   }
 
-  const { data: history } = await supabase.from("chat_messages")
-    .select("role, content").eq("conversation_id", convId).order("created_at").limit(20);
+  // Newest 20, then reversed back into chronological order.
+  //
+  // This was `.order("created_at").limit(20)`. `.order()` defaults to ASCENDING,
+  // so it fetched the FIRST twenty messages, not the last. For the opening ten
+  // turns that is indistinguishable from correct, which is why it survived —
+  // but past turn twenty the model was prompted with a frozen window of the
+  // conversation's opening and never saw anything the visitor said afterwards.
+  //
+  // It only breaks the long, engaged conversations: the ones about to convert.
+  // And it reads as "the bot got dumb", not as a bug, so nobody reports it.
+  const { data: historyDesc } = await supabase.from("chat_messages")
+    .select("role, content").eq("conversation_id", convId)
+    .order("created_at", { ascending: false }).limit(20);
+  const history = (historyDesc ?? []).slice().reverse();
 
   await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "user", content: message });
 

@@ -88,11 +88,23 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     try {
       // lead_ids rather than an audience filter: this is one person, and the
       // audience path could quietly widen if a filter were ever mis-set.
-      await callFunction("send-campaign", {
-        subject: emSubject.trim(),
-        body: emText.trim(),
-        lead_ids: [lead.id],
-      });
+      // send-campaign answers HTTP 200 with { sent: 0, errors: [...] } when the
+      // send itself fails — a bad Resend key, an unverified domain, a bounce.
+      // callFunction only throws on a non-2xx status, so discarding the return
+      // value meant the toast said "Email sent" for a message that was never
+      // sent, and no activity row was written either. A counsellor would tell a
+      // client "I've emailed you the documents" on the strength of it.
+      //
+      // Templates.tsx already reads this response correctly; this caller did not.
+      const r = await callFunction<{ sent: number; matched: number; errors?: string[] }>(
+        "send-campaign",
+        { subject: emSubject.trim(), body: emText.trim(), lead_ids: [lead.id] },
+      );
+
+      if (!r.sent) {
+        throw new Error(r.errors?.[0] ?? "The email could not be sent.");
+      }
+
       setEmOpen(false);
       setEmText("");
       setEmSubject("");

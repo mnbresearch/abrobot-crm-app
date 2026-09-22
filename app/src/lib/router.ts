@@ -15,9 +15,22 @@ export function useRoute() {
   }, []);
 
   const navigate = useCallback((to: string) => {
-    if (to === window.location.pathname) return;
+    // Push the full target (query and all) but route on the PATHNAME only.
+    //
+    // This used to do `setPath(to)` with whatever string it was handed. App.tsx
+    // routes on exact equality, so `navigate("/settings?tab=install")` set path
+    // to a value that matched no route and failed isKnown() — the shell
+    // rendered "Page not found" while the topbar, which matches with
+    // startsWith, still said "Settings". Four of the seven onboarding CTAs
+    // landed there, so a brand-new customer's first clicks looked like a broken
+    // deploy.
+    //
+    // onPop already reads window.location.pathname, which is why navigating by
+    // hand elsewhere in the app worked and this did not.
+    const url = new URL(to, window.location.origin);
+    if (url.pathname === window.location.pathname && url.search === window.location.search) return;
     window.history.pushState({}, "", to);
-    setPath(to);
+    setPath(url.pathname);
     window.scrollTo(0, 0);
   }, []);
 

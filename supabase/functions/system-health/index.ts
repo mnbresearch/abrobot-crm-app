@@ -37,14 +37,39 @@ const CORS = {
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: CORS });
 
 type Level = "ok" | "warn" | "fail";
-interface Check { key: string; label: string; level: Level; detail: string }
+
+// ── What counts as a platform fault ─────────────────────────────────────────
+// A check can be worth showing the customer without being worth waking an
+// operator. "Nothing captured in 35 days" is a fact about that tenant's sales
+// activity, not a fault in this system — but it was rolled up into the
+// platform-wide status, so `overall` sat at `warn` permanently, which made
+// stale_jobs() return system-health on every call, which made the operator
+// alarm permanently on.
+//
+// A permanently-on alarm is not an alarm. That is precisely how the eight-day
+// cron outage went unnoticed: the signal existed and had stopped meaning
+// anything. So tenant quietness stays visible on that tenant's own card and is
+// left out of the rollup that drives alerting.
+//
+// `advisory` is set on the individual verdict, not on the check name. Keying it
+// off the name would have exempted everything the same function can return —
+// including "could not read records", which is a real fault wearing the same
+// label.
+interface Check { key: string; label: string; level: Level; detail: string; advisory?: boolean }
 
 const FALLBACK_PREFIX = "Sorry, I'm having trouble";
 
 /** Live probe of the AI provider using the org's own key and model chain. */
 async function checkAi(orgId: string): Promise<Check> {
-  const { data: cfg } = await supabase
-    .from("agent_config").select("groq_api_key, model, enabled").eq("org_id", orgId).single();
+  // .single() errors with PGRST116 when there is no row, which is a legitimate
+  // state here (an org that has never opened Settings). Any other error means
+  // we could not read the config at all, and falling through would probe the
+  // DEFAULT model and report the org healthy on a key it never actually uses.
+  const { data: cfg, error: cfgError } = await supabase
+    .from("agent_config").select("groq_api_key, model, enabled").eq("org_id", orgId).maybeSingle();
+  if (cfgError) {
+    return { key: "ai", label: "AI assistant", level: "warn", detail: `Could not read AI settings: ${cfgError.message}` };
+  }
 
   if (cfg?.enabled === false) {
     return { key: "ai", label: "AI assistant", level: "ok", detail: "Disabled for this org" };
@@ -92,13 +117,19 @@ async function checkAi(orgId: string): Promise<Check> {
 /** Have recent visitors been served the fallback apology? */
 async function checkRecentReplies(orgId: string): Promise<Check> {
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("chat_messages")
     .select("content")
     .eq("org_id", orgId)
     .eq("role", "assistant")
     .gte("created_at", since)
     .limit(200);
+
+  // Without this, a refused read returns zero rows and the branch below reports
+  // "No chats in the last 24h" — an all-clear built out of an error.
+  if (error) {
+    return { key: "replies", label: "Recent replies", level: "warn", detail: `Could not read recent replies: ${error.message}` };
+  }
 
   const total = data?.length ?? 0;
   if (total === 0) {
@@ -114,38 +145,54 @@ async function checkRecentReplies(orgId: string): Promise<Check> {
 
 /** Is lead intake alive? Silence on a normally-busy webhook is a symptom. */
 async function checkIntake(orgId: string): Promise<Check> {
-  const { data: keys } = await supabase
+  const { data: keys, error: keysError } = await supabase
     .from("webhook_keys").select("id").eq("org_id", orgId).eq("active", true).limit(1);
+  if (keysError) {
+    return { key: "intake", label: "Lead intake", level: "warn", detail: `Could not read webhook keys: ${keysError.message}` };
+  }
+  // Advisory: a tenant that has not issued a webhook key yet is un-onboarded,
+  // not broken.
   if (!keys?.length) {
-    return { key: "intake", label: "Lead intake", level: "warn", detail: "No active webhook key" };
+    return { key: "intake", label: "Lead intake", level: "warn", advisory: true, detail: "No active webhook key" };
   }
 
-  const { data: recent } = await supabase
+  const { data: recent, error: recentError } = await supabase
     .from("leads").select("created_at").eq("org_id", orgId)
     .is("deleted_at", null)   // a deleted record is not evidence intake works
     .order("created_at", { ascending: false }).limit(1);
+  if (recentError) {
+    return { key: "intake", label: "Lead intake", level: "warn", detail: `Could not read records: ${recentError.message}` };
+  }
 
+  // Advisory: a new or dormant tenant is not a platform fault.
   if (!recent?.length) {
-    return { key: "intake", label: "Lead intake", level: "warn", detail: "No records captured yet" };
+    return { key: "intake", label: "Lead intake", level: "warn", advisory: true, detail: "No records captured yet" };
   }
   const days = Math.floor((Date.now() - new Date(recent[0].created_at).getTime()) / 86400_000);
   if (days >= 14) {
-    return { key: "intake", label: "Lead intake", level: "warn", detail: `Nothing captured in ${days} days` };
+    return { key: "intake", label: "Lead intake", level: "warn", advisory: true, detail: `Nothing captured in ${days} days` };
   }
   return { key: "intake", label: "Lead intake", level: "ok", detail: `Last record ${days === 0 ? "today" : `${days}d ago`}` };
 }
 
 /** Are automations running and succeeding? */
 async function checkAutomations(orgId: string): Promise<Check> {
-  const { data: autos } = await supabase
+  const { data: autos, error: autosError } = await supabase
     .from("automations").select("id").eq("org_id", orgId).eq("enabled", true);
+  if (autosError) {
+    return { key: "automations", label: "Automations", level: "warn", detail: `Could not read automations: ${autosError.message}` };
+  }
   if (!autos?.length) {
     return { key: "automations", label: "Automations", level: "ok", detail: "None enabled" };
   }
 
   const since = new Date(Date.now() - 7 * 86400_000).toISOString();
-  const { data: runs } = await supabase
+  const { data: runs, error: runsError } = await supabase
     .from("automation_runs").select("ok").eq("org_id", orgId).gte("created_at", since).limit(500);
+  // A failed read here counted zero failures and reported "no failures".
+  if (runsError) {
+    return { key: "automations", label: "Automations", level: "warn", detail: `Could not read automation runs: ${runsError.message}` };
+  }
 
   const failed = (runs ?? []).filter((r: { ok: boolean }) => !r.ok).length;
   if (failed > 0) {
@@ -156,17 +203,29 @@ async function checkAutomations(orgId: string): Promise<Check> {
 
 /** Credential exposure — the dormant agent_config issue becomes live here. */
 async function checkSecurity(orgId: string): Promise<Check> {
-  const { data: counsellors } = await supabase
+  // Both reads below previously went unchecked, and this is the check where
+  // that matters most: every failure mode landed on "ok". A refused profiles
+  // read reported "No counsellor accounts yet"; a refused agent_config read
+  // reported "No keys stored in the database". The one check whose whole job is
+  // to notice stored credentials was incapable of returning anything but an
+  // all-clear when it could not see them.
+  const { data: counsellors, error: profilesError } = await supabase
     .from("profiles").select("id").eq("org_id", orgId).eq("status", "active").eq("role", "counsellor");
+  if (profilesError) {
+    return { key: "security", label: "Credential exposure", level: "warn", detail: `Could not read team accounts: ${profilesError.message}` };
+  }
 
   if (!counsellors?.length) {
     return { key: "security", label: "Credential exposure", level: "ok", detail: "No counsellor accounts yet" };
   }
 
-  const { data: cfg } = await supabase
+  const { data: cfg, error: cfgError } = await supabase
     .from("agent_config")
     .select("groq_api_key, resend_api_key, whatsapp_token, telegram_bot_token")
-    .eq("org_id", orgId).single();
+    .eq("org_id", orgId).maybeSingle();
+  if (cfgError) {
+    return { key: "security", label: "Credential exposure", level: "warn", detail: `Could not read stored credentials: ${cfgError.message}` };
+  }
 
   const held = ["groq_api_key", "resend_api_key", "whatsapp_token", "telegram_bot_token"]
     .filter((k) => cfg?.[k as keyof typeof cfg]);
@@ -189,9 +248,13 @@ async function checkSecurity(orgId: string): Promise<Check> {
 // monitoring was itself the thing that was broken.
 async function heartbeat(status: string, detail?: string) {
   try {
-    await supabase.rpc("record_heartbeat", {
+    // postgrest-js RESOLVES with { error } — it does not throw. The catch
+    // below can only ever see a transport failure, so a refused RPC was being
+    // recorded as a successful heartbeat write. Destructure it.
+    const { error } = await supabase.rpc("record_heartbeat", {
       p_job: "system-health", p_status: status, p_detail: detail ?? null,
     });
+    if (error) console.warn("heartbeat not recorded:", error.message);
   } catch (e) {
     // Never let reporting health break the work whose health is reported.
     console.warn("heartbeat failed:", (e as Error).message);
@@ -223,9 +286,20 @@ Deno.serve(async (req) => {
 
   let q = supabase.from("organizations").select("id, slug, name").eq("active", true);
   if (slug) q = q.eq("slug", slug);
-  const { data: orgs } = await q;
+  const { data: orgs, error: orgsError } = await q;
+
+  // An unchecked read here is the worst possible silent failure in this file:
+  // zero orgs means zero checks means `overall = ok`. The monitor would report
+  // perfect health precisely because it could not see anything.
+  if (orgsError) {
+    await heartbeat("warn", `could not list organisations: ${orgsError.message}`);
+    return json({ ok: false, error: orgsError.message }, 500);
+  }
 
   const results: unknown[] = [];
+  // Collected for the heartbeat, which is the only one of these outputs an
+  // operator ever actually reads.
+  const alarms: string[] = [];
 
   for (const org of orgs ?? []) {
     const checks = await Promise.all([
@@ -236,11 +310,28 @@ Deno.serve(async (req) => {
       checkSecurity(org.id),
     ]);
 
+    // The customer's own card still shows everything, including advisory
+    // warnings — "nothing captured in 35 days" is useful to them.
     const worst: Level = checks.some((c) => c.level === "fail")
       ? "fail"
       : checks.some((c) => c.level === "warn") ? "warn" : "ok";
 
-    results.push({ org: org.slug, name: org.name, status: worst, checks });
+    // Alerting uses the narrower set. An advisory check can still escalate on
+    // `fail`; it just cannot raise a platform alarm by being merely quiet.
+    const alarming = checks.filter((c) => c.level === "fail" || (c.level === "warn" && !c.advisory));
+    const alarmLevel: Level = alarming.some((c) => c.level === "fail")
+      ? "fail"
+      : alarming.length ? "warn" : "ok";
+
+    for (const c of alarming) alarms.push(`${org.slug}/${c.label}: ${c.detail}`);
+
+    results.push({
+      org: org.slug,
+      name: org.name,
+      status: worst,
+      alarm_status: alarmLevel,
+      checks,
+    });
 
     if (alert && worst === "fail") {
       const failing = checks.filter((c) => c.level === "fail");
@@ -256,6 +347,28 @@ Deno.serve(async (req) => {
     ? "fail"
     : results.some((r) => (r as { status: Level }).status === "warn") ? "warn" : "ok";
 
-  await heartbeat(overall === "ok" ? "ok" : "warn", `overall ${overall}`);
-  return json({ ok: true, status: overall, checked_at: new Date().toISOString(), orgs: results });
+  const alarmOverall: Level = results.some((r) => (r as { alarm_status: Level }).alarm_status === "fail")
+    ? "fail"
+    : results.some((r) => (r as { alarm_status: Level }).alarm_status === "warn") ? "warn" : "ok";
+
+  // The detail was the string `overall warn`, which names nothing: an operator
+  // reading it could not tell "a demo tenant is quiet" from "the AI provider is
+  // down for every customer". Name the orgs and the checks, and say how many
+  // orgs were examined — because "0 orgs, all healthy" and "5 orgs, all
+  // healthy" are the same word otherwise.
+  const orgCount = (orgs ?? []).length;
+  const detail = alarmOverall === "ok"
+    ? `${orgCount} org(s) checked, no faults` +
+      (overall === "ok" ? "" : ` (${results.filter((r) => (r as { status: Level }).status !== "ok").length} advisory)`)
+    : `${orgCount} org(s) checked — ` + alarms.slice(0, 6).join("; ") +
+      (alarms.length > 6 ? ` (+${alarms.length - 6} more)` : "");
+
+  await heartbeat(alarmOverall === "ok" ? "ok" : "warn", detail.slice(0, 500));
+  return json({
+    ok: true,
+    status: overall,
+    alarm_status: alarmOverall,
+    checked_at: new Date().toISOString(),
+    orgs: results,
+  });
 });

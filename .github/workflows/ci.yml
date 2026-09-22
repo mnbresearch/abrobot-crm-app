@@ -100,8 +100,14 @@ jobs:
       # one of them printed "SKIP — no usable esbuild" and exited 0. The job
       # went green having executed zero assertions, which is worse than having
       # no tests at all: it looks like coverage.
-      - name: Install esbuild for the test harness
-        run: npm install --no-save --no-audit --no-fund esbuild@0.23.1
+      # jsdom is for the widget XSS suite. That test asserts against the PARSED
+      # DOM rather than the output string, because escaped text can read as
+      # alarming while being completely inert — and, more to the point, a
+      # string check can pass on markup a browser would still build. Without
+      # jsdom the suite silently drops to its weaker string-based assertions,
+      # which is the same "green tick over nothing" this step exists to stop.
+      - name: Install esbuild and jsdom for the test harness
+        run: npm install --no-save --no-audit --no-fund esbuild@0.23.1 jsdom@24.1.1
 
       - name: Run the committed tests
         run: |

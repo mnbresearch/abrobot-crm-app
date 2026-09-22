@@ -96,7 +96,15 @@ Deno.serve(async (req) => {
   const result = await sendWhatsAppText(cfg, lead.phone, text);
 
   if (!result.sent) {
-    const status = result.reason === "not_configured" ? 503 : 502;
+    // 409, not 502. A refusal is not Meta failing us — it is this organisation
+    // asking to send from a number its own credentials do not cover, and the
+    // detail says exactly what to do about it. Reporting it as a bad gateway
+    // would send the admin looking for an outage that isn't there.
+    const status = result.reason === "not_configured"
+      ? 503
+      : result.reason === "refused"
+        ? 409
+        : 502;
     return json({ ok: false, error: result.detail ?? result.reason }, status);
   }
 

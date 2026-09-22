@@ -134,8 +134,34 @@
     }, 1000);
 
     function linkify(t) {
-      var esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      return esc.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+      // See the long note in the root widget.js. Short version: & < > is the
+      // correct escape set for a text node, and this string is interpolated
+      // into href="…", where an unescaped double quote closes the attribute
+      // and everything after it becomes markup. The text is model output, so
+      // a visitor can reach it by talking the agent into echoing a string.
+      // Match on RAW text, escape each piece as it is emitted. Escaping first
+      // and matching second looks equivalent and is not: the trailing-
+      // punctuation trim strips the ";" off &quot;, un-doing the escape.
+      function e(s) {
+        return s.replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+      }
+      var URL_RE = /https?:\/\/[^\s"'<>`]+/g;
+      var out = "", last = 0, m;
+      while ((m = URL_RE.exec(t)) !== null) {
+        var url = m[0], trail = "";
+        var p = /[).,;:!?]+$/.exec(url);
+        if (p) { trail = p[0]; url = url.slice(0, url.length - trail.length); }
+        out += e(t.slice(last, m.index));
+        var u = e(url);
+        out += '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + u + "</a>";
+        out += e(trail);
+        last = m.index + m[0].length;
+      }
+      return out + e(t.slice(last));
     }
     function add(role, text) {
       var d = document.createElement("div");

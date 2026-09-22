@@ -252,9 +252,58 @@
     // inserted, any < > & in the model's output is already inert. Never move a
     // replace() that emits HTML above the escape step.
     function linkify(t) {
-      var esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      // Escape quotes as well as & < >.
+      //
+      // & < > is the right set for text that lands in a TEXT node. This string
+      // does not: the next line interpolates part of it into href="…", and the
+      // URL pattern [^\s]+ matches a double quote quite happily. So a reply
+      // containing
+      //     https://example.com/"onmouseover="…
+      // closed the href and added an event handler — script running on the
+      // CUSTOMER's own domain, under their origin and their cookies.
+      //
+      // And the text here is model output, which is the part that makes it
+      // reachable rather than theoretical: a visitor cannot type into this
+      // element, but they can spend a few turns talking the agent into
+      // repeating a string back to them.
+      function e(s) {
+        return s.replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+      }
 
-      esc = esc.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+      // Find URLs in the RAW text, then escape each piece as it is emitted.
+      //
+      // The obvious fix — escape everything first, then run the URL regex over
+      // the escaped string — does not hold up, and I wrote it that way first
+      // and watched a test take it apart. Escaping turns " into &quot;, and the
+      // trailing-punctuation trim below then strips the ";" as sentence
+      // punctuation, leaving a bare &quot inside the href. The sanitiser undid
+      // its own escaping one line later.
+      //
+      // Matching on raw text removes the interaction entirely: the URL charset
+      // can simply exclude " ' < > ` outright, so nothing that could terminate
+      // an attribute is ever inside the URL in the first place, and escaping
+      // happens once, last, on text that no longer needs re-parsing.
+      var URL_RE = /https?:\/\/[^\s"'<>`]+/g;
+      var esc = "", last = 0, m;
+      while ((m = URL_RE.exec(t)) !== null) {
+        var url = m[0];
+        // Trailing punctuation belongs to the sentence, not the URL —
+        // otherwise "see https://example.com." links to a 404.
+        var trail = "";
+        var p = /[).,;:!?]+$/.exec(url);
+        if (p) { trail = p[0]; url = url.slice(0, url.length - trail.length); }
+
+        esc += e(t.slice(last, m.index));
+        var u = e(url);
+        esc += '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + u + "</a>";
+        esc += e(trail);
+        last = m.index + m[0].length;
+      }
+      esc += e(t.slice(last));
 
       // **bold** — non-greedy, and refuses to span a blank line so an unclosed
       // ** cannot swallow the rest of the message.

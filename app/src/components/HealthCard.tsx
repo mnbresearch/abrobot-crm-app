@@ -12,8 +12,11 @@ import { FUNCTIONS_BASE, supabase } from "../lib/supabase";
 // shouting gets ignored, which defeats the point.
 
 type Level = "ok" | "warn" | "fail";
-interface Check { key: string; label: string; level: Level; detail: string }
-interface OrgResult { org: string; name: string; status: Level; checks: Check[] }
+// `advisory` marks a verdict that describes this tenant's own activity rather
+// than a fault in the product — "no records captured yet" on a brand-new
+// account. It is worth showing them; it is not worth the alarm voice.
+interface Check { key: string; label: string; level: Level; detail: string; advisory?: boolean }
+interface OrgResult { org: string; name: string; status: Level; alarm_status?: Level; checks: Check[] }
 
 export function HealthCard() {
   const { org } = useApp();
@@ -62,6 +65,10 @@ export function HealthCard() {
 
   const failing = result.checks.filter((c) => c.level !== "ok");
   const isFail = result.status === "fail";
+  // A day-one account has captured nothing, which used to greet it with an
+  // amber "Worth a look" — the product telling a new customer something is
+  // wrong when the only thing that has happened is that they just signed up.
+  const advisoryOnly = !isFail && failing.length > 0 && failing.every((c) => c.advisory);
   const color = isFail ? "var(--red)" : "var(--amber)";
 
   return (
@@ -76,10 +83,14 @@ export function HealthCard() {
       }}
     >
       <div className="row" style={{ alignItems: "flex-start" }}>
-        <div style={{ fontSize: 20, lineHeight: 1.2 }}>{isFail ? "🚨" : "⚠️"}</div>
+        <div style={{ fontSize: 20, lineHeight: 1.2 }}>{isFail ? "🚨" : advisoryOnly ? "💡" : "⚠️"}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, color }}>
-            {isFail ? "Something needs your attention" : "Worth a look"}
+            {isFail
+              ? "Something needs your attention"
+              : advisoryOnly
+                ? "Nothing's wrong — just quiet"
+                : "Worth a look"}
           </div>
           <div className="sub" style={{ marginTop: 2 }}>
             {failing.map((c) => c.label).join(" · ")}

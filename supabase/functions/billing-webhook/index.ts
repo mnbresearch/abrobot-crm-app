@@ -97,6 +97,57 @@ Deno.serve(async (req) => {
     return json({ received: true, ignored: "unknown order" });
   }
 
+  // ── Refunds, chargebacks and disputes ───────────────────────────────────
+  //
+  // This MUST come before the idempotency short-circuit below. A refund always
+  // arrives for a payment that is already `paid` and already `granted_at`, so
+  // the "already granted, return 200" branch would swallow it — which is
+  // exactly how the original bug stayed invisible: the webhook answered 200 to
+  // every refund event and did nothing.
+  //
+  // Before this existed there was no refund branch at all, and no dispute
+  // branch, and `effective_plan` selected `subscriptions.status` without ever
+  // reading it — so even setting the status by hand revoked nothing. Refunding
+  // an annual Business order left the customer holding ₹49,990 of plan for
+  // twelve months, and "pay → get granted → charge back → keep the plan"
+  // worked end to end.
+  const isRefund =
+    /REFUND/i.test(type) ||
+    String(event?.data?.refund?.refund_status ?? "").toUpperCase() === "SUCCESS";
+  const isDispute = /DISPUTE|CHARGEBACK/i.test(type);
+
+  if (isRefund || isDispute) {
+    // A refund that is still pending must not revoke anything yet.
+    const refundStatus = String(event?.data?.refund?.refund_status ?? "").toUpperCase();
+    if (isRefund && refundStatus && refundStatus !== "SUCCESS") {
+      return json({ received: true, ignored: `refund ${refundStatus}` });
+    }
+
+    const reason = isDispute ? "chargeback" : "refund";
+    const { data: revoked, error: revokeErr } = await admin
+      .rpc("revoke_plan_from_payment", { p_payment_id: row.id, p_reason: reason });
+
+    if (revokeErr) {
+      // 500 so Cashfree retries. revoke_plan_from_payment is idempotent — it
+      // claims the row with `and revoked_at is null` — so repeating is safe.
+      console.error("REFUNDED BUT PLAN NOT REVOKED", orderId, revokeErr.message);
+      return json({ error: "revoke failed" }, 500);
+    }
+
+    try {
+      await notifyNewLead(admin, row.org_id, {
+        id: "billing",
+        name: `↩️ ${reason === "chargeback" ? "Chargeback" : "Refund"} — ${row.plan}`,
+        message: `Order ${orderId}\nAccess now ends ${
+          (revoked as { until?: string } | null)?.until ?? "immediately"
+        }`,
+      });
+    } catch (_e) { /* an alert must never fail the webhook */ }
+
+    console.log("plan revoked:", orderId, reason, JSON.stringify(revoked));
+    return json({ received: true, status: reason, revoked });
+  }
+
   // Idempotency: Cashfree retries until it gets a 2xx.
   //
   // This used to short-circuit on `status === "paid"` alone, which quietly

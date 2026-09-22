@@ -26,7 +26,20 @@
 //   Supabase dashboard -> Edge Functions -> Secrets -> CRON_SECRET
 //   Then re-run 20260903140000_cron_secret.sql so pg_cron sends the header.
 
-const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
+// .trim(), and it is load-bearing.
+//
+// The Supabase dashboard's secret Value box is a multi-line textarea, so a
+// paste can carry a trailing newline that is completely invisible in the UI.
+// That happened here on 14 September: the secret was correct, one character
+// longer than intended, and every scheduled call came back 401 — with nothing
+// on screen to distinguish it from a wrong value. Both sides are trimmed so a
+// stray newline or space cannot cost another silent outage.
+//
+// The cost is that two secrets differing only in surrounding whitespace become
+// equivalent. For a 64-hex-character random value that is not a meaningful
+// reduction in entropy; a multi-day outage nobody can diagnose is a far larger
+// real risk than the one this gives up.
+const CRON_SECRET = (Deno.env.get("CRON_SECRET") ?? "").trim();
 
 /** Constant-time compare, so the response time cannot be used to guess the secret. */
 function safeEqual(a: string, b: string): boolean {
@@ -71,7 +84,7 @@ export function requireCronSecret(req: Request, corsHeaders: HeadersInit): CronA
     return deny("not configured");
   }
 
-  const provided = req.headers.get("x-cron-secret") ?? "";
+  const provided = (req.headers.get("x-cron-secret") ?? "").trim();
   if (!provided || !safeEqual(provided, CRON_SECRET)) {
     return deny("unauthorized");
   }
@@ -106,7 +119,7 @@ export async function requireCronOrMember(
   });
 
   // 1. The scheduler.
-  const provided = req.headers.get("x-cron-secret") ?? "";
+  const provided = (req.headers.get("x-cron-secret") ?? "").trim();
   if (provided && CRON_SECRET && safeEqual(provided, CRON_SECRET)) {
     return { ok: true };
   }

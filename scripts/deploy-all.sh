@@ -45,6 +45,56 @@ echo
 #
 # So every function is listed here now. One script, no memory required.
 
+# ── 2a. Refuse to run if this list has drifted ──────────────────────────────
+# Twice now a function has existed in supabase/functions/ and been absent from
+# this script, and both times the result was the same: the deploy reported
+# success and the function was never shipped. A comment saying "keep this list
+# updated" did not prevent the second occurrence, so this checks instead.
+#
+# FUNCTIONS is the single source of truth below — the deploy calls read from
+# it, so the list cannot be updated in one place and forgotten in the other.
+FUNCTIONS=(
+  "chat-agent:--no-verify-jwt"
+  "app-signup:--no-verify-jwt"
+  "lead-webhook:--no-verify-jwt"
+  "api:--no-verify-jwt"
+  "nurture:--no-verify-jwt"
+  "run-automations:--no-verify-jwt"
+  "summarize-chats:--no-verify-jwt"
+  "system-health:--no-verify-jwt"
+  "billing-webhook:--no-verify-jwt"
+  "whatsapp-send:"
+  "send-campaign:"
+  "save-integration:"
+  "billing-checkout:"
+  "rescore-leads:"
+)
+
+echo "==> Checking the deploy list against supabase/functions/"
+DRIFT=0
+for dir in "$ROOT"/supabase/functions/*/; do
+  name="$(basename "$dir")"
+  # _shared holds imported modules, not a deployable function.
+  [ "$name" = "_shared" ] && continue
+  [ -f "$dir/index.ts" ] || continue
+  found=0
+  for entry in "${FUNCTIONS[@]}"; do
+    [ "${entry%%:*}" = "$name" ] && { found=1; break; }
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "    NOT IN THIS SCRIPT: $name" >&2
+    DRIFT=1
+  fi
+done
+if [ "$DRIFT" -ne 0 ]; then
+  echo >&2
+  echo "A function exists but would not be deployed. Add it to FUNCTIONS above" >&2
+  echo "with the right JWT flag, then re-run. Refusing to deploy a partial set." >&2
+  exit 1
+fi
+echo "    all ${#FUNCTIONS[@]} functions accounted for"
+echo
+
 echo "==> chat-agent  (strips <think> chain-of-thought; JWT off)"
 $SUPA functions deploy chat-agent --no-verify-jwt
 
@@ -82,6 +132,33 @@ $SUPA functions deploy send-campaign
 
 echo "==> save-integration  (write-only credentials; JWT ON)"
 $SUPA functions deploy save-integration
+
+# Added 22 September. These four existed and were deployed by hand, which is
+# the same gap the comment above describes: on 6 September `api` and
+# `save-integration` were missing from this list and simply never shipped,
+# while everything looked done. It happened again — the 17 September fixes to
+# system-health and billing-webhook sat undeployed for five days because
+# neither was named here.
+#
+# If a function exists in supabase/functions/, it belongs in this list.
+
+# JWT OFF: pg_cron calls this one and carries no Supabase JWT. The shared
+# secret in _shared/cron-auth.ts is the real boundary.
+echo "==> system-health  (JWT off, cron secret or member)"
+$SUPA functions deploy system-health --no-verify-jwt
+
+# JWT OFF: Cashfree posts here and has no Supabase JWT. The HMAC signature
+# check inside the function is the boundary, and it fails closed on an unset
+# secret.
+echo "==> billing-webhook  (JWT off, HMAC-signature verified)"
+$SUPA functions deploy billing-webhook --no-verify-jwt
+
+# JWT ON: both act as a specific signed-in member.
+echo "==> billing-checkout  (JWT ON)"
+$SUPA functions deploy billing-checkout
+
+echo "==> rescore-leads  (JWT ON)"
+$SUPA functions deploy rescore-leads
 echo
 
 # ── 2b. Prove they are actually there ───────────────────────────────────────
@@ -93,7 +170,8 @@ echo "==> Verifying what is live"
 BASE="https://${PROJECT_REF}.supabase.co/functions/v1"
 MISSING=0
 for f in chat-agent app-signup lead-webhook api nurture run-automations \
-         summarize-chats whatsapp-send send-campaign save-integration; do
+         summarize-chats whatsapp-send send-campaign save-integration \
+         system-health billing-webhook billing-checkout rescore-leads; do
   code=$(curl -sS --max-time 20 -o /tmp/abx-deploy-check -w '%{http_code}' \
          -X OPTIONS "$BASE/$f" 2>/dev/null || echo 000)
   if grep -q NOT_FOUND /tmp/abx-deploy-check 2>/dev/null; then

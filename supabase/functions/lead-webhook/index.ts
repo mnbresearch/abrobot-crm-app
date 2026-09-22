@@ -319,6 +319,14 @@ Deno.serve(async (req) => {
         `A counsellor will get back to you shortly. ` +
         `Meanwhile, feel free to tell us your target country and course.`,
       );
+      // A refusal here means this org's WhatsApp credentials do not cover the
+      // number it is configured to send from. It is silent from the visitor's
+      // side — they simply get no autoreply — so say so in the log, or the
+      // first anyone hears of it is a customer asking why nobody replied.
+      if (autoreply && !autoreply.sent && autoreply.reason === "refused") {
+        console.warn("whatsapp autoreply refused for org", wk.org_id, "-", autoreply.detail);
+      }
+
       // Only a delivered autoreply counts against the allowance.
       if (autoreply?.sent) {
         await supabase.rpc("consume_usage", {

@@ -225,6 +225,23 @@ export function Integrations() {
     await load();
   };
 
+  // Outbound endpoints could be added and removed but never paused or resumed,
+  // while the reconciler was free to disable one on its own. That combination
+  // made auto-disable a one-way door: the endpoint stopped receiving events,
+  // the row still said nothing about it, and the only route back was deleting
+  // and re-adding — which issues a new signing secret the customer then has to
+  // redeploy. Resuming also clears the failure counter, because otherwise the
+  // endpoint returns already 19 failures deep and the next slow reply kills it
+  // again immediately.
+  const toggleEndpoint = async (e: Endpoint) => {
+    const { error } = await supabase.from("webhook_endpoints")
+      .update({ active: !e.active, failure_count: 0, last_error: null })
+      .eq("id", e.id);
+    if (error) { toast.error(error.message); return; }
+    toast.show(e.active ? "Endpoint paused" : "Endpoint resumed");
+    await load();
+  };
+
   const removeEndpoint = async (id: string, url: string) => {
     if (!confirm(`Stop sending events to ${url}?`)) return;
     const { error } = await supabase.from("webhook_endpoints").delete().eq("id", id);
@@ -661,7 +678,15 @@ export function Integrations() {
           <div key={e.id} style={{ padding: "10px 0", borderTop: "1px solid var(--border)" }}>
             <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontWeight: 600, wordBreak: "break-all" }}>{e.url}</div>
+                <div style={{ fontWeight: 600, wordBreak: "break-all" }}>
+                  {e.url}{" "}
+                  {/* There was no badge here at all, so an endpoint that had
+                      been switched off automatically looked identical to one
+                      that was working. */}
+                  <span className={e.active ? "pill pill-green" : "pill pill-muted"}>
+                    {e.active ? "active" : "paused"}
+                  </span>
+                </div>
                 <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>
                   {e.events.join(", ")}
                   {e.last_success_at && ` · last delivered ${timeAgo(e.last_success_at)}`}
@@ -672,10 +697,18 @@ export function Integrations() {
                     </span>
                   )}
                 </div>
+                {!e.active && (
+                  <div className="sub" style={{ fontSize: 12, marginTop: 4, color: "var(--amber)" }}>
+                    Paused — we aren't sending events here. Resume once your endpoint is answering.
+                  </div>
+                )}
               </div>
               <div className="row">
                 <button className="btn btn-sm" onClick={() => void copy(e.secret, "Signing secret")}>
                   Copy secret
+                </button>
+                <button className="btn btn-sm" onClick={() => void toggleEndpoint(e)}>
+                  {e.active ? "Pause" : "Resume"}
                 </button>
                 <button className="btn btn-sm btn-danger" onClick={() => void removeEndpoint(e.id, e.url)}>
                   Remove

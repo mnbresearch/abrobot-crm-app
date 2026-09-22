@@ -53,6 +53,18 @@ const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: 
 // Gap before each step, in hours: ~1h after capture, then +3 days, +4 days.
 // Steps beyond the third reuse the last gap.
 const GAP_HOURS = [1, 72, 96];
+
+// A ceiling on the whole run, not just per org.
+//
+// ORGS_PER_RUN x LEADS_PER_ORG allows 2,500 sends in one invocation on the
+// shared platform Resend key, whose free tier is 100/day. After an outage the
+// backlog is exactly large enough to hit that, so the first recovery run would
+// 429 partway and throw for everything after — which, before the heartbeat fix
+// above, it reported as success.
+//
+// Stopping short is recoverable: the next run picks the backlog up. Burning the
+// day's provider quota is not.
+const MAX_SENDS_PER_RUN = 80;
 const ORGS_PER_RUN = 25;   // free-tier edge functions have a wall-clock budget
 const LEADS_PER_ORG = 100;
 
@@ -245,39 +257,91 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     if (quota <= 0) break;
     if (budget !== null && budget <= 0) break;
 
-    let q = supabase.from("leads")
-      .select("id, name, email, phone, target_country, course, course_level, intake, custom, segment, stage_key, nurture_step, nurture_last_sent_at, nurture_token, created_at")
-      .eq("org_id", org.id)
-      // Deletion is enforced in RLS only, and this runs as the service role.
-      // Without this, the follow-up engine keeps emailing people the customer
-      // deleted — the most visible possible version of this bug, and one with
-      // consent implications rather than merely cosmetic ones.
-      .is("deleted_at", null)
-      .not("email", "is", null)
-      .eq("nurture_opted_out", false)
-      .lt("nurture_step", pass.seq.maxStep)
-      .order("created_at", { ascending: true })
-      .limit(quota);
+    // ── Only fetch leads that are actually DUE ──────────────────────────
+    //
+    // This used to select on step alone — "could this lead EVER be sent" —
+    // and then evaluate due-ness in JavaScript after the page had been
+    // fetched. Ordered oldest-first with .limit(quota), the oldest N leads
+    // occupied the whole page whether or not they were due, including through
+    // their entire 72h and 96h waiting windows.
+    //
+    // Worked example, 300 overdue leads, three steps, daily cron:
+    //   day 1  leads 1-100 sent step 0
+    //   day 2  leads 1-100 fetched again, all inside 72h → 0 sent
+    //   day 3  same → 0 sent
+    //   day 4  leads 1-100 sent step 1
+    //   ...
+    //   leads 201-300 receive their first email about 17 days later.
+    //
+    // The run report said `considered: 100, sent: 0` and the heartbeat said
+    // ok. This is the same starvation the comment below describes, one level
+    // up in the query rather than in the budget.
+    //
+    // The gap depends on nurture_step, so the filter has to be per step.
+    //
+    // Two queries per step rather than one nested .or(): a lead is due if it
+    // has never been sent to (measure from created_at) or was last sent to
+    // before the cutoff. Expressed with .is/.lt only, because getting a
+    // nested PostgREST or() subtly wrong here means either emailing people
+    // early or not at all, and neither is visible until a customer complains.
+    const dueLeads: Lead[] = [];
+    let passErr: string | null = null;
 
-    q = pass.narrow(q);
+    for (let step = 0; step < pass.seq.maxStep && quota > 0; step++) {
+      const gapMs = (GAP_HOURS[step] ?? GAP_HOURS[GAP_HOURS.length - 1]) * 3600_000;
+      const cutoff = new Date(now - gapMs).toISOString();
 
-    if (stop.size) {
-      // Quoted: a stage key is normally a slug, but nothing enforces that, and an
-      // unquoted comma or parenthesis in one key would silently reshape the
-      // filter — which here means emailing people who have already converted.
-      const list = [...stop].map((k) => `"${k.replace(/"/g, '""')}"`).join(",");
-      q = q.or(`stage_key.is.null,stage_key.not.in.(${list})`);
+      const base = () => {
+        let b = supabase.from("leads")
+          .select("id, name, email, phone, target_country, course, course_level, intake, custom, segment, stage_key, nurture_step, nurture_last_sent_at, nurture_token, created_at")
+          .eq("org_id", org.id)
+          // Deletion is enforced in RLS only, and this runs as the service
+          // role. Without this, the follow-up engine keeps emailing people the
+          // customer deleted — the most visible possible version of this bug,
+          // and one with consent implications rather than merely cosmetic ones.
+          .is("deleted_at", null)
+          .not("email", "is", null)
+          .eq("nurture_opted_out", false)
+          .eq("nurture_step", step)
+          .order("created_at", { ascending: true })
+          .limit(quota);
+
+        b = pass.narrow(b);
+
+        if (stop.size) {
+          // Quoted: a stage key is normally a slug, but nothing enforces that,
+          // and an unquoted comma or parenthesis in one key would silently
+          // reshape the filter — which here means emailing people who have
+          // already converted.
+          const list = [...stop].map((k) => `"${k.replace(/"/g, '""')}"`).join(",");
+          b = b.or(`stage_key.is.null,stage_key.not.in.(${list})`);
+        }
+        return b;
+      };
+
+      // Never sent to: the gap runs from when the record was created.
+      const neverSent = await base().is("nurture_last_sent_at", null).lt("created_at", cutoff);
+      // Sent to before: the gap runs from the last send.
+      const sentBefore = await base().lt("nurture_last_sent_at", cutoff);
+
+      if (neverSent.error || sentBefore.error) {
+        passErr = (neverSent.error ?? sentBefore.error)!.message;
+        break;
+      }
+      dueLeads.push(...((neverSent.data ?? []) as Lead[]));
+      dueLeads.push(...((sentBefore.data ?? []) as Lead[]));
     }
 
-    const { data: leads, error: leadErr } = await q;
-    if (leadErr) {
+    if (passErr) {
       // One pass failing must not silently cancel the others.
-      errors.push(`${pass.label}: ${leadErr.message}`);
+      errors.push(`${pass.label}: ${passErr}`);
       continue;
     }
-    considered += leads?.length ?? 0;
 
-    for (const l of (leads ?? []) as Lead[]) {
+    const leads = dueLeads.slice(0, quota);
+    considered += leads.length;
+
+    for (const l of leads) {
       if (budget !== null && budget <= 0) break;
       if (quota <= 0) break;
 
@@ -509,9 +573,20 @@ Deno.serve(async (req) => {
   }
 
   const results = [];
+  let runSent = 0;
+  let cappedAt: string | null = null;
+
   for (const org of orgs) {
+    // Stop before the provider does. See MAX_SENDS_PER_RUN.
+    if (runSent >= MAX_SENDS_PER_RUN) {
+      cappedAt = org.slug;
+      console.warn(`nurture: run cap of ${MAX_SENDS_PER_RUN} reached before ${org.slug}; the rest resume next run`);
+      break;
+    }
     try {
-      results.push(await runOrg(org));
+      const r = await runOrg(org);
+      runSent += r.sent ?? 0;
+      results.push(r);
     } catch (e) {
       // One tenant's misconfiguration must not stop the others' follow-up.
       console.error(`nurture: org ${org.slug} threw:`, e);
@@ -520,7 +595,41 @@ Deno.serve(async (req) => {
   }
 
   const sent = results.reduce((n, r) => n + (r.sent ?? 0), 0);
-  const bad = results.filter((r) => "error" in r).length;
-  await heartbeat(bad ? "warn" : "ok", `${results.length} org(s), ${sent} sent, ${bad} failed`);
-  return json({ ok: true, orgs: results.length, sent, results });
+
+  // `bad` used to count ONLY orgs whose runOrg threw. Per-lead failures — a
+  // Resend rejection, a step that could not be advanced, a pass whose query
+  // errored — were pushed into r.errors and read by nothing. A run in which
+  // 2,400 of 2,500 sends failed wrote last_status = 'ok', and stale_jobs()
+  // stayed quiet because the heartbeat was fresh.
+  //
+  // That mattered most on a restart: the Resend free tier is 100/day, so the
+  // first run after an outage 429s partway through and every send after it
+  // throws. The old heartbeat reported `ok, 100 sent, 0 failed`.
+  //
+  // The lead-level failures are the ones that cost a customer their follow-up,
+  // so they decide the status.
+  const threw = results.filter((r) => "error" in r).length;
+  const failures = results.reduce((n, r) => n + ((r as { errors?: string[] }).errors?.length ?? 0), 0);
+  const degraded = threw > 0 || failures > 0;
+
+  const detail = `${results.length} org(s), ${sent} sent` +
+    (threw ? `, ${threw} org(s) failed` : "") +
+    (failures ? `, ${failures} lead-level failure(s)` : "") +
+    (cappedAt ? `, run cap reached before ${cappedAt}` : "");
+
+  await heartbeat(degraded ? "warn" : "ok", detail);
+
+  // A non-2xx so recent_cron_failures() sees it too. The heartbeat is the
+  // primary signal; this is the second one, because the whole reason this bug
+  // survived eight days is that a single channel nobody reads is the same as
+  // no channel at all.
+  //
+  // Threshold, not any-failure: one bounced address should not red the job.
+  const lost = sent === 0 && failures > 0;
+  if (lost || failures > Math.max(10, sent)) {
+    console.error(`nurture: ${failures} failure(s) against ${sent} send(s) — reporting the run as failed`);
+    return json({ ok: false, orgs: results.length, sent, failures, results }, 500);
+  }
+
+  return json({ ok: true, orgs: results.length, sent, failures, capped_before: cappedAt, results });
 });
