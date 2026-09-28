@@ -56,6 +56,15 @@ export interface CronAuthResult {
   /** Set when the caller was a signed-in user rather than the scheduler. */
   orgId?: string;
   userId?: string;
+  /**
+   * The caller's role, when the caller was a signed-in user.
+   *
+   * Added so a function can tell a platform operator from a tenant member
+   * without a second `profiles` read. It is returned, never accepted: like
+   * `orgId`, it is derived from the token's `profiles` row, so a request
+   * cannot assert it.
+   */
+  role?: string;
 }
 
 /**
@@ -131,12 +140,21 @@ export async function requireCronOrMember(
   const { data: userData, error: uErr } = await admin.auth.getUser(token);
   if (uErr || !userData?.user) return deny("invalid session");
 
-  const { data: profile } = await admin
+  // The error is checked, and checked to DENY. An unchecked read here would
+  // leave `profile` null and fall into the same `!profile` branch as "no such
+  // user" — which is the right outcome by luck rather than design. Making it
+  // explicit means a future edit to that branch cannot accidentally turn a
+  // failed read into an allow.
+  const { data: profile, error: profileErr } = await admin
     .from("profiles")
     .select("org_id, status, role")
     .eq("id", userData.user.id)
-    .single();
+    .maybeSingle();
 
+  if (profileErr) {
+    console.error("requireCronOrMember: could not read profile:", profileErr.message);
+    return deny("could not verify membership", 503);
+  }
   if (!profile || profile.status !== "active" || !profile.org_id) {
     return deny("not an active member", 403);
   }
@@ -144,5 +162,5 @@ export async function requireCronOrMember(
     return deny("admins only", 403);
   }
 
-  return { ok: true, orgId: profile.org_id, userId: userData.user.id };
+  return { ok: true, orgId: profile.org_id, userId: userData.user.id, role: profile.role };
 }

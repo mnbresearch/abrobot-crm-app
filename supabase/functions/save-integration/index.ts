@@ -78,7 +78,7 @@ Deno.serve(async (req) => {
       // ── What is configured? Booleans only, never values. ──────────────────
       case "status": {
         const { data } = await admin.from("agent_config")
-          .select("whatsapp_token, whatsapp_phone_id, whatsapp_autoreply, telegram_bot_token, telegram_chat_id, notify_new_leads, whatsapp, resend_api_key, nurture_enabled")
+          .select("whatsapp_token, whatsapp_phone_id, whatsapp_autoreply, telegram_bot_token, telegram_chat_id, notify_new_leads, whatsapp, resend_api_key, resend_from, resend_reply_to, nurture_enabled")
           .eq("org_id", orgId).maybeSingle();
 
         return json({
@@ -88,6 +88,14 @@ Deno.serve(async (req) => {
             // tenant's sending behaviour — which is fine until it isn't.
             own_key: !!data?.resend_api_key,
             nurture_on: !!data?.nurture_enabled,
+            // The sending address is not a secret — it is on every message
+            // this tenant sends — so unlike the keys it is safe to echo, and
+            // showing it is what lets the screen tell an admin their key and
+            // their domain disagree BEFORE a campaign returns "Sent 0 of 412".
+            from_address: (data?.resend_from || "") || null,
+            reply_to: (data?.resend_reply_to || "") || null,
+            // The combination that cannot send: own key, no verified address.
+            needs_from_address: !!(data?.resend_api_key || "").trim() && !(data?.resend_from || "").trim(),
           },
           whatsapp: {
             configured: !!(data?.whatsapp_token && data?.whatsapp_phone_id),
@@ -220,24 +228,85 @@ Deno.serve(async (req) => {
           }
           patch.resend_api_key = tok;
         }
+
+        // ── The sending address that goes with that key ───────────────────
+        //
+        // Saving a key without one guaranteed a 403 on every message: the
+        // tenant's Resend account has not verified OUR domain, and the sender
+        // used our address regardless. `resend_from` has existed in the schema
+        // since 20260905120000 and nothing read or wrote it, so this screen
+        // invited an admin to break their own email and told them it saved.
+        const fromAddr = str(body.from_address, 200);
+        if (fromAddr === "-") patch.resend_from = null;
+        else if (fromAddr) {
+          if (!/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(fromAddr)) {
+            return json({ error: "That doesn't look like an email address" }, 400);
+          }
+          patch.resend_from = fromAddr.toLowerCase();
+        }
+
+        const replyAddr = str(body.reply_to, 200);
+        if (replyAddr === "-") patch.resend_reply_to = null;
+        else if (replyAddr) {
+          if (!/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(replyAddr)) {
+            return json({ error: "That reply-to doesn't look like an email address" }, 400);
+          }
+          patch.resend_reply_to = replyAddr.toLowerCase();
+        }
+
         const { error } = await admin.from("agent_config").upsert(patch, { onConflict: "org_id" });
         if (error) return json({ error: error.message }, 500);
-        return json({ ok: true, saved: "email" });
+
+        // Tell the caller the combination is unusable rather than letting them
+        // discover it as a silent 100% bounce rate.
+        const { data: after } = await admin.from("agent_config")
+          .select("resend_api_key, resend_from").eq("org_id", orgId).maybeSingle();
+        const needsFrom = !!(after?.resend_api_key || "").trim() && !(after?.resend_from || "").trim();
+        return json({
+          ok: true,
+          saved: "email",
+          ...(needsFrom
+            ? {
+              // Says what the code DOES, which is send. An earlier draft of
+              // this feature refused to send in that state; the refusal was
+              // removed because it would have stopped follow-up for every
+              // tenant holding their own key, and this string was left behind
+              // describing behaviour that no longer exists. A warning that
+              // misdescribes the system is worse than no warning: it sends
+              // someone looking for a block that is not there.
+              warning:
+                "Your own Resend key is saved but no sending address is set, so mail still goes out " +
+                "from our shared address on your key. If Resend rejects those, add a sending address " +
+                "on a domain you have verified.",
+            }
+            : {}),
+        });
       }
 
       case "test_email": {
         const to = str(body.to, 200);
         if (!to || !to.includes("@")) return json({ error: "Enter an address to send the test to" }, 400);
 
+        // Must use the SAME sender resolution as nurture and send-campaign.
+        // It did not: this paired a tenant's own key with the platform address
+        // regardless, so the one diagnostic an admin runs to check their email
+        // setup tested a combination neither send path uses. A green test here
+        // and silent failures in production is worse than no test at all.
         const { data: cfg } = await admin.from("agent_config")
-          .select("resend_api_key, brand_name").eq("org_id", orgId).maybeSingle();
+          .select("resend_api_key, resend_from, brand_name").eq("org_id", orgId).maybeSingle();
 
         const key = (cfg?.resend_api_key || "").trim() || Deno.env.get("RESEND_API_KEY") || "";
         if (!key) return json({ ok: false, error: "No Resend key saved, and no platform key is configured" }, 400);
 
         const { data: org } = await admin.from("organizations").select("name").eq("id", orgId).single();
         const brand = (cfg?.brand_name || org?.name || "Your team").replace(/["<>\\]/g, "");
-        const from = Deno.env.get("NURTURE_FROM") || "hello@updates.mnbresearch.com";
+        // Same resolution as the two send paths: own key + own address uses
+        // theirs, everything else uses the platform address.
+        const ownKey = (cfg?.resend_api_key || "").trim();
+        const ownFrom = (cfg?.resend_from || "").trim();
+        const from = ownKey && ownFrom
+          ? ownFrom
+          : (Deno.env.get("NURTURE_FROM") || "hello@updates.mnbresearch.com");
 
         const r = await fetchWithTimeout("https://api.resend.com/emails", {
           method: "POST",

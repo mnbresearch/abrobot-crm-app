@@ -41,6 +41,21 @@ interface PlanRow {
   max_automations: number | null; whatsapp: boolean; api_access: boolean;
 }
 
+/**
+ * A member row as this screen needs it.
+ *
+ * Deliberately not the app's `Profile` type: this is a cross-tenant read and
+ * only the five columns below are ever shown, so widening it would be widening
+ * what the platform console pulls out of another company's user table.
+ */
+interface MemberRow {
+  id: string;
+  full_name: string | null;
+  email: string;
+  role: string;
+  status: string;
+}
+
 interface AuditRow {
   created_at: string; actor_email: string | null; action: string;
   org_slug: string | null; detail: Record<string, unknown>;
@@ -53,7 +68,22 @@ export function Admin() {
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The plan and audit reads had their errors discarded, which on THIS screen
+  // produces two specific falsehoods:
+  //
+  //  - plan_limits failing left `plans` empty, so every price lookup missed and
+  //    the header printed "₹0/mo" beside a list of real paying customers, while
+  //    the Plans table rendered as no rows under copy saying these are the rows
+  //    the server enforces.
+  //  - admin_recent_actions failing printed "Nothing yet." directly under
+  //    "Every cross-tenant change, however it was made." — an audit log
+  //    claiming, wrongly, that nothing has happened.
+  const [plansError, setPlansError] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
   const [editing, setEditing] = useState<OrgRow | null>(null);
+  // admin_set_member's UI. Kept here rather than on the tenant-facing Team
+  // screen on purpose — see the comment above MemberModal.
+  const [members, setMembers] = useState<OrgRow | null>(null);
   const [q, setQ] = useState("");
   const toast = useToast();
 
@@ -69,8 +99,12 @@ export function Admin() {
     if (o.error) { setError(o.error.message); setLoading(false); return; }
     setError(null);
     setOrgs((o.data as OrgRow[]) ?? []);
-    setPlans((p.data as PlanRow[]) ?? []);
-    setAudit((a.data as AuditRow[]) ?? []);
+    // Context reads don't block the screen, but their failure is still reported
+    // in the card that would otherwise assert something false about them.
+    if (p.error) setPlansError(p.error.message);
+    else { setPlansError(null); setPlans((p.data as PlanRow[]) ?? []); }
+    if (a.error) setAuditError(a.error.message);
+    else { setAuditError(null); setAudit((a.data as AuditRow[]) ?? []); }
     setLoading(false);
   }, []);
 
@@ -117,6 +151,10 @@ export function Admin() {
   const paying = orgs.filter((o) => !["free", "expired"].includes(o.effective_plan));
   const mrr = paying.reduce(
     (n, o) => n + (plans.find((p) => p.plan === o.effective_plan)?.price_inr ?? 0), 0);
+  // Every term in that sum comes from `plans`. With no plan rows the sum is
+  // structurally zero, not measured zero — and "₹0/mo" printed next to "7
+  // paying" is worse than printing nothing, because it looks like a reading.
+  const mrrKnown = plans.length > 0;
 
   return (
     <div className="stack">
@@ -124,8 +162,10 @@ export function Admin() {
         <div>
           <h1>Platform admin</h1>
           <p className="sub" style={{ marginTop: 2 }}>
-            {orgs.length} organisation{orgs.length === 1 ? "" : "s"} · {paying.length} paying ·
-            {" "}₹{mrr.toLocaleString("en-IN")}/mo from listed plans
+            {orgs.length} organisation{orgs.length === 1 ? "" : "s"} · {paying.length} paying
+            {mrrKnown
+              ? ` · ₹${mrr.toLocaleString("en-IN")}/mo from listed plans`
+              : " · plan prices unavailable, so no MRR figure"}
           </p>
         </div>
         <div className="spacer" />
@@ -194,6 +234,9 @@ export function Admin() {
                     </td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn btn-sm" onClick={() => setEditing(o)}>Plan</button>
+                      <button className="btn btn-sm" style={{ marginLeft: 6 }} onClick={() => setMembers(o)}>
+                        Members
+                      </button>
                       <button
                         className={`btn btn-sm${o.active ? " btn-danger" : ""}`}
                         style={{ marginLeft: 6 }}
@@ -218,7 +261,12 @@ export function Admin() {
           Every cross-tenant change, however it was made. When a customer asks who
           changed their plan and when, this is the answer.
         </p>
-        {audit.length === 0 ? (
+        {/* Error before empty. An audit log that says "Nothing yet." when it
+            simply could not be read is the one thing a log must never do — the
+            sentence above promises it records everything. */}
+        {auditError ? (
+          <LoadError message={auditError} onRetry={() => void load()} />
+        ) : audit.length === 0 ? (
           <p className="sub">Nothing yet.</p>
         ) : (
           <div className="table-wrap">
@@ -249,6 +297,20 @@ export function Admin() {
           What every customer sees on the pricing page and what the server enforces —
           the same rows. Changing a limit here changes both.
         </p>
+        {/* An empty table under that sentence reads as "the server enforces no
+            limits at all". It also silently empties the plan picker in the Plan
+            modal and zeroes the MRR line in the header, so the failure is named
+            once, here, where the data belongs. */}
+        {plansError ? (
+          <>
+            <LoadError message={plansError} onRetry={() => void load()} />
+            <p className="sub" style={{ fontSize: 12.5, marginTop: 8 }}>
+              Plan rows couldn't be read, so the table is not empty — it is unknown. The MRR
+              figure is withheld above for the same reason, and the plan picker in{" "}
+              <b>Plan</b> will have nothing to choose from until this read succeeds.
+            </p>
+          </>
+        ) : (
         <div className="table-wrap">
           <table className="data">
             <thead>
@@ -276,6 +338,7 @@ export function Admin() {
             </tbody>
           </table>
         </div>
+        )}
         <p className="sub" style={{ fontSize: 12, marginTop: 10 }}>
           To change a price or limit, use <code>admin_set_plan_limits</code> in the SQL editor —
           it validates the field names and writes an audit row. Editing these from a form is
@@ -292,8 +355,242 @@ export function Admin() {
           toast={toast}
         />
       )}
+      {members && (
+        <MemberModal
+          org={members}
+          onClose={() => setMembers(null)}
+          onDone={async () => { setMembers(null); await load(); }}
+          toast={toast}
+        />
+      )}
       {toast.node}
     </div>
+  );
+}
+
+/**
+ * admin_set_member — change a member's role or status in ANY organisation.
+ *
+ * ── Why this is here and not on Team.tsx ────────────────────────────────────
+ * Team.tsx already lets an org admin change roles and statuses inside their own
+ * organisation, through a plain `profiles` UPDATE that RLS and
+ * trg_guard_profile_changes both police. admin_set_member is a different
+ * animal: it is `security definer`, it checks is_super_admin() rather than
+ * anything about the target org, and it deliberately sets
+ * app.profile_bootstrap so the guard trigger stands aside. It exists for the
+ * case Team.tsx structurally cannot serve — "the only admin left the company",
+ * where there is nobody left inside the tenant who can promote anyone.
+ *
+ * Putting it on the tenant-facing screen would give a tenant admin a button
+ * that is either useless (the function refuses them) or, if the platform owner
+ * happens to be looking at that screen, a cross-tenant write hiding in the
+ * middle of an ordinary team list. It belongs in the console whose entire
+ * premise is "this reaches across every organisation".
+ *
+ * ── What is deliberately NOT offered ────────────────────────────────────────
+ * Granting super_admin. The function would accept it — the role enum has three
+ * values and it casts whatever it is given — but a platform role handed out
+ * from a dropdown, against a list of other companies' staff, is a mistake with
+ * no natural blast radius. Doing it is rare enough to be worth an explicit
+ * SQL statement and a moment's thought.
+ */
+function MemberModal({
+  org, onClose, onDone, toast,
+}: {
+  org: OrgRow;
+  onClose: () => void;
+  onDone: () => Promise<void>;
+  toast: ReturnType<typeof useToast>;
+}) {
+  const [rows, setRows] = useState<MemberRow[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [id, setId] = useState("");
+  const [role, setRole] = useState("");     // "" = leave unchanged
+  const [status, setStatus] = useState(""); // "" = leave unchanged
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void supabase.from("profiles")
+      .select("id, full_name, email, role, status")
+      .eq("org_id", org.org_id)
+      .order("created_at")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) { setListError(error.message); setRows([]); return; }
+        setListError(null);
+        setRows((data as MemberRow[]) ?? []);
+      });
+    return () => { cancelled = true; };
+  }, [org.org_id]);
+
+  // admin_list_orgs counts ACTIVE members server-side, so a disagreement
+  // between that count and what came back here is meaningful: the profiles
+  // policies are not written in any migration in this repo, and nothing
+  // guarantees they expose another tenant's rows to a super admin. An empty
+  // list next to "4 members" is a failed read, not an empty organisation, and
+  // saying so is the difference between "this org has nobody" and "paste the
+  // user id you already have".
+  const listLooksIncomplete = rows !== null && rows.length === 0 && org.members > 0;
+  const selected = rows?.find((r) => r.id === id) ?? null;
+
+  const apply = async () => {
+    const target = id.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target)) {
+      toast.error("Pick a member, or paste their user id (a uuid).");
+      return;
+    }
+    if (!role && !status) { toast.error("Choose a new role or a new status — otherwise there is nothing to change."); return; }
+    if (!note.trim()) { toast.error("Give a reason. This is a cross-tenant change and the audit row is the only explanation that will exist."); return; }
+
+    setBusy(true);
+    const { data, error } = await supabase.rpc("admin_set_member", {
+      p_profile_id: target,
+      // null means "leave alone" — the function coalesces each one against the
+      // current value, so sending "" would try to cast an empty string to the
+      // role enum and fail.
+      p_role: role || null,
+      p_status: status || null,
+      p_note: note.trim(),
+    });
+    setBusy(false);
+    if (error) { toast.error(error.message); return; }
+    const r = data as { role?: string; status?: string } | null;
+    toast.show(
+      `${selected?.email ?? target} is now ${r?.role ?? (role || "unchanged")} · ${r?.status ?? (status || "unchanged")}`,
+    );
+    await onDone();
+  };
+
+  return (
+    <Modal title={`Members — ${org.name}`} onClose={onClose} wide>
+      <p className="sub" style={{ marginTop: -6, lineHeight: 1.8 }}>
+        The recovery path for an organisation that has locked itself out — most often because
+        its only admin left. Every change here is written to the audit log with your email
+        against it.
+      </p>
+
+      {rows === null ? (
+        <p className="sub" style={{ marginTop: 12 }}>Loading members…</p>
+      ) : (
+        <>
+          {listError && (
+            <p style={{ color: "var(--red)", fontSize: 13, marginTop: 10, lineHeight: 1.8 }}>
+              Couldn't read this organisation's members: {listError}. You can still act on
+              someone by pasting their user id below.
+            </p>
+          )}
+          {listLooksIncomplete && !listError && (
+            <p style={{ color: "var(--amber)", fontSize: 13, marginTop: 10, lineHeight: 1.8 }}>
+              No member rows came back, but this organisation is counted as having{" "}
+              {org.members} active {org.members === 1 ? "member" : "members"} — so this list is
+              unavailable rather than empty. Paste the user id below instead; the change itself
+              does not depend on this read.
+            </p>
+          )}
+
+          {rows.length > 0 && (
+            <div className="table-wrap" style={{ marginTop: 12 }}>
+              <table className="data">
+                <thead><tr><th /><th>Member</th><th>Role</th><th>Status</th></tr></thead>
+                <tbody>
+                  {rows.map((m) => (
+                    <tr key={m.id} style={{ cursor: "pointer" }} onClick={() => setId(m.id)}>
+                      <td>
+                        <input
+                          type="radio"
+                          name="admin-member"
+                          checked={id === m.id}
+                          onChange={() => setId(m.id)}
+                          aria-label={`Select ${m.email}`}
+                        />
+                      </td>
+                      <td>
+                        <div style={{ fontWeight: 600 }}>{m.full_name || "—"}</div>
+                        <div className="sub" style={{ fontSize: 12 }}>{m.email}</div>
+                      </td>
+                      <td><span className="pill pill-muted">{m.role.replace("_", " ")}</span></td>
+                      <td>
+                        <span className={m.status === "active" ? "pill pill-green" : m.status === "disabled" ? "pill pill-red" : "pill pill-muted"}>
+                          {m.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="field" style={{ marginTop: 14 }}>
+        <label className="label" htmlFor="admin-member-id">User id</label>
+        <input
+          id="admin-member-id"
+          className="input mono"
+          value={id}
+          onChange={(e) => setId(e.target.value)}
+          placeholder="00000000-0000-0000-0000-000000000000"
+        />
+        <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+          Filled in by picking a row above. It is editable because the list is the part that can
+          fail, and the action should not depend on it.
+        </p>
+      </div>
+
+      <div className="row row-wrap" style={{ gap: 12 }}>
+        <div className="field" style={{ flex: 1, minWidth: 180 }}>
+          <label className="label" htmlFor="admin-member-role">New role</label>
+          <select id="admin-member-role" className="select" value={role} onChange={(e) => setRole(e.target.value)}>
+            <option value="">Leave unchanged</option>
+            <option value="counsellor">counsellor</option>
+            <option value="org_admin">org admin</option>
+          </select>
+        </div>
+        <div className="field" style={{ flex: 1, minWidth: 180 }}>
+          <label className="label" htmlFor="admin-member-status">New status</label>
+          <select id="admin-member-status" className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="">Leave unchanged</option>
+            <option value="pending">pending</option>
+            <option value="active">active</option>
+            <option value="disabled">disabled</option>
+          </select>
+        </div>
+      </div>
+
+      <p className="sub" style={{ fontSize: 12, marginTop: -4, marginBottom: 12, lineHeight: 1.8 }}>
+        <b>super_admin is not offered here.</b> It is a platform role, not a tenant one, and
+        granting it hands someone read and write on every organisation — rare enough to be worth
+        a deliberate SQL statement rather than a dropdown. Promoting someone to <b>org admin</b>{" "}
+        is what unlocks a tenant that has lost its last admin. Note that the plan's seat limit is
+        not consulted by this function, so reactivating a member can put an organisation over its
+        seat count.
+      </p>
+
+      <div className="field">
+        <label className="label" htmlFor="admin-member-note">Reason</label>
+        <input
+          id="admin-member-note"
+          className="input"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. sole admin left, promoting M. Rao on the owner's written request"
+        />
+        <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+          Required. In six months this audit row is the only record of why someone else's
+          permissions were changed from outside their company.
+        </p>
+      </div>
+
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn btn-primary" disabled={busy} onClick={() => void apply()}>
+          {busy ? "Applying…" : "Apply"}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

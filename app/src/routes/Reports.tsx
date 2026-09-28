@@ -260,6 +260,17 @@ export function Reports() {
           ? `Exported ${allRows.length.toLocaleString("en-IN")} rows — notes could not be read, so that column is empty`
           : `Exported ${allRows.length.toLocaleString("en-IN")} rows, ${cols.length} columns`,
       );
+    } catch (e) {
+      // try/finally with no catch: a throw anywhere above (a dropped connection
+      // mid-page, an expired token, a Blob that won't allocate on a 50,000-row
+      // file) ran the finally, cleared the progress label, un-busied the button
+      // — and said nothing. No file, no error, a button that looks ready to
+      // press again. The person then re-runs it, or worse, assumes the download
+      // is in their Downloads folder and leaves. Every handled failure above
+      // already toasts; this covers the unhandled one.
+      toast.error(
+        `Export failed and no file was written: ${(e as Error).message || "unknown error"}. Nothing was changed — please try again.`,
+      );
     } finally {
       setExporting(false);
       setProgress(null);

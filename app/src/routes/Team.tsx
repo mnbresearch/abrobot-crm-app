@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Empty, Spinner, timeAgo, useToast } from "../components/ui";
+import { Card, Empty, LoadError, Spinner, timeAgo, useToast } from "../components/ui";
 import type { MemberStatus, Profile, UserRole } from "../lib/types";
 
 // super_admin is a PLATFORM role, not a tenant one. Offering it in this
@@ -29,6 +29,11 @@ interface Invite {
 function InviteCard({ onChanged }: { onChanged: () => void }) {
   const { org, profile, plan } = useApp();
   const [invites, setInvites] = useState<Invite[]>([]);
+  // The toast that used to be the only signal self-dismisses in 3.2s; what is
+  // left behind is a card with no "Waiting to join" list, which is
+  // indistinguishable from "nobody is waiting". This state keeps the failure on
+  // screen for as long as it is true.
+  const [invitesError, setInvitesError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<UserRole>("counsellor");
   const [busy, setBusy] = useState(false);
@@ -40,7 +45,8 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
     // An unread error rendered no "Waiting to join" list — which reads as "that
     // invite was never created" and invites the admin to send it a second time,
     // or to conclude the invite system is broken and chase the person manually.
-    if (error) { toast.error(`Could not load pending invites: ${error.message}`); return; }
+    if (error) { setInvitesError(error.message); toast.error(`Could not load pending invites: ${error.message}`); return; }
+    setInvitesError(null);
     setInvites((data as Invite[]) ?? []);
   };
 
@@ -136,6 +142,22 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
           join automatically, with no further step from you.
         </p>
 
+        {/* Checked before the pending list, because an absent list is read as
+            "nobody is waiting" — the admin then re-invites someone who already
+            has an invite, or chases them by hand. The seat maths above is wrong
+            for the same reason (pending invites count towards the limit and we
+            could not count them), so this says so too. */}
+        {invitesError && (
+          <div style={{ marginTop: 16 }}>
+            <LoadError message={invitesError} onRetry={() => void load()} />
+            <p className="sub" style={{ fontSize: 12.5, marginTop: 6 }}>
+              Pending invites couldn't be read, so anyone already waiting to join isn't listed
+              here and isn't counted in the seat numbers above. Retry before inviting someone
+              again — they may already have an invite.
+            </p>
+          </div>
+        )}
+
         {pending.length > 0 && (
           <div style={{ marginTop: 16 }}>
             <div className="label">Waiting to join</div>
@@ -159,6 +181,9 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
 export function Team() {
   const { org, profile, isAdmin } = useApp();
   const [members, setMembers] = useState<Profile[]>([]);
+  // "No members yet" is a claim about the org. When the read failed it was made
+  // anyway, and the only contradiction was a toast gone in 3.2 seconds.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
@@ -171,8 +196,8 @@ export function Team() {
     // An unread error rendered "No members yet" to an organisation that has a
     // team — and the obvious response to that screen is to re-invite people
     // who are already there.
-    if (error) toast.error(`Could not load your team: ${error.message}`);
-    else setMembers((data as Profile[]) ?? []);
+    if (error) { setLoadError(error.message); toast.error(`Could not load your team: ${error.message}`); }
+    else { setLoadError(null); setMembers((data as Profile[]) ?? []); }
     setLoading(false);
   };
 
@@ -192,7 +217,11 @@ export function Team() {
       <div>
         <h1>Team</h1>
         <p className="sub" style={{ marginTop: 2 }}>
-          {members.length} {members.length === 1 ? "member" : "members"}
+          {/* A count is an assertion. Printing "0 members" off a failed read
+              told an org with a team that it had none. */}
+          {loadError
+            ? "Member count unavailable"
+            : `${members.length} ${members.length === 1 ? "member" : "members"}`}
         </p>
       </div>
 
@@ -202,7 +231,13 @@ export function Team() {
         </Card>
       )}
 
-      {members.length === 0 ? (
+      {/* Error before empty, always. "No members yet" on an org that has a team
+          invites the admin to re-invite people who are already here — and the
+          invite card below is still usable, so this replaces only the list
+          rather than the whole screen. */}
+      {loadError ? (
+        <LoadError message={loadError} onRetry={() => void load()} />
+      ) : members.length === 0 ? (
         <Card><Empty icon="👥" title="No members yet" /></Card>
       ) : (
         <div className="table-wrap">

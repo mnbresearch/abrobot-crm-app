@@ -11,7 +11,24 @@
 
 export class TimeoutError extends Error {
   constructor(url: string, ms: number) {
-    super(`timed out after ${ms}ms: ${new URL(url).host}`);
+    // `new URL(url).host` THROWS on a relative url, and this constructor only
+    // ever runs on the error path — so a slow upstream behind a relative url
+    // surfaced as `TypeError: Invalid URL` and the caller was told its url was
+    // malformed when the real event was a timeout. An error type whose own
+    // constructor can fail replaces the diagnosis with a red herring at
+    // exactly the moment someone is trying to diagnose something.
+    //
+    // Latent today — every current caller passes an absolute url — and it
+    // goes live the first time one is assembled from a config value that can
+    // be blank. Host only, never the full url: query strings carry tokens.
+    let where = url;
+    try {
+      where = new URL(url).host;
+    } catch {
+      // Keep the raw string; a relative path is still the most useful thing
+      // we can say about which request timed out.
+    }
+    super(`timed out after ${ms}ms: ${where}`);
     this.name = "TimeoutError";
   }
 }

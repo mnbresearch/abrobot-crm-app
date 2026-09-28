@@ -404,13 +404,20 @@ Deno.serve(async (req) => {
 
   // Get or create conversation
   let convId: string | null = body.conversation_id ?? null;
+  // The lead this conversation is already tied to, if any. Read here because
+  // it is the durable answer to "who is this visitor": the capture block
+  // further down can only match against the last 20 messages, so once contact
+  // details scroll out of that window it would otherwise create a second lead
+  // for a person it had already recorded.
+  let convLeadId: string | null = null;
   if (convId) {
     // A soft-deleted conversation must not keep accepting messages. Deletion
     // is enforced in RLS only and this runs as the service role, so without
     // the filter a thread the customer deleted stays live and keeps growing.
-    const { data } = await supabase.from("conversations").select("id")
+    const { data } = await supabase.from("conversations").select("id, lead_id")
       .eq("id", convId).eq("org_id", org.id).is("deleted_at", null).maybeSingle();
     if (!data) convId = null;
+    else convLeadId = data.lead_id ?? null;
   }
   if (!convId) {
     const { data, error } = await supabase.from("conversations")
@@ -438,9 +445,28 @@ Deno.serve(async (req) => {
   //
   // It only breaks the long, engaged conversations: the ones about to convert.
   // And it reads as "the bot got dumb", not as a bug, so nobody reports it.
-  const { data: historyDesc } = await supabase.from("chat_messages")
+  const { data: historyDesc, error: historyErr } = await supabase.from("chat_messages")
     .select("role, content").eq("conversation_id", convId)
     .order("created_at", { ascending: false }).limit(20);
+
+  // A failed history read is NOT an empty history, and the difference matters
+  // three separate ways further down:
+  //   * the model would be prompted with no context and answer as though the
+  //     visitor had just arrived, mid-conversation;
+  //   * `convText` is built from it, so contact details already given would
+  //     scroll out of view and the capture block below would write nulls over
+  //     details already stored (see the guard there);
+  //   * `message_count` is derived from `history.length`, so a 40-message
+  //     conversation would be stamped back down to 2.
+  // Treat it as a transient failure and let the visitor retry, rather than
+  // answering confidently from nothing.
+  if (historyErr) {
+    console.error(`chat-agent: could not read history for conversation ${convId}:`, historyErr.message);
+    return json({
+      reply: "Sorry, I'm having trouble reaching my notes for a moment. Could you send that again?",
+      conversation_id: convId,
+    });
+  }
   const history = (historyDesc ?? []).slice().reverse();
 
   await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "user", content: message });
@@ -456,7 +482,30 @@ Deno.serve(async (req) => {
   const phone = normPhone((convText.match(PHONE_RE) || [])[0] || null);
   const name = grabName(convText);
   if (email || phone) {
-    await supabase.from("conversations").update({ visitor_name: name, visitor_email: email, visitor_phone: phone }).eq("id", convId);
+    // ── Only write what we actually found ──────────────────────────────────
+    //
+    // This wrote all three fields unconditionally from a 20-message window, so
+    // the moment a visitor's email scrolled out of that window the update set
+    // `visitor_email: null` and ERASED a detail already captured. `visitor_name`
+    // was the most fragile of the three — `grabName` only matches an explicit
+    // self-introduction, so it is usually null while email and phone are not.
+    //
+    // The damage compounds: with the stored identifier gone, the dedupe below
+    // searches on whichever identifier survived, misses the lead created from
+    // the other one, and creates a SECOND lead for the same person — counted
+    // twice against the plan, alerted twice, and split across two records a
+    // counsellor then works twice.
+    const visitorPatch: Record<string, string> = {};
+    if (name) visitorPatch.visitor_name = name;
+    if (email) visitorPatch.visitor_email = email;
+    if (phone) visitorPatch.visitor_phone = phone;
+    if (Object.keys(visitorPatch).length) {
+      const { error: convErr } = await supabase.from("conversations")
+        .update(visitorPatch).eq("id", convId);
+      if (convErr) {
+        console.error(`chat-agent: could not attach visitor details to conversation ${convId}:`, convErr.message);
+      }
+    }
     // Excluding deleted records means a returning visitor whose record was
     // deleted gets a fresh one, rather than silently reviving the old one.
     let q = supabase.from("leads").select("id").eq("org_id", org.id)
@@ -473,9 +522,40 @@ Deno.serve(async (req) => {
     const noDelims = (v: string) => v.replace(/[,()"']/g, "");
     if (email && phone) q = q.or(`email.eq.${noDelims(email)},phone.eq.${noDelims(phone)}`);
     else if (email) q = q.eq("email", email); else q = q.eq("phone", phone!);
-    const { data: existing } = await q.limit(1);
-    let leadId = existing?.[0]?.id;
-    if (!leadId) {
+    const { data: existing, error: existingErr } = await q.limit(1);
+
+    // An errored dedupe read is not "no duplicate". `{ data: null, error }`
+    // and "nothing matched" are the same shape here, and the branch below
+    // treats absence as permission to CREATE — so a transient read failure
+    // makes a second lead for someone already in the CRM. There is no unique
+    // constraint on (org_id, email) to catch it downstream, so nothing does.
+    //
+    // Prefer the lead this conversation is ALREADY linked to. The window-based
+    // lookup above can only see what is still in the last 20 messages; the
+    // conversation's own lead_id is the durable answer and outlives it.
+    //
+    // On a failed dedupe read, `convLeadId` is the ONLY thing standing between
+    // us and a duplicate — so it is used, not discarded. My first version of
+    // this guard set `leadId = undefined` on error, wrote "fail closed" in a
+    // comment, and then fell straight through to the insert below with nothing
+    // to stop it: it created the duplicate it claimed to prevent, AND threw
+    // away the one identifier that could have avoided it.
+    let leadId = existingErr
+      ? (convLeadId ?? undefined)
+      : (existing?.[0]?.id ?? convLeadId ?? undefined);
+
+    if (existingErr && !leadId) {
+      // Genuinely cannot tell whether this person exists. Creating a record
+      // now risks a duplicate with a second alert and a second plan charge;
+      // skipping costs one turn, and the visitor's details are already on the
+      // conversation row, so the next message retries the whole block. Skip.
+      console.error(
+        `chat-agent: dedupe read failed for org ${org.id} and this conversation has no lead yet — ` +
+        `skipping capture this turn rather than risking a duplicate:`,
+        existingErr.message,
+      );
+      captureFailed = `could not check for an existing record: ${existingErr.message}`;
+    } else if (!leadId) {
       const leadName = name || email?.split("@")[0] || phone || "Website chat";
       // a chat lead has already engaged — count the turns so far
       const { score } = scoreLead({
@@ -499,16 +579,36 @@ Deno.serve(async (req) => {
       }).select("id").single();
 
       if (leadErr) {
-        // Loud, and visible to system-health, which already watches this org.
-        console.error(
-          `chat-agent: LEAD CAPTURE FAILED for org ${org.id} (${org.name}) — ` +
-          `${leadErr.code ?? "?"} ${leadErr.message}. Contact was: ` +
-          `${email ?? "no email"} / ${phone ?? "no phone"}`,
-        );
-        captureFailed = leadErr.message;
+        // A unique violation means someone else created this person between
+        // our dedupe read and our insert — a visitor with two tabs open, or a
+        // form submitted while the chat was running. That is not a capture
+        // failure: the record exists. Re-read and adopt it, so the
+        // conversation still gets linked and no alert is raised for a
+        // non-event. Without this, the partial unique index on
+        // (org_id, lower(email)) would turn a harmless race into a lost
+        // enquiry reported as a capture failure.
+        if (leadErr.code === "23505") {
+          let rq = supabase.from("leads").select("id").eq("org_id", org.id).is("deleted_at", null);
+          rq = email ? rq.eq("email", email) : rq.eq("phone", phone!);
+          const { data: raced } = await rq.limit(1);
+          if (raced?.[0]?.id) {
+            console.warn(`chat-agent: concurrent capture for org ${org.id}, adopted ${raced[0].id}`);
+            leadId = raced[0].id;
+          } else {
+            captureFailed = leadErr.message;
+          }
+        } else {
+          // Loud, and visible to system-health, which already watches this org.
+          console.error(
+            `chat-agent: LEAD CAPTURE FAILED for org ${org.id} (${org.name}) — ` +
+            `${leadErr.code ?? "?"} ${leadErr.message}. Contact was: ` +
+            `${email ?? "no email"} / ${phone ?? "no phone"}`,
+          );
+          captureFailed = leadErr.message;
+        }
       }
 
-      leadId = lead?.id;
+      leadId = leadId ?? lead?.id;
       if (leadId) {
         await supabase.from("activities").insert({
           org_id: org.id, lead_id: leadId, type: "system", content: "Lead captured by AI chat agent on the website.",
@@ -717,10 +817,42 @@ Deno.serve(async (req) => {
     console.error(`ALL MODELS FAILED for org ${org.id}; chain: ${chain.join(", ")}`);
   }
 
-  await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "assistant", content: reply });
+  // Both message inserts were unchecked. A refused insert leaves a hole in the
+  // transcript that the CRM and `GET /api/v1/conversations/:id` both display,
+  // and — because the next turn's history is read back from this table — the
+  // model loses the exchange and can repeat itself with no trace of why.
+  const { error: replyInsertErr } = await supabase.from("chat_messages")
+    .insert({ conversation_id: convId, org_id: org.id, role: "assistant", content: reply });
+  if (replyInsertErr) {
+    console.error(`chat-agent: could not store the reply for conversation ${convId}:`, replyInsertErr.message);
+  }
+
+  // Ask the table, rather than inferring from a capped page.
+  const { count: msgCount, error: countErr } = await supabase
+    .from("chat_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("conversation_id", convId);
+  const totalMessages = countErr ? null : (msgCount ?? null);
+  if (countErr) {
+    console.error(`chat-agent: could not count messages for conversation ${convId}:`, countErr.message);
+  }
+
   await supabase.from("conversations").update({
     last_message_at: new Date().toISOString(),
-    message_count: ((history?.length ?? 0) + 2),
+    // Counted at the source, not derived from the window.
+    //
+    // This was `history.length + 2`, an OVERWRITE computed from a read capped
+    // at 20 — so the number saturated at 22 no matter how long the
+    // conversation ran, and that is exactly where engagement starts to matter.
+    // `api/index.ts` hands this figure to customer integrations and the CRM
+    // shows it as conversation depth, so the metric a team would use to spot
+    // an engaged visitor was pinned at its ceiling.
+    //
+    // A `count: "exact", head: true` query asks the database how many rows
+    // there actually are; it cannot saturate and cannot be reset by a short
+    // read. If the count fails, the column is left alone rather than being
+    // stamped with a wrong number.
+    ...(totalMessages !== null ? { message_count: totalMessages } : {}),
   }).eq("id", convId);
 
   // capture_failed is surfaced deliberately. The widget ignores it, so the

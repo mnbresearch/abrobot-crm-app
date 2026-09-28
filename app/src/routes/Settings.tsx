@@ -5,12 +5,13 @@ import { getIndustry } from "../lib/industries";
 import { Card, Empty, Modal, useToast } from "../components/ui";
 import type { AgentConfig, FieldDef, FieldType, PipelineStage } from "../lib/types";
 
-type Tab = "industry" | "pipeline" | "fields" | "agent" | "install" | "usage";
+type Tab = "industry" | "pipeline" | "fields" | "scoring" | "agent" | "install" | "usage";
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "industry", label: "Industry", icon: "🏭" },
   { key: "pipeline", label: "Pipeline", icon: "🔀" },
   { key: "fields", label: "Fields", icon: "🧩" },
+  { key: "scoring", label: "Scoring", icon: "🎯" },
   { key: "agent", label: "AI Agent", icon: "🤖" },
   { key: "install", label: "Install Widget", icon: "🚀" },
   { key: "usage", label: "Plan & Usage", icon: "📊" },
@@ -362,6 +363,7 @@ export function Settings() {
       {tab === "industry" && <IndustryTab />}
       {tab === "pipeline" && <PipelineTab />}
       {tab === "fields" && <FieldsTab />}
+      {tab === "scoring" && <ScoringTab />}
       {tab === "agent" && <AgentTab />}
       {tab === "install" && <InstallTab />}
       {tab === "usage" && <UsageTab />}
@@ -575,6 +577,30 @@ function FieldsTab() {
   };
 
   const remove = async (id: string) => {
+    // One bare click deleted a field definition, and with it the only thing that
+    // renders `custom.<key>` anywhere: the value stays in each lead's `custom`
+    // JSON but disappears from every record page, from the list column, and from
+    // the CSV export — so data that is still in the database becomes
+    // unreachable through the product, with no undo and no warning. Same
+    // treatment as PipelineTab.remove above: count what is affected, say the
+    // number out loud, then ask.
+    const field = fields.find((f) => f.id === id);
+    if (!field || !org) return;
+    // Ask the database how many records actually carry a value for this key
+    // rather than guessing. head+count returns the number and no rows.
+    const { count, error: countErr } = await supabase
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id)
+      .not(`custom->>${field.key}`, "is", null);
+    // A failed count must not block the delete, but it must not be passed off as
+    // zero either — the confirm says the number is unknown and warns anyway.
+    const msg = countErr
+      ? `Delete "${field.label}"?\n\nWe couldn't check how many records have a value for this field (${countErr.message}). Any values already stored stay in the database but stop appearing on records, in the ${ui.leadNounPlural.toLowerCase()} list, and in exports. This cannot be undone from here.`
+      : (count ?? 0) > 0
+        ? `Delete "${field.label}"?\n\n${count} record(s) have a value for this field. The values are not deleted, but they will no longer appear on any record, as a column in the ${ui.leadNounPlural.toLowerCase()} list, or in your CSV exports — re-adding a field with the same key is the only way to see them again.`
+        : `Delete "${field.label}"? No records have a value for it. This cannot be undone.`;
+    if (!confirm(msg)) return;
     const { error } = await supabase.from("field_defs").delete().eq("id", id);
     if (error) { toast.error(error.message); return; }
     await refresh();
@@ -675,6 +701,212 @@ function AddField({ orgId, onClose, onSaved }: { orgId: string; onClose: () => v
         <button className="btn btn-primary" onClick={save}>Add</button>
       </div>
     </Modal>
+  );
+}
+
+// ── lead scoring ────────────────────────────────────────────────────────────
+
+/**
+ * The exact response shape of supabase/functions/rescore-leads/index.ts.
+ *
+ * Every field here is load-bearing for the report below, and `complete` and
+ * `aborted` are the two the function added specifically so a caller could stop
+ * reporting a truncated pass as a finished one. Reading `updated` and printing
+ * "done" would reintroduce that lie on this side of the wire.
+ */
+interface RescoreResult {
+  ok: boolean;
+  dry_run?: boolean;
+  complete: boolean;
+  aborted: string | null;
+  scanned: number;
+  updated: number;
+  unchanged?: number;
+  failed?: number;
+  failures?: string[];
+  activities_counted?: number;
+  next_cursor: string | null;
+  sample?: { id: string; name: string | null; was: number; now: number }[];
+}
+
+/**
+ * Re-run scoring.
+ *
+ * rescore-leads has existed, authenticated and documented, with zero callers in
+ * this app — so `leads.score` was written once at intake and never again. Two
+ * of its three largest terms are defined in ways that drift on their own:
+ * engagement counts activity that keeps accumulating, and intake proximity is
+ * measured from today, so a record scored "12 months out" quietly stops being
+ * that without anything touching the row. Those scores drive the score_above /
+ * score_below automation triggers and the colour of every score chip in the
+ * product, so stale is not cosmetic.
+ */
+function ScoringTab() {
+  const { ui } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [dryRun, setDryRun] = useState(true);
+  const [result, setResult] = useState<RescoreResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const run = async (after?: string | null) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      // Matches the function's parser exactly: `dry_run` boolean, optional
+      // `after` string cursor, and `limit` deliberately omitted — there it is a
+      // scan budget, and passing one guarantees `complete: false` on any org
+      // bigger than the number.
+      const body: { dry_run: boolean; after?: string } = { dry_run: dryRun };
+      if (after) body.after = after;
+      const r = await callFunction<RescoreResult>("rescore-leads", body);
+      setResult(r);
+    } catch (e) {
+      // The function answers 503 — which callFunction throws on — for the two
+      // cases where it refuses to write ANY score: the activity read failed, or
+      // it ran out of time while counting. Both are "nothing was changed", and
+      // neither may be shown as a success.
+      setResult(null);
+      setErr((e as Error).message);
+    }
+    setBusy(false);
+  };
+
+  const noun = ui.leadNounPlural.toLowerCase();
+
+  return (
+    <div className="stack">
+      <Card title="Re-run scoring">
+        <p className="sub" style={{ marginTop: -8, lineHeight: 1.8 }}>
+          Every {ui.leadNoun.toLowerCase()} is scored out of 100 when it arrives, and then never
+          again — but two of the things the score is made of move on their own. <b>Engagement</b>{" "}
+          counts logged calls, notes and messages, which keep accumulating after intake.{" "}
+          <b>Intake proximity</b> is measured from today, so "twelve months out" becomes "three
+          months out" with nobody touching the record. Re-running walks your whole organisation
+          and rewrites the scores that have moved.
+        </p>
+        <p className="sub" style={{ fontSize: 12.5, marginTop: 10, lineHeight: 1.8 }}>
+          Worth knowing before you press it: scores drive the <b>Score goes above…</b> and{" "}
+          <b>Score is below…</b> automation triggers. A large correction can therefore fire rules
+          on records that have been quiet for months. Preview first.
+        </p>
+
+        <label className="row" style={{ cursor: "pointer", gap: 8, marginTop: 14 }}>
+          <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} disabled={busy} />
+          <span style={{ fontWeight: 600 }}>Preview only — calculate but write nothing</span>
+        </label>
+
+        <div className="row" style={{ marginTop: 12 }}>
+          <button
+            className={`btn btn-primary${busy ? " btn-busy" : ""}`}
+            onClick={() => void run(null)}
+            disabled={busy}
+          >
+            {busy ? "Working…" : dryRun ? "Preview scores" : `Re-score all ${noun}`}
+          </button>
+        </div>
+      </Card>
+
+      {err && (
+        <Card>
+          <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
+            <span style={{ fontSize: 22 }}>⚠️</span>
+            <div>
+              <div style={{ fontWeight: 700 }}>The run was abandoned — no scores were changed</div>
+              <p className="sub" style={{ marginTop: 4, lineHeight: 1.8 }}>
+                {err}
+              </p>
+              <p className="sub" style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.8 }}>
+                Scoring refuses to write anything at all when it cannot finish counting activity
+                first — a partial count would push every score <i>down</i> by the full engagement
+                weight, which is worse than leaving them stale. Nothing has been half-rescored.
+                Try again; if it keeps failing on a large organisation, that is the time budget
+                rather than a fault.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {result && (
+        <Card title={result.dry_run ? "Preview — nothing was written" : "Result"}>
+          {/* Three separate questions, answered separately, because the
+              function is explicit that they are not the same one:
+              did it finish (complete), was it stopped (aborted), and did every
+              write land (failed). */}
+          <div className="sub" style={{ fontSize: 13, lineHeight: 2 }}>
+            <div>
+              <b>{result.scanned.toLocaleString("en-IN")}</b> {noun} looked at
+              {result.activities_counted !== undefined && (
+                <> · <b>{result.activities_counted.toLocaleString("en-IN")}</b> activities counted</>
+              )}
+            </div>
+            <div>
+              <b>{result.updated.toLocaleString("en-IN")}</b>{" "}
+              {result.dry_run ? "would change" : "rescored"}
+              {result.unchanged !== undefined && <> · {result.unchanged.toLocaleString("en-IN")} already correct</>}
+            </div>
+          </div>
+
+          {result.aborted ? (
+            <p style={{ color: "var(--red)", marginTop: 12, lineHeight: 1.8 }}>
+              <b>This pass did not finish:</b> {result.aborted}. The numbers above are what it
+              managed before stopping, not a total — the rest of your {noun} still carry their old
+              scores.
+            </p>
+          ) : !result.complete ? (
+            <p style={{ color: "var(--amber)", marginTop: 12, lineHeight: 1.8 }}>
+              <b>Partial pass.</b> It stopped before reaching the end of your {noun} — the numbers
+              above cover only what it reached. Continue below to pick up exactly where it stopped.
+            </p>
+          ) : (
+            <p className="sub" style={{ marginTop: 12, lineHeight: 1.8 }}>
+              Complete pass — every {ui.leadNoun.toLowerCase()} in your organisation was looked at.
+            </p>
+          )}
+
+          {!!result.failed && result.failed > 0 && (
+            <p style={{ color: "var(--red)", marginTop: 8, lineHeight: 1.8 }}>
+              {result.failed} write{result.failed === 1 ? "" : "s"} failed and{" "}
+              {result.failed === 1 ? "that record still has its old score" : "those records still have their old scores"}
+              {result.failures?.length ? `: ${result.failures[0]}` : ""}.
+            </p>
+          )}
+
+          {result.next_cursor && (
+            <button
+              className={`btn${busy ? " btn-busy" : ""}`}
+              style={{ marginTop: 12 }}
+              onClick={() => void run(result.next_cursor)}
+              disabled={busy}
+            >
+              {busy ? "Working…" : "Continue from where it stopped"}
+            </button>
+          )}
+
+          {!!result.sample?.length && (
+            <div className="table-wrap" style={{ marginTop: 14 }}>
+              <table className="data">
+                <thead><tr><th>Record</th><th>Was</th><th>{result.dry_run ? "Would be" : "Now"}</th></tr></thead>
+                <tbody>
+                  {result.sample.map((s) => (
+                    <tr key={s.id} style={{ cursor: "default" }}>
+                      <td style={{ fontWeight: 600 }}>{s.name || "—"}</td>
+                      <td className="sub">{s.was}</td>
+                      <td style={{ fontWeight: 600, color: s.now >= s.was ? "var(--green)" : "var(--amber)" }}>
+                        {s.now}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="sub" style={{ fontSize: 12, marginTop: 8 }}>
+                First ten changes only — a sample, not the full list.
+              </p>
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
   );
 }
 
@@ -953,16 +1185,52 @@ function AgentTab() {
             value={cfg.model ?? ""}
             onChange={(e) => set({ model: e.target.value || null })}
           >
-            <option value="">Platform default — recommended</option>
-            <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (default)</option>
-            <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (fallback)</option>
-            <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (fastest, least capable)</option>
+            {/* Only models the edge function will actually reach today.
+                chat-agent/index.ts builds its chain as
+                  [your choice ?? openai/gpt-oss-120b, openai/gpt-oss-20b]
+                so whatever is picked here goes FIRST. That is exactly why a
+                retired name must never be offered: this list carried
+                llama-3.1-8b-instant and qwen/qwen3.6-27b long after Groq shut
+                the first one down (2026-08-16, the same day as
+                llama-3.3-70b-versatile) — and an org that picked it paid a
+                404 on the first call of EVERY message before the fallback
+                answered. A stale dropdown is not a cosmetic problem when the
+                dropdown decides what gets tried first. */}
+            <option value="">Platform default — recommended, we keep it current</option>
+            <option value="openai/gpt-oss-120b">openai/gpt-oss-120b — today's default</option>
+            <option value="openai/gpt-oss-20b">openai/gpt-oss-20b — smaller and cheaper, today's fallback</option>
+            {/* Keep whatever is actually stored selectable, even when it is a
+                model we no longer offer.
+                A `<select>` with no matching `<option>` silently displays the
+                FIRST option, so an org still pinned to llama-3.1-8b-instant
+                would have been shown "Platform default — recommended" while
+                the row kept the retired name and chat-agent kept putting it
+                first in the chain. The screen would have asserted the exact
+                opposite of the truth, for precisely the orgs this change was
+                written for. Say it out loud instead, so it can be changed. */}
+            {cfg.model && !["openai/gpt-oss-120b", "openai/gpt-oss-20b"].includes(cfg.model) && (
+              <option value={cfg.model}>
+                {cfg.model} — no longer available, change this
+              </option>
+            )}
           </select>
+          {cfg.model && !["openai/gpt-oss-120b", "openai/gpt-oss-20b"].includes(cfg.model) && (
+            <p className="sub" style={{ fontSize: 12.5, marginTop: 6, color: "var(--amber)" }}>
+              <b>{cfg.model}</b> has been withdrawn by the provider. Every message is currently
+              paying a failed request before falling through to a working model — replies are
+              slower than they should be. Switch to the platform default above.
+            </p>
+          )}
           <p className="sub" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
-            Leave on the default unless you have a reason. If a model is retired by
-            the provider, the assistant automatically falls through to the next one
-            in the list rather than going down — which is what happened in August
-            2026, when a hardcoded model was withdrawn and every agent broke at once.
+            <b>Leave this on the platform default.</b> Left unset, we point your assistant at
+            whatever model is current and move it when a provider retires one — you never
+            have to come back to this screen. Pin a model here and it is tried <b>first</b>,
+            ahead of our fallback: if that model is later withdrawn, every single message
+            pays a failed request before falling through, so replies get slower rather than
+            stopping, and nothing on this screen would tell you. Both names above are live
+            on Groq today; if one is withdrawn the assistant falls through to the other
+            rather than going down, which is what saved it in August 2026 when a single
+            hardcoded model was withdrawn and every agent broke at once.
           </p>
         </div>
 
@@ -1060,6 +1328,7 @@ const WIDGET_BASE = (import.meta.env.VITE_WIDGET_BASE ?? "https://crm.mnbresearc
 function InstallTab() {
   const { org, ui } = useApp();
   const [copied, setCopied] = useState<string | null>(null);
+  const toast = useToast();
 
   // `org?.slug ?? "your-org"` rendered a literally broken snippet whenever the
   // store had not loaded, with the Copy button fully enabled next to it — so
@@ -1070,9 +1339,19 @@ function InstallTab() {
   const webhook = `${import.meta.env.VITE_SUPABASE_URL ?? "https://pomsltnrxvbcafwtbtlc.supabase.co"}/functions/v1/lead-webhook?key=YOUR_KEY`;
 
   const copy = async (text: string, which: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopied(which);
-    setTimeout(() => setCopied(null), 2000);
+    // writeText rejects on a denied clipboard permission, in a non-secure
+    // context, or when the document isn't focused — and this was called as
+    // `void copy(...)`, so the rejection went nowhere: the button did not change
+    // to "✓ Copied", nothing was on the clipboard, and no message appeared. The
+    // admin presses it, pastes into their site's footer, and publishes whatever
+    // was on the clipboard before. Same wrapping as Integrations.tsx's copy().
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(which);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      toast.error("Couldn't copy — select the line above and copy it manually");
+    }
   };
 
   return (
@@ -1123,6 +1402,8 @@ function InstallTab() {
           shapes) is detected automatically.
         </p>
       </Card>
+      {/* Without this the copy failure above would have nowhere to render. */}
+      {toast.node}
     </div>
   );
 }

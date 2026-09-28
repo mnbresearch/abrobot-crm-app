@@ -22,7 +22,13 @@ export interface Mergeable {
 export function firstName(name?: string | null, email?: string | null): string {
   const n = (name || "").trim().split(/\s+/)[0];
   if (n && !/^[\d+\-() ]+$/.test(n)) return n;
-  const e = (email || "").split("@")[0].replace(/[._\-+].*$/, "");
+  // .trim() on the email branch too. Without it a whitespace-only address —
+  // "   " — produced e = "   ", which is truthy and not all-digits, so it was
+  // returned as the greeting: "Hi   ,". This function's whole promise is that
+  // the greeting is never empty, and the name branch trims while the email
+  // branch did not. lead-webhook happens to null a blank address via EMAIL_RE,
+  // but CSV import, chat-agent and manual entry do not all pass through it.
+  const e = (email || "").trim().split("@")[0].replace(/[._\-+].*$/, "");
   if (e && !/^\d+$/.test(e)) return e.charAt(0).toUpperCase() + e.slice(1);
   return "there";
 }

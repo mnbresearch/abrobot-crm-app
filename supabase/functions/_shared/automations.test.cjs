@@ -89,5 +89,42 @@ t('describeAutomation is human readable',()=>{
   assert(s.includes('no contact for 48 hours')&&s.includes('source is whatsapp')&&s.includes('move to contacted'),s);
 });
 t('inCooldown handles null',()=>assert(!inCooldown(null,24,NOW)));
+
+// ── A rule with no comparison value must be INERT ───────────────────────────
+//
+// This was the sharpest live bug in the engine. `Number("")` and `Number(null)`
+// are both 0, so `bothNumeric` held and
+//
+//     { field: 'score', op: 'gt', value: '' }
+//
+// evaluated as `score > 0` — true for essentially every lead in the database.
+// The Automations UI posts "" when the value box is left blank, so a rule saved
+// half-finished became "match everyone", behind actions like assign, tag, move
+// stage and notify. On a large tenant that is a mass reassignment and a mass
+// notification, from a rule that looks correctly configured on screen.
+//
+// Every assertion here fails against the pre-fix code.
+t('blank value is inert for gt',()=>assert(!testCondition({score:60},{field:'score',op:'gt',value:''})));
+t('blank value is inert for gte',()=>assert(!testCondition({score:60},{field:'score',op:'gte',value:''})));
+t('blank value is inert for lt',()=>assert(!testCondition({score:0},{field:'score',op:'lt',value:''})));
+t('blank value is inert for lte',()=>assert(!testCondition({score:0},{field:'score',op:'lte',value:''})));
+t('blank value is inert for eq',()=>assert(!testCondition({score:0},{field:'score',op:'eq',value:''})));
+t('blank value is inert for neq',()=>assert(!testCondition({score:5},{field:'score',op:'neq',value:''})));
+t('blank value is inert for contains',()=>assert(!testCondition({name:'Asha'},{field:'name',op:'contains',value:''})));
+t('null value is inert',()=>assert(!testCondition({score:60},{field:'score',op:'gt',value:null})));
+t('undefined value is inert',()=>assert(!testCondition({score:60},{field:'score',op:'gt',value:undefined})));
+t('a whole rule with a blank condition does not fire',()=>
+  assert(!conditionsPass({score:99,name:'Asha'},[{field:'score',op:'gt',value:''}])));
+
+// The other half of the same fix: 0 and "0" are REAL comparison values and had
+// to keep working. A `!c.value` test would have broken "score greater than 0",
+// which is a rule people actually write.
+t('zero is a real comparison value',()=>assert(testCondition({score:60},{field:'score',op:'gt',value:0})));
+t('"0" string is a real comparison value',()=>assert(testCondition({score:60},{field:'score',op:'gt',value:'0'})));
+t('zero still excludes an equal score',()=>assert(!testCondition({score:0},{field:'score',op:'gt',value:0})));
+t('eq against 0 still works',()=>assert(testCondition({score:0},{field:'score',op:'eq',value:0})));
+t('is_empty ignores the value entirely',()=>assert(testCondition({name:''},{field:'name',op:'is_empty',value:''})));
+t('not_empty ignores the value entirely',()=>assert(testCondition({name:'Asha'},{field:'name',op:'not_empty',value:''})));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase, callFunction } from "../lib/supabase";
-import { Card, FieldInput, Modal, ScoreChip, Spinner, StagePill, cellValue, humanize, timeAgo, useToast } from "../components/ui";
+import { Card, FieldInput, LoadError, Modal, ScoreChip, Spinner, StagePill, cellValue, humanize, timeAgo, useToast } from "../components/ui";
 import { IndustryTool } from "../components/IndustryTool";
 import type { Activity, Lead } from "../lib/types";
 
@@ -26,6 +26,11 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const toast = useToast();
 
   const [loadError, setLoadError] = useState<string | null>(null);
+  // The activities read had its own error discarded entirely, so a failure
+  // rendered "Nothing logged yet." on a customer record — the one sentence on
+  // this page people act on. Someone reading it calls a customer who was called
+  // yesterday, or re-sends a proposal that already went out.
+  const [actsError, setActsError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,7 +44,11 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (l.error && l.error.code !== "PGRST116") setLoadError(l.error.message);
     else setLoadError(null);
     setLead((l.data as Lead) ?? null);
-    setActs((a.data as Activity[]) ?? []);
+    // The lead and its history are two separate reads: the record can arrive
+    // while its history does not, and in that case the history must say so
+    // rather than render as an absence of history.
+    if (a.error) setActsError(a.error.message);
+    else { setActsError(null); setActs((a.data as Activity[]) ?? []); }
     setLoading(false);
   }, [id]);
 
@@ -137,22 +146,29 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   // Every write surfaces its error. A save that silently fails while the UI
   // says it worked is worse than an error message — the user walks away
   // believing the record is updated.
-  const log = async (type: Activity["type"], content: string) => {
-    if (!lead || !org) return;
+  //
+  // Returns whether the write landed. Callers need that: useToast REPLACES the
+  // visible toast rather than queueing, so a caller that toasted a success
+  // after this failed wiped the error off the screen in the same tick and left
+  // the user with a confirmation of something that did not happen.
+  const log = async (type: Activity["type"], content: string): Promise<boolean> => {
+    if (!lead || !org) return false;
     const { error } = await supabase.from("activities").insert({
       org_id: org.id, lead_id: lead.id, user_id: profile?.id ?? null, type, content,
     });
-    if (error) { toast.error(error.message); return; }
+    if (error) { toast.error(error.message); return false; }
     // "Last contacted" drives the follow-up queue, so a silent failure here
     // means someone gets chased twice or not at all.
     const { error: touchErr } = await supabase.from("leads")
       .update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id);
     if (touchErr) console.warn("could not update last_contacted_at:", touchErr.message);
     await load();
+    return true;
   };
 
-  const moveStage = async (key: string) => {
-    if (!lead) return;
+  // Also returns whether the move landed, for the same reason as `log`.
+  const moveStage = async (key: string): Promise<boolean> => {
+    if (!lead) return false;
     const label = stages.find((s) => s.key === key)?.label ?? key;
     const previous = lead;
 
@@ -170,10 +186,11 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (error) {
       setLead(previous);
       toast.error(error.message);
-      return;
+      return false;
     }
     await log("stage_change", `Moved to ${label}.`);
     toast.show(`Moved to ${label}`);
+    return true;
   };
 
   const addTag = async (tag: string) => {
@@ -454,8 +471,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
                 // logging nothing. A law firm would believe a proposal had gone
                 // out. These are still not *sending* anything — that needs the
                 // Email button above — but they now leave a truthful trace.
-                if (a.toStage) await moveStage(a.toStage);
-                if (a.logAs) await log(a.logAs, `${a.label}.`);
+                // Bail on the first failure instead of toasting success over it.
+                // moveStage/log already toast their own error, and useToast
+                // replaces the visible toast rather than queueing — so the old
+                // unconditional toast.show(a.label) overwrote the error within
+                // the same click. A rejected stage move (RLS, dropped
+                // connection) ended with "Send proposal" on screen and the card
+                // rolled back to where it started.
+                if (a.toStage && !(await moveStage(a.toStage))) return;
+                if (a.logAs && !(await log(a.logAs, `${a.label}.`))) return;
                 if (a.toStage || a.logAs) toast.show(a.label);
               }}
             >
@@ -525,7 +549,11 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
           <button className="btn btn-primary" onClick={addNote} disabled={!note.trim()}>Add</button>
         </div>
 
-        {acts.length === 0 ? (
+        {/* Error before empty. "Nothing logged yet." is a statement about this
+            customer's history, and off a failed read it is a false one. */}
+        {actsError ? (
+          <LoadError message={actsError} onRetry={() => void load()} />
+        ) : acts.length === 0 ? (
           <p className="sub">Nothing logged yet.</p>
         ) : (
           <div>

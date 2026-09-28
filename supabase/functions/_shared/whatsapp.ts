@@ -150,13 +150,39 @@ export async function sendWhatsAppText(
   }
 }
 
-/** Fetch just the WhatsApp config for an org. */
+/**
+ * Fetch just the WhatsApp config for an org.
+ *
+ * Returns `null` when the config could not be READ, which is a different fact
+ * from "this org has no WhatsApp set up" and must not be collapsed into it.
+ *
+ * It was collapsed into it. This discarded `error` and returned `{}`, and an
+ * empty config is exactly the shape `resolveWhatsAppCredentials` treats as
+ * "no tenant credentials, use the platform pair" — so a transient failure
+ * reading `agent_config` sent the tenant's message from the PLATFORM's number,
+ * under the platform's verified business name, billed to the platform's Meta
+ * account, and `sendWhatsAppText` returned `{ sent: true }`.
+ *
+ * That is the precise outcome the credential-pairing rule was written to
+ * prevent, reached through a second door. `.single()` also errors with
+ * PGRST116 when there is simply no row — a normal state for an org that has
+ * never opened Settings — so `.maybeSingle()` is what distinguishes the two.
+ */
 // deno-lint-ignore no-explicit-any
-export async function getWhatsAppConfig(supabase: any, orgId: string): Promise<WhatsAppConfig> {
-  const { data } = await supabase
+export async function getWhatsAppConfig(
+  supabase: any,
+  orgId: string,
+): Promise<WhatsAppConfig | null> {
+  const { data, error } = await supabase
     .from("agent_config")
     .select("whatsapp_token, whatsapp_phone_id, whatsapp_autoreply")
     .eq("org_id", orgId)
-    .single();
+    .maybeSingle();
+
+  if (error) {
+    console.error(`getWhatsAppConfig: could not read config for org ${orgId}:`, error.message);
+    return null;
+  }
+  // No row is a real answer: this org has configured nothing.
   return data ?? {};
 }

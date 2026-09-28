@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, useToast } from "../components/ui";
+import { Card, Empty, useToast } from "../components/ui";
 
 // CSV import. Parsing is done here rather than pulling in a library — the
 // format is simple and a dependency for one screen isn't worth it. Handles
@@ -69,7 +69,7 @@ function guess(header: string): string {
 const MAX_ROWS = 1000;
 
 export function Import({ navigate }: { navigate: (to: string) => void }) {
-  const { org, ui, profile, stages, fields } = useApp();
+  const { org, ui, profile, stages, fields, isAdmin } = useApp();
   const [rows, setRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<string[]>([]);
   const [filename, setFilename] = useState("");
@@ -307,6 +307,24 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
     setResult({ inserted, duplicates, failed, rejected, notAttempted, rejectReason });
   };
 
+  // NAV marks /import adminOnly, but that only hides the sidebar link — the
+  // route itself was reachable by typing the URL, from a bookmark, or from a
+  // link a colleague pasted, and a counsellor landing here could write
+  // thousands of records into the org. Automations, Integrations, Settings and
+  // the Platform console all check the role in the component for exactly this
+  // reason; this screen was the one that did not. Same shape as those four.
+  if (!isAdmin) {
+    return (
+      <Card>
+        <Empty
+          icon="🔒"
+          title="Admins only"
+          hint={`Importing writes ${ui.leadNounPlural.toLowerCase()} into everyone's pipeline, so only admins can do it. Ask an admin to run the import for you.`}
+        />
+      </Card>
+    );
+  }
+
   // A bare <Spinner/> for the whole screen told someone importing 5,000 rows
   // nothing at all for the better part of a minute — indistinguishable from a
   // hang, and the obvious response is to reload, which abandons the import
@@ -430,12 +448,30 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
         </Card>
       ) : rows.length === 0 ? (
         <Card>
+          {/* A <div onClick> with the real <input type="file"> at
+              display:none was not reachable by keyboard at all: nothing here
+              could take focus, so the only way to start an import was a mouse.
+              For anyone using a keyboard or a screen reader, CSV import — the
+              way a customer's existing data gets into this product — did not
+              exist. role/tabIndex/Enter+Space give it the semantics the button
+              it looks like already has. */}
           <div
+            role="button"
+            tabIndex={0}
+            aria-label="Choose a CSV file to import, or drop one here"
             style={{
               border: "2px dashed var(--border)", borderRadius: 14, padding: 42,
               textAlign: "center", cursor: "pointer",
             }}
             onClick={() => fileRef.current?.click()}
+            onKeyDown={(e) => {
+              // Space as well as Enter, because a role="button" is expected to
+              // answer to both; preventDefault stops Space scrolling the page.
+              if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+                e.preventDefault();
+                fileRef.current?.click();
+              }
+            }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) void onFile(f); }}
           >
@@ -443,6 +479,10 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
             <div style={{ fontWeight: 700, marginTop: 9 }}>Drop a CSV here, or click to choose</div>
             <p className="sub" style={{ marginTop: 5 }}>
               First row should be column headers. We'll match them up automatically.
+            </p>
+            {/* Says the keyboard route out loud — it is invisible otherwise. */}
+            <p className="sub" style={{ fontSize: 12, marginTop: 5 }}>
+              Keyboard: tab to this box and press Enter or Space to choose a file.
             </p>
           </div>
           <input

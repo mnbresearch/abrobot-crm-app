@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase, callFunction } from "../lib/supabase";
-import { Card, Empty, Modal, Spinner, useToast } from "../components/ui";
+import { Card, Empty, LoadError, Modal, Spinner, useToast } from "../components/ui";
 
 // Templates, and the two things that make them more than a notepad:
 //
@@ -47,6 +47,10 @@ export function Templates() {
   const { org, ui, isAdmin, stages, fields } = useApp();
   const [rows, setRows] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
+  // Held in state, not just toasted. A toast is gone in 3.2 seconds and leaves
+  // "No templates yet" on screen — which an org with 40 templates reads as
+  // "our templates are gone". The error has to outlive the toast.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Partial<Template> | null>(null);
   const [nurtureOn, setNurtureOn] = useState<boolean | null>(null);
   const [sending, setSending] = useState<Template | null>(null);
@@ -70,8 +74,8 @@ export function Templates() {
       .map((k) => k.segment).filter((s): s is string => !!s))].sort());
     // An unread error here showed "No templates yet" AND reported automatic
     // follow-up as Off — two confident falsehoods from one failed request.
-    if (tpl.error) toast.error(`Could not load templates: ${tpl.error.message}`);
-    else setRows((tpl.data as Template[]) ?? []);
+    if (tpl.error) { setLoadError(tpl.error.message); toast.error(`Could not load templates: ${tpl.error.message}`); }
+    else { setLoadError(null); setRows((tpl.data as Template[]) ?? []); }
     // null, not false, when we genuinely do not know — the card below
     // distinguishes "off" from "unknown" rather than asserting.
     setNurtureOn(cfg.error ? null : (cfg.data?.nurture_enabled ?? false));
@@ -165,6 +169,12 @@ export function Templates() {
   };
 
   if (loading) return <Spinner />;
+  // Before anything below renders, because a failed templates read makes two
+  // separate assertions false at once: the empty state says "No templates yet",
+  // and the follow-up card says "no follow-up messages are written yet, so
+  // nothing is being sent." Both read as facts about the org's data. Same
+  // early-return shape as Archived and Leads.
+  if (loadError) return <LoadError message={loadError} onRetry={() => void load()} />;
 
   return (
     <div className="stack">

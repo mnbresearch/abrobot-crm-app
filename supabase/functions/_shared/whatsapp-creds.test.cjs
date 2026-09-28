@@ -8,24 +8,68 @@
 // resolveWhatsAppCredentials() is the whole boundary, so it is tested here on
 // its own rather than through a live send.
 
-const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const ROOT = "/sessions/serene-focused-planck/mnt/abrobot-crm-app";
+// Same resolver the three older suites use. The first version of this file
+// shelled out to `npx --yes esbuild@0.23.1`, which downloads from the network
+// at test time — so the suite could fail for a reason that has nothing to do
+// with the code, and CI's own `Install esbuild` step was bypassed entirely.
+function loadEsbuild() {
+  const candidates = [
+    "esbuild",
+    path.join(__dirname, "..", "..", "..", "app", "node_modules", "esbuild"),
+    path.join(__dirname, "..", "..", "..", "node_modules", "esbuild"),
+    "/tmp/node_modules/esbuild",
+  ];
+  for (const c of candidates) {
+    try {
+      const mod = require(c);
+      mod.transformSync("const a = 1;", { loader: "ts" });
+      return mod;
+    } catch (_) { /* next */ }
+  }
+  console.log("SKIP " + path.basename(__filename) + " — no usable esbuild for this platform. Run `npm ci` in app/.");
+  process.exit(0);
+}
+const es = loadEsbuild();
+
+// Resolved from this file's own location, never hardcoded.
+//
+// The first version of this file pinned an absolute sandbox path. Two failures
+// came out of that, and the second is the worse one:
+//   1. On CI the path does not exist, so the suite errored and the tests job
+//      went red on every push — a permanently-red build is the same as no
+//      build, because everyone learns to ignore it.
+//   2. On a machine where the path DID exist, the suite read the file at that
+//      fixed location rather than the one in the checkout. It reported PASS
+//      about a different copy of the repository than the one being built.
+// The three older suites in this directory already did it this way.
+const ROOT = path.join(__dirname, "..", "..", "..");
 const SRC = path.join(ROOT, "supabase/functions/_shared/whatsapp.ts");
 
+// buildSync, not transformSync: whatsapp.ts imports ./http.ts, so the module
+// graph has to be resolved. Uses the esbuild resolved above rather than a
+// download, and writes to a temp dir so nothing lands in the repo.
 let bundle;
 try {
   const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wa-")), "b.cjs");
-  execFileSync("npx", ["--yes", "esbuild@0.23.1", SRC,
-    "--bundle", "--format=cjs", "--platform=node",
-    "--outfile=" + out], { stdio: ["ignore", "ignore", "pipe"] });
+  es.buildSync({
+    entryPoints: [SRC],
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    outfile: out,
+    logLevel: "silent",
+  });
   bundle = out;
 } catch (e) {
-  console.log("SKIP - esbuild could not bundle whatsapp.ts: " + e.message);
-  process.exit(0);
+  // A bundling failure here is a REAL failure — the module under test did not
+  // compile. Exiting 0 with "SKIP" would hide a broken import behind a word CI
+  // reserves for a missing toolchain. Fail loudly instead.
+  console.log("FAILED - could not bundle whatsapp.ts: " + e.message);
+  process.exit(1);
 }
 
 // The module reads Deno.env at import time.

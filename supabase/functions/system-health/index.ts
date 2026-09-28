@@ -278,14 +278,41 @@ Deno.serve(async (req) => {
   if (!cronAuth.ok) return cronAuth.response!;
 
   const url = new URL(req.url);
-  const slug = url.searchParams.get("org");
   let alert = false;
   if (req.method === "POST") {
     try { alert = (await req.json())?.alert === true; } catch { /* cron sends nothing */ }
   }
 
+  // ── Whose health may this caller see? ───────────────────────────────────
+  //
+  // `requireCronOrMember` resolves `orgId` from the caller's TOKEN for a
+  // signed-in member, and leaves it undefined for the scheduler. That value
+  // was computed and then never used: the org came from `?org=` instead.
+  //
+  // So any counsellor in any tenant could read any other tenant's health by
+  // changing one query parameter — and omitting it entirely returned every
+  // organisation on the platform. What leaks is not trivial: `checkSecurity`
+  // reports how many credentials each org has stored and how many counsellors
+  // can read them, `checkIntake` reports their enquiry recency, and
+  // `checkAutomations` their failure counts. `POST {alert:true}` was worse
+  // still — it fired Telegram alerts into other tenants' chats and spent
+  // their Groq keys on a live completion per org.
+  //
+  // A member is pinned to their own org. The scheduler, which holds the cron
+  // secret rather than a user session, keeps the platform-wide view and may
+  // still narrow it with `?org=` for a targeted probe.
+  // A super_admin is a platform operator and keeps the cross-tenant view —
+  // this pins tenant members, it does not take a capability away from anyone
+  // who already had a legitimate reason for it. `role` comes from the token's
+  // profiles row inside requireCronOrMember, so it cannot be asserted by the
+  // request.
+  const isOperator = !cronAuth.orgId || cronAuth.role === "super_admin";
+  const pinnedOrgId = isOperator ? null : cronAuth.orgId;
+  const slug = isOperator ? url.searchParams.get("org") : null;
+
   let q = supabase.from("organizations").select("id, slug, name").eq("active", true);
-  if (slug) q = q.eq("slug", slug);
+  if (pinnedOrgId) q = q.eq("id", pinnedOrgId);
+  else if (slug) q = q.eq("slug", slug);
   const { data: orgs, error: orgsError } = await q;
 
   // An unchecked read here is the worst possible silent failure in this file:
@@ -363,7 +390,29 @@ Deno.serve(async (req) => {
     : `${orgCount} org(s) checked — ` + alarms.slice(0, 6).join("; ") +
       (alarms.length > 6 ? ` (+${alarms.length - 6} more)` : "");
 
-  await heartbeat(alarmOverall === "ok" ? "ok" : "warn", detail.slice(0, 500));
+  // ── Only the SCHEDULER may stamp the heartbeat ──────────────────────────
+  //
+  // This ran unconditionally, so every dashboard poll of the HealthCard reset
+  // `job_heartbeats.last_run_at` for system-health. The consequences compound:
+  // `stale_jobs()` and `watch_jobs()` measure lateness from that column, so a
+  // browser open anywhere on the platform kept the row fresh and the hourly
+  // cron job could have been 401ing for weeks with the board still green. That
+  // is exactly the eight-day silent outage the watchdog was built after — the
+  // monitor reporting on itself using a signal the monitored thing doesn't
+  // produce.
+  //
+  // I hit this myself: checking a deploy by calling this endpoint from the
+  // browser wrote a heartbeat and masked the real cron state I was trying to
+  // read.
+  //
+  // A per-org member call also wrote "1 org(s) checked", overwriting a
+  // platform-wide detail with a narrower one.
+  //
+  // run-automations already guards this ("a member clicking Test run is not
+  // evidence that cron is alive"); this is the same rule.
+  if (!cronAuth.orgId) {
+    await heartbeat(alarmOverall === "ok" ? "ok" : "warn", detail.slice(0, 500));
+  }
   return json({
     ok: true,
     status: overall,

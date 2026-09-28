@@ -60,8 +60,22 @@ export function HealthCard() {
     return () => { cancelled = true; };
   }, [org]);
 
+  // When the probe itself could not be reached, say so. Returning null here was
+  // the same bug this card was built to prevent, one level up: the card whose
+  // whole job is to break a silent outage went silent in a way that is pixel-for
+  // -pixel identical to "all checks passed". The 401 that hid a three-day agent
+  // outage would have hidden behind this too. One muted line, no alarm voice —
+  // it is not a fault report, it is an absence of one.
+  if (unavailable) {
+    return (
+      <p className="sub" style={{ fontSize: 12.5 }}>
+        Health checks unavailable — this is not a report that everything is fine.
+      </p>
+    );
+  }
+
   // Not deployed yet, or everything healthy → say nothing.
-  if (unavailable || !result || result.status === "ok") return null;
+  if (!result || result.status === "ok") return null;
 
   const failing = result.checks.filter((c) => c.level !== "ok");
   const isFail = result.status === "fail";

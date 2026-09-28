@@ -73,11 +73,31 @@ export async function notifyNewLead(
   lead: NewLeadAlert,
 ): Promise<AlertResult> {
   try {
-    const { data: cfg } = await supabase
+    // `.maybeSingle()`, and the error is CHECKED.
+    //
+    // This read decided everything below it while discarding `error`, so a
+    // refused read (RLS change, transient failure, a missing row under
+    // `.single()`) produced `cfg = null` and the next line returned
+    // `reason: "disabled"` — the word for a deliberate customer setting.
+    //
+    // Two consequences, both silent. Every org's new-lead alerts stop, and
+    // `run-actions.ts` only fails an automation when `reason === "error"`, so
+    // each rule still records `ok: true` in `automation_runs`. The board stays
+    // green while nobody is being told about any new enquiry.
+    const { data: cfg, error: cfgErr } = await supabase
       .from("agent_config")
       .select("notify_new_leads, telegram_bot_token, telegram_chat_id, brand_name")
       .eq("org_id", orgId)
-      .single();
+      .maybeSingle();
+
+    if (cfgErr) {
+      // console.error, not just a returned value: the one caller that reads
+      // this reason is run-actions, and lead-webhook puts it in an HTTP body
+      // that Meta and Zapier discard. A log line is the only thing that
+      // reaches a human here.
+      console.error(`notifyNewLead: could not read alert settings for org ${orgId}:`, cfgErr.message);
+      return { sent: false, reason: "error", detail: `alert settings unreadable: ${cfgErr.message}` };
+    }
 
     if (!cfg?.notify_new_leads) return { sent: false, reason: "disabled" };
 
@@ -99,7 +119,21 @@ export async function notifyNewLead(
     if (!r.ok) {
       // Telegram returns a JSON description that is genuinely useful
       // (chat not found, bot blocked, bad token) — surface it to the caller.
-      return { sent: false, reason: "error", detail: `telegram ${r.status}: ${await r.text()}` };
+      //
+      // Through scrubToken, though. This branch returned `await r.text()`
+      // raw while only the catch below scrubbed, and Telegram echoes the
+      // request in some error bodies. The detail travels into an HTTP
+      // response body, a browser toast and any log aggregator, so the one
+      // path that talks to Telegram when something is wrong was the one path
+      // that could hand out the bot token.
+      // Scrub FIRST, then slice. The other order truncates the body at 300
+      // characters and can cut through the middle of a bare `<id>:<token>` —
+      // leaving fewer than the 30 token characters the pattern requires, so
+      // the redaction never fires and up to 29 characters of the secret print.
+      // Redacting before truncating cannot have that failure mode.
+      const body = scrubToken(await r.text()).slice(0, 300);
+      console.error(`notifyNewLead: telegram ${r.status} for org ${orgId}: ${body}`);
+      return { sent: false, reason: "error", detail: `telegram ${r.status}: ${body}` };
     }
     return { sent: true };
   } catch (e) {
@@ -112,6 +146,24 @@ export async function notifyNewLead(
 // token to whatever renders the error — a webhook caller's response body, a
 // browser toast, a log aggregator. Never let the raw message through.
 export function scrubToken(msg: string): string {
-  return (msg || "").replace(/\/bot[0-9]+:[A-Za-z0-9_-]+/g, "/bot<redacted>")
-                    .replace(/[0-9]{8,10}:[A-Za-z0-9_-]{30,}/g, "<redacted>");
+  return (msg || "")
+    .replace(/\/bot[0-9]+:[A-Za-z0-9_-]+/g, "/bot<redacted>")
+    // `{8,10}` left the leading digit of an 11-digit bot id behind: a token
+    // `12345678901:AA...` matched only from the `2`, so the output was
+    // `1<redacted>` — a redaction that still printed part of the secret.
+    // Telegram ids are routinely 10-11 digits now and still growing, so the
+    // length guess had to go.
+    //
+    // The anchor is `[^0-9]`, NOT `[^0-9A-Za-z_-]`. I tried the wider class
+    // first, reasoning that it was a cleaner word boundary, and it was a
+    // strictly worse redaction than the bug it replaced: `bot<id>:<token>`
+    // with no leading slash — a shape Telegram echoes in some error bodies —
+    // stopped matching at all, so the ENTIRE token printed. Rule 1 above only
+    // catches the `/bot…` form, so nothing else covered it.
+    //
+    // Excluding only digits keeps the greedy behaviour that made the old
+    // pattern safe: it will happily start mid-identifier and consume a
+    // character or two of surrounding text, which is ugly and harmless. A
+    // redaction should fail towards redacting too much.
+    .replace(/(^|[^0-9])[0-9]{6,}:[A-Za-z0-9_-]{30,}/g, "$1<redacted>");
 }

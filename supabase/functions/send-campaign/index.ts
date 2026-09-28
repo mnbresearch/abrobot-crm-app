@@ -119,7 +119,8 @@ Deno.serve(async (req) => {
   // ── who we are sending as ─────────────────────────────────────────────────
   const [{ data: org }, { data: cfg }] = await Promise.all([
     admin.from("organizations").select("name, slug").eq("id", orgId).single(),
-    admin.from("agent_config").select("resend_api_key, brand_name, contact_url")
+    admin.from("agent_config")
+      .select("resend_api_key, resend_from, resend_reply_to, brand_name, contact_url")
       .eq("org_id", orgId).maybeSingle(),
   ]);
 
@@ -128,11 +129,30 @@ Deno.serve(async (req) => {
   const key = (cfg?.resend_api_key || "").trim() || PLATFORM_RESEND_KEY;
   if (!key) return json({ error: "Email sending is not configured yet. Add a Resend API key in Integrations." }, 503);
 
-  // The address must stay on our authenticated domain — a tenant's own domain
-  // is not SPF/DKIM-authorised for us and would fail outright — but the name
-  // and the reply address are theirs.
-  const from = `${brand.replace(/["<>\\]/g, "")} <${FROM_ADDRESS}>`;
-  const replyTo = (profile.email || "").trim() || null;
+  // ── The key and the From address must belong to the same account ────────
+  //
+  // On the PLATFORM key the address must stay on our authenticated domain — a
+  // tenant's own domain is not SPF/DKIM-authorised for us and would fail
+  // outright. But on a tenant's OWN key the opposite is true: their account
+  // has not verified OUR domain, so Resend rejected every message with a 403
+  // and "Sent 0 of 412" was the only symptom. `agent_config.resend_from`
+  // existed for this and was read by nothing.
+  //
+  // Same rule as nurture, deliberately — two send paths disagreeing about the
+  // sender is how one of them ends up quietly broken.
+  //
+  // WARN, do not refuse — see the longer note in nurture/index.ts. Refusing
+  // here would have blocked every campaign for every tenant with their own
+  // key the moment it deployed, because `resend_from` has never been written
+  // by anything and is NULL everywhere. Today's behaviour is preserved; the
+  // suspect combination is reported alongside the result instead.
+  const ownKey = (cfg?.resend_api_key || "").trim();
+  const ownFrom = (cfg?.resend_from || "").trim();
+  const senderMismatch = !!ownKey && !ownFrom;
+  const fromAddress = ownKey && ownFrom ? ownFrom : FROM_ADDRESS;
+  const from = `${brand.replace(/["<>\\]/g, "")} <${fromAddress}>`;
+  // An explicitly configured reply-to wins over the sending admin's own inbox.
+  const replyTo = (cfg?.resend_reply_to || "").trim() || (profile.email || "").trim() || null;
 
   // ── the plan's email allowance ────────────────────────────────────────────
   // Read once, up here, because BOTH paths below need it — the test send and
@@ -255,5 +275,18 @@ Deno.serve(async (req) => {
     await admin.rpc("consume_usage", { p_org_id: orgId, p_metric: "emails", p_amount: sent });
   }
 
-  return json({ ok: true, matched: recipients.length, sent, errors: errors.slice(0, 20) });
+  return json({
+    ok: true,
+    matched: recipients.length,
+    sent,
+    errors: errors.slice(0, 20),
+    // Named, not enforced. If the errors above are 403s, this is why.
+    ...(senderMismatch
+      ? {
+        sender_warning:
+          `Sent on your own Resend key but from ${FROM_ADDRESS}, because no sending address of ` +
+          "your own is set. If these were rejected, add your verified address in Integrations.",
+      }
+      : {}),
+  });
 });

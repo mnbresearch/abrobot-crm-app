@@ -144,8 +144,19 @@ Deno.serve(async (req) => {
   const key = new URL(req.url).searchParams.get("key");
   if (!key) return json({ ok: false, error: "missing ?key=" }, 401);
 
-  const { data: wk } = await supabase
-    .from("webhook_keys").select("org_id, source, segment, active").eq("key", key).single();
+  const { data: wk, error: wkErr } = await supabase
+    .from("webhook_keys").select("org_id, source, segment, active").eq("key", key).maybeSingle();
+
+  // 503 on a failed read, not 401. A discarded error made `wk` null and every
+  // database blip look like a permanently invalid key — and Zapier disables a
+  // webhook after repeated auth failures while Meta backs off hard on 401s, so
+  // a few seconds of trouble could silently detach a customer's lead source
+  // until someone noticed and re-enabled it by hand. 401 is now reserved for a
+  // key that genuinely resolved to nothing.
+  if (wkErr) {
+    console.error("lead-webhook: could not resolve capture key:", wkErr.message);
+    return json({ ok: false, error: "could not verify the key — please retry" }, 503);
+  }
   if (!wk?.active) return json({ ok: false, error: "invalid or inactive key" }, 401);
 
   if (req.method === "GET") {
@@ -156,9 +167,91 @@ Deno.serve(async (req) => {
   }
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
+  // ── Rate limit and payload cap ──────────────────────────────────────────
+  //
+  // This is the only fully public WRITE endpoint in the product and it had
+  // neither. The `?key=` is a capture key that ships in page source, and each
+  // unauthenticated POST performed a keys read, a dedupe read, an assignment
+  // load, a lead insert storing the ENTIRE body in `raw` with no size limit,
+  // an activity insert, a Telegram alert and — on the WhatsApp path — an
+  // outbound message. A loop with distinct emails exhausts the tenant's lead
+  // quota, floods their Telegram and bloats a 500 MB database through `raw`.
+  //
+  // chat-agent solved this and lead-webhook was never brought into line; this
+  // is the same call, the same fail-closed posture, placed before any write.
+  {
+    // ── Why the key is per-KEY, not per-IP ───────────────────────────────
+    //
+    // The obvious `lead:<org>:<ip>` is wrong for this endpoint in a way it is
+    // not wrong for chat-agent. Legitimate callers here are servers, not
+    // browsers: Zapier, IndiaMART, Meta Lead Ads and a customer's own website
+    // all arrive from a small set of shared addresses, so a per-IP bucket is
+    // really a per-PLATFORM bucket and one busy tenant on Zapier would 429
+    // every other tenant's leads.
+    //
+    // And the IP is not trustworthy enough to key on anyway: X-Forwarded-For
+    // is a chain, `[0]` is attacker-supplied (chat-agent uses it and is
+    // bypassable as a result), and `.pop()` collapses to the proxy whenever
+    // there is more than one hop — which would make the bucket a single
+    // 60/min allowance for the whole tenant.
+    //
+    // The capture key is the right unit. It is per-tenant, per-source, already
+    // revocable from Integrations, and it is the thing being abused if this
+    // endpoint is abused. The IP is appended only to separate distinct callers
+    // sharing one key; when it is absent or shared, the limit degrades to
+    // per-key, which is exactly the behaviour we want.
+    const fwd = req.headers.get("x-forwarded-for") || "";
+    const ip = fwd.split(",").pop()?.trim() || "noip";
+    const { data: rl, error: rlErr } = await supabase.rpc("hit_rate_limit", {
+      // 60/min. I first wrote 300 and justified it as "long before it
+      // exhausts a plan's lead quota", which was simply false: `max_leads` is
+      // 50 on free and 1,000 on Starter, so 300/min burns a free tenant's
+      // entire allowance in ten seconds and Starter's in three minutes —
+      // along with 300 Telegram alerts a minute and several MB into
+      // `leads.raw`. The limit has to be smaller than the thing it protects.
+      //
+      // 60/min is still an order of magnitude above any real intake rate for
+      // an SME — a busy ad campaign delivers a few leads a minute — and a
+      // legitimate bulk load belongs in CSV import, which has its own
+      // plan-aware pre-flight.
+      p_key: `lead:${key}:${ip}`, p_limit: 60, p_window_seconds: 60,
+    });
+    // Fail CLOSED: a database under load is exactly when an attack is most
+    // likely, and it must not be the condition that switches the limiter off.
+    if (rlErr) {
+      console.error("lead-webhook: rate limit check failed, refusing:", rlErr.message);
+      return json({ ok: false, error: "busy — please retry" }, 503);
+    }
+    if (rl?.allowed === false) {
+      return json({ ok: false, error: "too many requests" }, 429);
+    }
+  }
+
+  // Cap the body before parsing it. Content-Length is advisory (a chunked
+  // request omits it), so the parsed text is measured too — the point is to
+  // refuse before anything reaches `raw`.
+  const MAX_BODY_BYTES = 32 * 1024;
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (declared > MAX_BODY_BYTES) {
+    return json({ ok: false, error: "payload too large" }, 413);
+  }
+
   let body: unknown;
-  try { body = await req.json(); } catch {
+  try {
+    const text = await req.text();
+    if (text.length > MAX_BODY_BYTES) {
+      return json({ ok: false, error: "payload too large" }, 413);
+    }
+    body = JSON.parse(text);
+  } catch {
     return json({ ok: false, error: "invalid JSON" }, 400);
+  }
+
+  // A body of literal `null` is valid JSON, and `extractLead` reads properties
+  // off it — so `null`, `[]` or `"text"` threw a TypeError before any guard,
+  // producing a 500 that webhook senders retry against forever.
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return json({ ok: false, error: "expected a JSON object" }, 400);
   }
 
   const lead = extractLead(body, wk.source);
@@ -181,13 +274,36 @@ Deno.serve(async (req) => {
   }
   else if (lead.email) q = q.eq("email", lead.email);
   else q = q.eq("phone", lead.phone!);
-  const { data: existing } = await q.limit(1);
+  const { data: existing, error: existingErr } = await q.limit(1);
+
+  // An errored dedupe read is NOT "no duplicate found". `{ data: null, error }`
+  // is shaped exactly like "nothing matched", and the branch below reads
+  // absence as permission to CREATE — so a transient failure here produces a
+  // second record for someone already in the CRM, a second Telegram alert, a
+  // second WhatsApp autoreply and a second `consume_usage` charge. There is no
+  // unique index on (org_id, email) to catch it downstream, so nothing does.
+  //
+  // 503, not 500: this is retryable and the senders that call this endpoint
+  // (Meta, Zapier, IndiaMART) retry on 5xx, so the enquiry is not lost.
+  if (existingErr) {
+    console.error(`lead-webhook: duplicate check failed for org ${wk.org_id}:`, existingErr.message);
+    return json({ ok: false, error: "could not check for an existing record — please retry" }, 503);
+  }
 
   if (existing?.length) {
-    await supabase.from("activities").insert({
+    // On the dedupe path this activity row is the ONLY copy of what the person
+    // actually said — `raw: body` is stored on the create path alone. An
+    // unchecked insert therefore lost a real enquiry permanently while
+    // returning 200, so the sender never retried. Fail loudly instead; the
+    // dedupe path is idempotent, so a retry re-runs it safely.
+    const { error: actErr } = await supabase.from("activities").insert({
       org_id: wk.org_id, lead_id: existing[0].id, type: wk.source === "whatsapp" ? "whatsapp" : "note",
       content: "New inbound message via " + wk.source + ":\n" + lead.message,
     });
+    if (actErr) {
+      console.error(`lead-webhook: could not record the inbound message for lead ${existing[0].id}:`, actErr.message);
+      return json({ ok: false, error: "could not record the message — please retry" }, 503);
+    }
 
     // A returning enquirer used to have everything but the note discarded here.
     // That matters most for `segment`: someone who chatted to the widget first
@@ -200,23 +316,56 @@ Deno.serve(async (req) => {
     // leaving them where they are.
     const patch: Record<string, unknown> = { last_contacted_at: new Date().toISOString() };
 
-    const { data: before } = await supabase.from("leads")
-      .select("segment, custom").eq("id", existing[0].id).single();
+    // ── This read decides what gets OVERWRITTEN, so a failure must not look
+    //    like "the record was blank" ────────────────────────────────────────
+    //
+    // `error` was discarded. On any refusal `before` became null and both
+    // guards below inverted:
+    //   * `!before?.segment` → true, so `patch.segment` was set — overwriting
+    //     an existing, different segment and restarting a mid-sequence lead's
+    //     follow-up at step 1 with the wrong copy. That is the precise harm
+    //     the comment above forbids.
+    //   * `merged` started from `{}` instead of the stored object, so
+    //     `patch.custom` became ONLY the incoming keys and every custom field
+    //     already on the record was wiped. The merge that exists to preserve
+    //     data became the thing that destroyed it.
+    //
+    // Enrichment is skipped entirely on a failed read; `last_contacted_at`
+    // still lands, because that is true regardless and needs nothing from the
+    // row we could not see.
+    const { data: before, error: beforeErr } = await supabase.from("leads")
+      .select("segment, custom").eq("id", existing[0].id).maybeSingle();
 
-    if (wk.segment && !before?.segment) patch.segment = wk.segment;
+    if (beforeErr) {
+      console.error(
+        `lead-webhook: could not read lead ${existing[0].id} before enrichment — ` +
+        `skipping segment and custom-field merge to avoid overwriting stored data:`,
+        beforeErr.message,
+      );
+    } else {
+      if (wk.segment && !before?.segment) patch.segment = wk.segment;
 
-    const incoming = await resolveCustom(supabase, wk.org_id, lead.custom);
-    if (incoming) {
-      const merged = { ...(before?.custom ?? {}) } as Record<string, unknown>;
-      let changed = false;
-      for (const [k, v] of Object.entries(incoming)) {
-        const cur = merged[k];
-        if (cur === null || cur === undefined || cur === "") { merged[k] = v; changed = true; }
+      const incoming = await resolveCustom(supabase, wk.org_id, lead.custom);
+      if (incoming) {
+        const merged = { ...(before?.custom ?? {}) } as Record<string, unknown>;
+        let changed = false;
+        for (const [k, v] of Object.entries(incoming)) {
+          const cur = merged[k];
+          if (cur === null || cur === undefined || cur === "") { merged[k] = v; changed = true; }
+        }
+        if (changed) patch.custom = merged;
       }
-      if (changed) patch.custom = merged;
     }
 
-    await supabase.from("leads").update(patch).eq("id", existing[0].id);
+    // The update's error was discarded and the caller was told `ok: true`, so
+    // a refused write left the record looking stale and uncontacted in the CRM
+    // while the sending platform recorded a success and never retried. A 500
+    // is retryable and the dedupe path is idempotent, so a retry is safe.
+    const { error: updErr } = await supabase.from("leads").update(patch).eq("id", existing[0].id);
+    if (updErr) {
+      console.error(`lead-webhook: dedupe update failed for lead ${existing[0].id}:`, updErr.message);
+      return json({ ok: false, error: "could not update the existing record" }, 500);
+    }
     return json({ ok: true, deduped: true, lead_id: existing[0].id });
   }
 
@@ -269,6 +418,36 @@ Deno.serve(async (req) => {
   }).select("id").single();
 
   if (error) {
+    // ── Lost the race to create this person ────────────────────────────────
+    //
+    // The dedupe above is a read-then-insert, so two requests for the same new
+    // address can both read "nothing matched" and both insert. Today that
+    // silently produces two records; once the partial unique index on
+    // (org_id, lower(email)) is in place the loser gets 23505 instead — and
+    // without this branch that would be WORSE than the duplicate it prevents,
+    // because the enquiry would be dropped with a 500 rather than merged.
+    //
+    // A unique violation here is proof the person now exists, so re-read and
+    // treat it exactly as the dedupe path would have. This also closes the
+    // race on its own, before the index exists.
+    if (error.code === "23505") {
+      let dq = supabase.from("leads").select("id").eq("org_id", wk.org_id).is("deleted_at", null);
+      dq = lead.email ? dq.eq("email", lead.email) : dq.eq("phone", lead.phone!);
+      const { data: raced } = await dq.limit(1);
+      if (raced?.[0]?.id) {
+        console.warn(`lead-webhook: concurrent create for org ${wk.org_id}, merged into ${raced[0].id}`);
+        return json({ ok: true, deduped: true, lead_id: raced[0].id });
+      }
+      // Constraint fired but we cannot find the row — most likely a
+      // pre-existing MIXED-CASE record from before addresses were normalised,
+      // which `.eq` cannot see. Say so precisely rather than "could not save".
+      console.error(
+        `lead-webhook: unique violation for org ${wk.org_id} but no matching live record — ` +
+        `likely a historical row whose email casing differs. Merge it by hand.`,
+      );
+      return json({ ok: false, error: "this contact already exists in a form we could not match" }, 409);
+    }
+
     // api/index.ts gets this right and this function did not: a plan-limit
     // rejection returned 500, so the integration retried forever against a
     // condition that only a human can clear — while disclosing raw Postgres
@@ -308,7 +487,14 @@ Deno.serve(async (req) => {
     // subscription on Meta fees without anyone deciding to.
     const { data: waAllowed } = await supabase.rpc("plan_allows_whatsapp", { p_org_id: wk.org_id });
     const waCfg = await getWhatsAppConfig(supabase, wk.org_id);
-    if (waAllowed === true && waCfg.whatsapp_autoreply) {
+    // `null` = the config could not be read. Skip the autoreply rather than
+    // continue: an unreadable config resolves to the platform's own WhatsApp
+    // number, so "carry on" would mean auto-replying to a stranger under
+    // another business's verified name. Missing an autoreply is the cheaper
+    // failure, and getWhatsAppConfig has already logged why.
+    if (waCfg === null) {
+      console.error(`lead-webhook: skipping WhatsApp autoreply for org ${wk.org_id} — config unreadable`);
+    } else if (waAllowed === true && waCfg.whatsapp_autoreply) {
       const { data: orgRow } = await supabase.from("organizations")
         .select("name").eq("id", wk.org_id).single();
       const brand = orgRow?.name || "AbroBot";

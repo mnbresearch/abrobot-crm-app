@@ -92,7 +92,16 @@ Deno.serve(async (req) => {
     }, 402);
   }
 
+  // null means the config could not be READ — distinct from "nothing is set
+  // up". Falling through on a failed read would resolve to the platform
+  // credentials and send this tenant's message from the platform's number.
   const cfg = await getWhatsAppConfig(admin, profile.org_id);
+  if (cfg === null) {
+    return json({
+      ok: false,
+      error: "We couldn't read this organisation's WhatsApp settings just now. Nothing was sent — please try again.",
+    }, 503);
+  }
   const result = await sendWhatsAppText(cfg, lead.phone, text);
 
   if (!result.sent) {

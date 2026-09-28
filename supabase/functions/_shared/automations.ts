@@ -61,6 +61,29 @@ export function testCondition(lead: LeadLike, c: Condition): boolean {
   if (c.op === "is_empty") return raw === null || raw === undefined || raw === "";
   if (c.op === "not_empty") return !(raw === null || raw === undefined || raw === "");
 
+  // ── A rule with no comparison value is inert ────────────────────────────
+  //
+  // Every op below this line compares against c.value, so an absent value
+  // makes the rule meaningless. It did not read as meaningless: `Number("")`
+  // and `Number(null)` are both 0, so `bothNumeric` held and
+  //
+  //     { field: "score", op: "gt", value: "" }
+  //
+  // evaluated as `score > 0` — true for essentially every lead in the
+  // database. The Automations UI posts "" when the value box is left blank,
+  // so a half-finished rule saved by accident became "match everyone", and
+  // the actions behind it are things like assign, tag, move stage and notify.
+  // On a 10,000-lead tenant that is a mass reassignment and 10,000 alerts,
+  // from a rule that looks correctly configured on screen.
+  //
+  // The string branch further down already refuses to guess for ordering ops
+  // ("stays inert"); this applies the same judgement one level up, where it
+  // matters more.
+  //
+  // Deliberately `=== ""` / null / undefined rather than falsy: 0 and "0" are
+  // legitimate comparison values ("score greater than 0") and must keep working.
+  if (c.value === null || c.value === undefined || c.value === "") return false;
+
   // Numeric comparison when both sides look numeric, string compare otherwise.
   const bothNumeric = typeof raw !== "boolean" && raw !== null && raw !== undefined &&
     !Number.isNaN(Number(raw)) && !Number.isNaN(Number(c.value));

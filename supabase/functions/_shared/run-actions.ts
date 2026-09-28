@@ -196,9 +196,23 @@ async function runStep(
       if (!tag) return { error: "add_tag has no tag to add", fatal: false };
       const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
       if (tags.includes(tag)) return OK; // already there; nothing to write
+      const next = [...tags, tag];
       const { error } = await supabase.from("leads")
-        .update({ tags: [...tags, tag] }).eq("id", lead.id);
+        .update({ tags: next }).eq("id", lead.id);
       if (error) return { error: `add_tag failed: ${error.message || "unknown error"}` };
+
+      // Keep the in-memory lead in step with the row we just wrote.
+      //
+      // Without this, two rules tagging the same lead in one sweep both read
+      // the ORIGINAL tags array: the first writes ['vip','hot'], the second
+      // computes from ['vip'] again and writes ['vip','urgent'], destroying
+      // the first rule's tag. Both rules report success, `automation_runs`
+      // records two successful runs, and the only evidence is a missing tag
+      // nobody is looking for.
+      //
+      // This mirrors what the round-robin branch already does with
+      // `ctx.load` — the same class of stale-snapshot bug, solved the same way.
+      lead.tags = next;
       return OK;
     }
 
@@ -230,7 +244,23 @@ async function runStep(
       // token out of the detail and can hand back an empty string, which `??`
       // would pass through as success.
       if (!res.sent && res.reason === "error") {
-        return { error: res.detail || "telegram send failed" };
+        // NON-FATAL, deliberately.
+        //
+        // A failed alert is worth recording, but it must not abandon the rest
+        // of the rule. `[notify_telegram, set_stage, add_tag]` is a normal
+        // shape, and a default-fatal error here meant Telegram being briefly
+        // unreachable — or its config row being briefly unreadable — also
+        // stopped the stage move and the tag, which are CRM writes with
+        // nothing to do with Telegram.
+        //
+        // That became reachable the moment notify.ts started reporting a
+        // refused config read as `reason: "error"` instead of mislabelling it
+        // "disabled". Fixing the mislabel without this would have traded a
+        // silent alert failure for a silent loss of two database writes.
+        //
+        // `send_email_template` and the empty-`add_tag` case already take this
+        // posture for the same reason: the step failed, the rule did not.
+        return { error: res.detail || "telegram send failed", fatal: false };
       }
       return OK;
     }

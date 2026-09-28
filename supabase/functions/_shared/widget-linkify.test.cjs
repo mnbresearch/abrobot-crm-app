@@ -13,15 +13,38 @@
 const fs = require("fs");
 const path = require("path");
 
+// Resolved from this file's location. The first version hardcoded an absolute
+// sandbox path, which made this suite error on CI (turning the tests job red on
+// every push) and — worse, on a machine where the path resolved — read a
+// DIFFERENT copy of widget.js than the one being built, reporting PASS about
+// code that was not under test.
+const REPO_ROOT = path.join(__dirname, "..", "..", "..");
+
+// The widget is a plain browser script with no module system, so the function
+// under test is lifted out by source. `throw` on a miss rather than returning
+// something empty: a rename or reformat must fail loudly here, not silently
+// leave the XSS assertions running against nothing.
 function extractLinkify(file) {
+  if (!fs.existsSync(file)) {
+    throw new Error(
+      "widget source not found at " + file +
+      " — the suite resolves it from __dirname, so this means the repo layout moved.",
+    );
+  }
   const src = fs.readFileSync(file, "utf8");
   const start = src.indexOf("function linkify(t) {");
-  if (start < 0) throw new Error("linkify not found in " + file);
+  if (start < 0) {
+    throw new Error(
+      "linkify() not found in " + file + ". If it was renamed or reformatted, update this " +
+      "extractor — do not delete the assertions, they cover a live XSS fix.",
+    );
+  }
   let depth = 0, end = -1;
   for (let k = src.indexOf("{", start); k < src.length; k++) {
     if (src[k] === "{") depth++;
     else if (src[k] === "}") { depth--; if (depth === 0) { end = k + 1; break; } }
   }
+  if (end < 0) throw new Error("unbalanced braces while extracting linkify() from " + file);
   return eval("(" + src.slice(start, end) + ")");
 }
 
@@ -58,7 +81,7 @@ const ATTACKS = [
 ];
 
 for (const file of ["widget.js", "abrobot-crm-site-v15/widget.js"]) {
-  const abs = path.join("/sessions/serene-focused-planck/mnt/abrobot-crm-app", file);
+  const abs = path.join(REPO_ROOT, file);
   const linkify = extractLinkify(abs);
 
   for (const attack of ATTACKS) {
@@ -103,7 +126,7 @@ for (const file of ["widget.js", "abrobot-crm-site-v15/widget.js"]) {
 }
 
 // Root widget.js keeps the markdown extras.
-const rootLinkify = extractLinkify("/sessions/serene-focused-planck/mnt/abrobot-crm-app/widget.js");
+const rootLinkify = extractLinkify(path.join(REPO_ROOT, "widget.js"));
 check("bold still renders", rootLinkify("**hi**").includes("<strong>hi</strong>"));
 check("bullets still render", rootLinkify("- one").startsWith("•"));
 

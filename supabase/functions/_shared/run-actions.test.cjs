@@ -318,6 +318,101 @@ async function test(name, fn) {
     assert.ok(!db.calls.includes('leads.update'), 'no write when nothing changes');
   });
 
+  // ── Two rules tagging the same lead in one sweep must not lose a tag ──────
+  //
+  // `add_tag` read `lead.tags` and never wrote back to the in-memory lead, so
+  // the second rule in a batch recomputed from the ORIGINAL array: rule 1 wrote
+  // ['vip','hot'], rule 2 wrote ['vip','urgent'], and 'hot' was destroyed. Both
+  // rules reported success and `automation_runs` recorded two successful runs,
+  // so the only evidence was a missing tag nobody was looking for.
+  //
+  // The lead object is shared across executeActions calls within a sweep, which
+  // is what makes this reproducible here exactly as it happens in production.
+  await test('add_tag survives a second rule tagging the same lead', async () => {
+    const db = fakeDb();
+    const lead = { ...LEAD, tags: ['vip'] };
+
+    const r1 = await executeActions(db, 'org-1', lead, rule({ action: 'add_tag', value: 'hot' }), NOW);
+    const r2 = await executeActions(db, 'org-1', lead, rule({ action: 'add_tag', value: 'urgent' }), NOW);
+    assert.strictEqual(r1.ok, true);
+    assert.strictEqual(r2.ok, true);
+
+    const final = db.lastWrite('leads', 'update').tags;
+    assert.deepStrictEqual(
+      final.slice().sort(), ['hot', 'urgent', 'vip'],
+      'the second write must carry the first rule\'s tag too, got ' + JSON.stringify(final),
+    );
+    assert.deepStrictEqual(lead.tags.slice().sort(), ['hot', 'urgent', 'vip'],
+      'the in-memory lead must reflect what was written');
+  });
+
+  // Three rules, to be sure the fix accumulates rather than remembering one.
+  await test('add_tag accumulates across three rules', async () => {
+    const db = fakeDb();
+    const lead = { ...LEAD, tags: [] };
+    for (const v of ['a', 'b', 'c']) {
+      await executeActions(db, 'org-1', lead, rule({ action: 'add_tag', value: v }), NOW);
+    }
+    assert.deepStrictEqual(db.lastWrite('leads', 'update').tags, ['a', 'b', 'c']);
+  });
+
+  // A refused write must NOT update the in-memory lead — otherwise the next
+  // rule would build on a tag the database never accepted, and the mismatch
+  // would persist for the rest of the sweep.
+  await test('a refused add_tag leaves the in-memory lead untouched', async () => {
+    const db = fakeDb({ 'leads.update': 'permission denied' });
+    const lead = { ...LEAD, tags: ['vip'] };
+    const r = await executeActions(db, 'org-1', lead, rule({ action: 'add_tag', value: 'hot' }), NOW);
+    assert.strictEqual(r.ok, false, 'a refused write must fail the run');
+    assert.deepStrictEqual(lead.tags, ['vip'], 'must not record a tag the database rejected');
+  });
+
+  // ── A failed alert must not abandon the CRM writes behind it ──────────────
+  //
+  // `[notify_telegram, set_stage, add_tag]` is an ordinary rule. Telegram being
+  // briefly unreachable — or its config row briefly unreadable — must not stop
+  // the stage move and the tag, which have nothing to do with Telegram.
+  //
+  // This became reachable when notify.ts started reporting a refused config
+  // read as `reason: "error"` rather than mislabelling it "disabled": a
+  // default-fatal error there would have traded a silent alert failure for the
+  // silent loss of two database writes.
+  await test('a failed telegram alert does not stop later actions in the same rule', async () => {
+    const db = fakeDb();
+    telegramResult = { sent: false, reason: 'error', detail: 'alert settings unreadable' };
+    const lead = { ...LEAD, tags: [] };
+
+    const r = await executeActions(db, 'org-1', lead, rule(
+      { action: 'notify_telegram' },
+      { action: 'set_stage', value: 'contacted' },
+      { action: 'add_tag', value: 'hot' },
+    ), NOW);
+
+    assert.strictEqual(r.ok, false, 'the run is still reported as degraded');
+    assert.ok(/alert settings unreadable/.test(r.detail || ''), r.detail);
+
+    const writes = db.writes.filter((w) => w.table === 'leads' && w.op === 'update');
+    assert.ok(writes.some((w) => w.payload.stage_key === 'contacted' || w.payload.stage === 'contacted'),
+      'the stage move must still have happened: ' + JSON.stringify(writes));
+    assert.ok(writes.some((w) => Array.isArray(w.payload.tags) && w.payload.tags.includes('hot')),
+      'the tag must still have been added: ' + JSON.stringify(writes));
+
+    telegramResult = { sent: true };
+  });
+
+  await test('a genuinely fatal action still stops the rule', async () => {
+    // The counterpart: this must not have loosened everything. A refused DB
+    // write is fatal and must still halt the run.
+    const db = fakeDb({ 'leads.update': 'permission denied' });
+    const lead = { ...LEAD, tags: [] };
+    const r = await executeActions(db, 'org-1', lead, rule(
+      { action: 'set_stage', value: 'contacted' },
+      { action: 'add_tag', value: 'hot' },
+    ), NOW);
+    assert.strictEqual(r.ok, false);
+    assert.ok(!lead.tags.includes('hot'), 'the rule must not continue past a refused write');
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

@@ -31,27 +31,33 @@ export function Conversations({ navigate }: { navigate: (to: string) => void }) 
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [msgError, setMsgError] = useState<string | null>(null);
+  // Kept in state rather than only toasted: the toast is gone in 3.2 seconds
+  // and what remains on screen is "0 website chats" and "No conversations yet"
+  // — a claim about the org's data made out of a failed request.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<string | null>(null);
   const [summarising, setSummarising] = useState(false);
   const toast = useToast();
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!org) { setLoading(false); return; }   // never leave the spinner up forever
-    void (async () => {
-      const { data, error: loadErr } = await supabase
-        .from("conversations")
-        .select("*")
-        .eq("org_id", org.id)
-        .order("last_message_at", { ascending: false })
-        .limit(200);
-      setConvos((data as Conversation[]) ?? []);
-      // An unread error rendered an empty state, which reads as "you have
+    setLoading(true);
+    const { data, error: loadErr } = await supabase
+      .from("conversations")
+      .select("*")
+      .eq("org_id", org.id)
+      .order("last_message_at", { ascending: false })
+      .limit(200);
+    // An unread error rendered an empty state, which reads as "you have
     // none" rather than "we could not check".
-    if (loadErr) toast.error(`Could not load conversations: ${loadErr.message}`);
+    if (loadErr) { setLoadError(loadErr.message); toast.error(`Could not load conversations: ${loadErr.message}`); }
+    else { setLoadError(null); setConvos((data as Conversation[]) ?? []); }
     setLoading(false);
-    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [org]);
+
+  useEffect(() => { void load(); }, [load]);
 
   const open = useCallback(async (c: Conversation) => {
     setSelected(c);
@@ -93,6 +99,10 @@ export function Conversations({ navigate }: { navigate: (to: string) => void }) 
   };
 
   if (loading) return <Spinner />;
+  // Checked before the header, because the header itself asserts a number:
+  // "0 website chats" beside "No conversations yet" is a failed read wearing
+  // the clothes of a fact. Same early-return shape as Archived and Leads.
+  if (loadError) return <LoadError message={loadError} onRetry={() => void load()} />;
 
   return (
     <div className="stack">

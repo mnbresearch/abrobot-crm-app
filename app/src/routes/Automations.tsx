@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase, callFunction } from "../lib/supabase";
-import { Card, Empty, Modal, Spinner, timeAgo, useToast } from "../components/ui";
+import { Card, Empty, LoadError, Modal, Spinner, timeAgo, useToast } from "../components/ui";
+import type { Profile } from "../lib/types";
 
 // The automation builder.
 //
@@ -43,6 +44,14 @@ const TRIGGERS = [
 // the mangled phrasing you get from string-replacing a dropdown label.
 const ACTIONS = [
   { key: "assign_round_robin", label: "Assign to least-loaded member", needs: null, tpl: "assign to the least-loaded member" },
+  // run-actions.ts has implemented and unit-tested `assign_to` all along, and
+  // the builder never offered it — so "everything from the enquiry form goes to
+  // Priya" could not be expressed, and the only assignment rule anyone could
+  // write was round-robin. `value` is the member's profile id, passed straight
+  // into leads.assigned_to, which is why the picker below is a list of real
+  // members rather than a text box: trg_guard_lead_assignee rejects an id from
+  // another organisation, and a typed uuid is the one way to hit that.
+  { key: "assign_to", label: "Assign to a specific member", needs: "member", tpl: "assign to {v}" },
   { key: "set_stage", label: "Move to stage", needs: "stage", tpl: "move to {v}" },
   { key: "set_follow_up", label: "Schedule follow-up in… hours", needs: "number", tpl: "schedule a follow-up in {v} hours" },
   { key: "add_tag", label: "Add tag", needs: "text", tpl: 'add the tag "{v}"' },
@@ -96,18 +105,39 @@ const RECIPES = [
 export function Automations() {
   const { org, ui, stages, fields, isAdmin } = useApp();
   const [rows, setRows] = useState<Automation[]>([]);
+  // A toast lasts 3.2 seconds; "No automations yet" stays. On this screen that
+  // is a claim that nothing is currently acting on the org's records, which is
+  // exactly what an admin would check here before assuming a rule is off.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<Automation> | null>(null);
   const [testing, setTesting] = useState(false);
+  // Who `assign_to` can point at. Active members only: assigning to a disabled
+  // or still-pending profile writes a real id that no longer works a shift, and
+  // the rule then quietly parks records with nobody.
+  const [members, setMembers] = useState<Profile[]>([]);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const toast = useToast();
 
   const load = async () => {
     if (!org) { setLoading(false); return; }   // never leave the spinner up forever
     const { data, error: loadErr } = await supabase.from("automations").select("*").eq("org_id", org.id).order("created_at");
-    setRows((data as Automation[]) ?? []);
     // An unread error rendered an empty state, which reads as "you have
     // none" rather than "we could not check".
-    if (loadErr) toast.error(`Could not load automations: ${loadErr.message}`);
+    if (loadErr) { setLoadError(loadErr.message); toast.error(`Could not load automations: ${loadErr.message}`); }
+    else { setLoadError(null); setRows((data as Automation[]) ?? []); }
+
+    // Separate, and deliberately not fatal: a failed member read must not hide
+    // the rules. But it must not render as an empty picker either — an empty
+    // <select> reads as "this org has no team", and the honest answer is that
+    // we could not ask.
+    const { data: mem, error: memErr } = await supabase
+      .from("profiles").select("*").eq("org_id", org.id).order("full_name");
+    if (memErr) setMembersError(memErr.message);
+    else {
+      setMembersError(null);
+      setMembers(((mem as Profile[]) ?? []).filter((m) => m.status === "active"));
+    }
     setLoading(false);
   };
 
@@ -117,6 +147,26 @@ export function Automations() {
     if (!org || !editing) return;
     if (!editing.name?.trim()) { toast.error("Give the rule a name"); return; }
     if (!editing.actions?.length) { toast.error("Add at least one action"); return; }
+
+    // An assign_to with no member saves happily and then fails on every record
+    // it touches: run-actions.ts does String(step.value), so a missing value
+    // becomes the literal "null" and Postgres rejects it as an invalid uuid —
+    // a rule that looks armed in this list and has never once worked. The same
+    // reasoning applies to set_stage with nothing chosen.
+    const blank = editing.actions.find((a) => {
+      const spec = ACTIONS.find((x) => x.key === a.action);
+      if (!spec?.needs) return false;
+      return a.value === null || a.value === undefined || String(a.value).trim() === "";
+    });
+    if (blank) {
+      const spec = ACTIONS.find((x) => x.key === blank.action);
+      toast.error(
+        blank.action === "assign_to"
+          ? "Choose the member to assign to — a rule saved without one fails on every record."
+          : `Fill in the value for "${spec?.label ?? blank.action}".`,
+      );
+      return;
+    }
 
     const payload = {
       org_id: org.id,
@@ -196,6 +246,16 @@ export function Automations() {
     setTesting(false);
   };
 
+  /** A member id as a person, or an honest note that it is not one any more. */
+  const memberLabel = (id: string): string => {
+    if (!id) return "— nobody chosen —";
+    const m = members.find((x) => x.id === id);
+    if (m) return m.full_name || m.email;
+    // Either the member was disabled or removed, or the member read failed.
+    // Both matter here and they are not the same thing.
+    return membersError ? "a member we couldn't look up" : "someone no longer on the team";
+  };
+
   const describe = (a: Automation | Partial<Automation>): string => {
     const t = TRIGGERS.find((x) => x.key === a.trigger);
     const trig = t?.unit ? `${t.label.replace("…", "")} ${a.trigger_value} ${t.unit}` : t?.label ?? "";
@@ -207,7 +267,14 @@ export function Automations() {
     const acts = (a.actions ?? []).map((x) => {
       const spec = ACTIONS.find((y) => y.key === x.action);
       if (!spec) return x.action;
-      const label = stages.find((s) => s.key === x.value)?.label ?? String(x.value ?? "");
+      // assign_to's value is a profile id, so the stage lookup below would miss
+      // and the summary would read "assign to 3f9c…-…" — which is not a
+      // sentence anyone can check. Resolve it to the person's name, and say
+      // plainly when the id no longer matches an active member, because that
+      // rule is currently assigning records to nobody.
+      const label = x.action === "assign_to"
+        ? memberLabel(String(x.value ?? ""))
+        : stages.find((s) => s.key === x.value)?.label ?? String(x.value ?? "");
       return spec.tpl.replace("{v}", label);
     });
     return `${trig}${conds.length ? ` and ${conds.join(", and ")}` : ""} → ${acts.join(", then ")}`;
@@ -240,7 +307,13 @@ export function Automations() {
         </button>
       </div>
 
-      {rows.length === 0 ? (
+      {/* Error branch first. "No automations yet" over a failed read invites an
+          admin to build a rule that already exists and is already running —
+          two copies of the same automation acting on the same records. The
+          recipes below stay visible, so this replaces the list only. */}
+      {loadError ? (
+        <LoadError message={loadError} onRetry={() => void load()} />
+      ) : rows.length === 0 ? (
         <Card>
           <Empty
             icon="⚡"
@@ -409,6 +482,26 @@ export function Automations() {
                       {stages.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
                     </select>
                   )}
+                  {spec?.needs === "member" && (
+                    <select
+                      className="select"
+                      style={{ maxWidth: 210 }}
+                      value={String(a.value ?? "")}
+                      onChange={(e) => setEditing({ ...editing, actions: editing.actions!.map((x, j) => j === i ? { ...x, value: e.target.value } : x) })}
+                    >
+                      <option value="">choose a member…</option>
+                      {/* If the saved id is not in the active list, keep it
+                          selectable rather than silently resetting the rule to
+                          "choose…" the moment an admin opens it to change
+                          something else. */}
+                      {a.value && !members.some((m) => m.id === String(a.value)) && (
+                        <option value={String(a.value)}>{memberLabel(String(a.value))}</option>
+                      )}
+                      {members.map((m) => (
+                        <option key={m.id} value={m.id}>{m.full_name || m.email}</option>
+                      ))}
+                    </select>
+                  )}
                   {(spec?.needs === "number" || spec?.needs === "text") && (
                     <input
                       className="input"
@@ -428,6 +521,15 @@ export function Automations() {
             >
               + Add action
             </button>
+            {(editing.actions ?? []).some((a) => a.action === "assign_to") && (
+              <p className="sub" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
+                {membersError
+                  ? `We couldn't read your team (${membersError}), so the list above may be missing people. Reload before saving an assignment rule.`
+                  : members.length === 0
+                    ? "Nobody active to assign to yet — invite a teammate under Team first, or use \"Assign to least-loaded member\"."
+                    : "Only active members are listed. If that person later leaves, this rule keeps pointing at them and records stop being picked up — use \"Assign to least-loaded member\" if you want it to survive a change in the team."}
+              </p>
+            )}
           </div>
 
           <div className="field">

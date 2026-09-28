@@ -117,7 +117,12 @@ jobs:
           set -e
           FOUND=0
           SKIPPED=0
-          for t in $(find supabase -name "*.test.cjs" -o -name "*.test.mjs" | sort); do
+          # Repo-wide, not `find supabase`. The narrow glob meant a test placed
+          # anywhere else — app/, scripts/, the repo root — was never run by
+          # anything and nobody would be told. A test that cannot run is worse
+          # than no test, because it reads as coverage.
+          for t in $(find . -path ./node_modules -prune -o -path '*/node_modules' -prune -o \
+                          \( -name "*.test.cjs" -o -name "*.test.mjs" \) -print | sort); do
             echo "--- $t"
             # 2>&1 and an explicit failure branch: the suites print their
             # assertion failures to STDOUT, so a bare `OUT=$(node "$t")` under
@@ -139,12 +144,25 @@ jobs:
           deno-version: v2.x
       - name: Deno tests
         run: |
-          if ls supabase/functions/_shared/*.test.ts >/dev/null 2>&1; then
-            deno test --no-lock --allow-none supabase/functions/_shared/ || \
-            deno test --no-lock supabase/functions/_shared/
-          else
-            echo "No Deno tests found."
-          fi
+          set -e
+          # Repo-wide, and a hard failure when none are found — matching the
+          # .cjs loop above. Three problems with the previous version:
+          #   * it only looked in _shared/, so a .test.ts next to a function was
+          #     silently never run;
+          #   * it printed "No Deno tests found." and went green, so deleting
+          #     both suites would have passed CI;
+          #   * `--allow-none` is Deno 1.x (renamed --permit-no-files in 2.x,
+          #     which is what this job pins), so the first command died on an
+          #     unknown flag every time and the `||` fallback is what actually
+          #     ran. It worked by accident, and the `||` would equally have
+          #     masked a genuine failure by retrying it.
+          COUNT=$(find . -path ./node_modules -prune -o -path '*/node_modules' -prune -o \
+                       -name "*.test.ts" -print | wc -l)
+          [ "$COUNT" -gt 0 ] || { echo "No Deno tests found — expected several."; exit 1; }
+          echo "Found $COUNT Deno test file(s)."
+          deno test --no-lock --permit-no-files \
+            $(find . -path ./node_modules -prune -o -path '*/node_modules' -prune -o \
+                   -name "*.test.ts" -print | sort)
 
   sql:
     name: Migrations — parse check

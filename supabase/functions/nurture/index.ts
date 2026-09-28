@@ -125,23 +125,48 @@ async function sendEmail(
 
 // ── one organisation ────────────────────────────────────────────────────────
 async function runOrg(org: { id: string; name: string; slug: string }) {
-  const { data: cfg } = await supabase
+  const { data: cfg, error: cfgErr } = await supabase
     .from("agent_config")
-    .select("nurture_enabled, resend_api_key, brand_name, contact_url, booking_url")
+    .select("nurture_enabled, resend_api_key, resend_from, resend_reply_to, brand_name, contact_url, booking_url")
     .eq("org_id", org.id).maybeSingle();
+
+  // A failed read here is already fail-safe — cfg is null, so the opt-in check
+  // below refuses — but it reported the tenant as "nurture is off", which is a
+  // configuration state, not a fault. Six weeks of a tenant's follow-up not
+  // running would have looked like a deliberate setting on every run report.
+  if (cfgErr) {
+    return {
+      org: org.slug,
+      skipped: `could not read nurture settings: ${cfgErr.message}`,
+      sent: 0,
+      failed: true,
+    };
+  }
 
   // Opt-in, explicitly. A missing config row is not consent.
   if (cfg?.nurture_enabled !== true) {
     return { org: org.slug, skipped: "nurture is off", sent: 0 };
   }
 
-  const { data: tplRows } = await supabase
+  const { data: tplRows, error: tplErr } = await supabase
     .from("message_templates")
     .select("subject, body, nurture_step, nurture_segment")
     .eq("org_id", org.id)
     .eq("channel", "email")
     .not("nurture_step", "is", null)
     .order("nurture_step", { ascending: true });
+
+  // Same shape as the config read: fail-safe in effect, but it reported a
+  // refused read as "no nurture templates written" — telling the operator the
+  // tenant had never done the setup, when in fact we could not look.
+  if (tplErr) {
+    return {
+      org: org.slug,
+      skipped: `could not read templates: ${tplErr.message}`,
+      sent: 0,
+      failed: true,
+    };
+  }
 
   const templates = (tplRows ?? []) as Tpl[];
   if (templates.length === 0) {
@@ -173,30 +198,103 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
   }
 
   const brand = (cfg.brand_name || org.name || "").trim() || org.slug;
-  // Display name is the tenant's; the address stays on our verified domain,
-  // because a tenant's own domain is not SPF/DKIM-authorised for us to send
-  // from and would fail authentication outright.
-  const from = `${brand.replace(/["<>\\]/g, "")} <${FROM_ADDRESS}>`;
+
+  // ── The key and the From address must belong to the same account ────────
+  //
+  // Display name is the tenant's; on the PLATFORM key the address stays on our
+  // verified domain, because a tenant's own domain is not SPF/DKIM-authorised
+  // for us and would fail authentication outright.
+  //
+  // But a tenant's OWN Resend key was being paired with our address, and their
+  // account has not verified our domain — so Resend rejects every message with
+  // a 403. Integrations actively invites an admin to paste their own key, and
+  // doing so silently turned that tenant's entire follow-up programme off.
+  // `agent_config.resend_from` and `resend_reply_to` existed for this and were
+  // read by no code at all: the columns, the UI and the sender disagreed.
+  //
+  // So: own key → own From address, and refuse rather than send from an
+  // address the key cannot authenticate. Refusing is visible in the run report
+  // and fixable in a minute; a 100% rejection rate looks like nothing at all.
+  const ownKey = (cfg.resend_api_key || "").trim();
+  const ownFrom = (cfg.resend_from || "").trim();
+
+  // WARN, do not refuse.
+  //
+  // My first version returned `failed: true` here and stopped the org. That was
+  // wrong on two counts, and the second is the serious one:
+  //
+  //   * `resend_from` is NULL for every tenant today — nothing has ever
+  //     written it — so the guard would have stopped follow-up for every
+  //     organisation with its own key, the moment it deployed, until an admin
+  //     happened to visit Integrations. That is breaking working customers to
+  //     fix a suspected fault.
+  //   * The fault is only *suspected*. The reasoning is that Resend rejects a
+  //     tenant key paired with our domain — sound in principle, but unverified
+  //     against this account, and `save-integration`'s own `test_email` still
+  //     pairs them, so an admin testing the connection would see it succeed.
+  //
+  // So: prefer the tenant's address when set, keep today's behaviour exactly
+  // when it is not, and make the suspect combination visible in the run report
+  // rather than acting on it. If the 403s are real, this surfaces them with a
+  // name attached; if they are not, nothing was broken to find out.
+  const fromAddress = ownKey && ownFrom ? ownFrom : FROM_ADDRESS;
+  const senderMismatch = !!ownKey && !ownFrom;
+  const from = `${brand.replace(/["<>\\]/g, "")} <${fromAddress}>`;
 
   // Replies must reach the tenant, not us. The old function routed every
   // reply to a personal Gmail — which for any customer other than AbroBot
   // means their prospect's answer goes to a stranger. The org's longest-
   // standing admin is the closest thing to an owner inbox we hold.
+  // Left unchecked on purpose, and this is the one place that is right: a
+  // failed read yields no reply-to, the email still sends, and a missing
+  // Reply-To header degrades the message without misdirecting anyone. Refusing
+  // to send over it would be the worse trade.
   const { data: adminRow } = await supabase.from("profiles")
     .select("email").eq("org_id", org.id).eq("status", "active")
     .in("role", ["org_admin", "super_admin"])
     .order("created_at", { ascending: true }).limit(1).maybeSingle();
-  const replyTo = (adminRow?.email || "").trim() || null;
+
+  // An explicitly configured reply-to wins over the inferred admin inbox.
+  // `agent_config.resend_reply_to` has existed since 20260905120000 and was
+  // read by nothing, so a tenant who deliberately set "replies go to
+  // sales@ourcompany.com" was silently overruled by whichever admin happened
+  // to be created first.
+  const replyTo = (cfg.resend_reply_to || "").trim() || (adminRow?.email || "").trim() || null;
 
   // Terminal stages are where follow-up must stop: a customer who has bought,
   // or explicitly said no, should not keep getting "one last nudge". The old
   // code allow-listed three legacy stage names, which meant every industry
   // pack that does not use them nurtured nobody — or, once stage_key landed,
   // nurtured people who had already converted.
-  const { data: terminal } = await supabase
+  const { data: terminal, error: terminalErr } = await supabase
     .from("pipeline_stages").select("key")
     .eq("org_id", org.id).or("is_won.eq.true,is_lost.eq.true");
+
+  // FAIL CLOSED. This is the one unchecked read in this file that was not
+  // safe: postgrest-js resolves with { data: null, error }, so a refused read
+  // left `terminal` null, `stop` empty, and the guard at the send site is
+  // `if (stop.size)` — which then skips the exclusion ENTIRELY and emails the
+  // people it exists to protect. A customer who has already paid gets "just
+  // one last nudge about enrolling", and someone who explicitly said no gets
+  // chased. Sending nothing for one cycle is the cheaper mistake by a wide
+  // margin, so a read failure stops this org rather than widening the audience.
+  if (terminalErr) {
+    return {
+      org: org.slug,
+      skipped: `could not read pipeline stages, refusing to send: ${terminalErr.message}`,
+      sent: 0,
+      failed: true,
+    };
+  }
+
   const stop = new Set((terminal ?? []).map((s: { key: string }) => s.key));
+
+  // Zero terminal stages is not an error, but it means nobody is EVER excluded
+  // from follow-up — there is no stage that counts as won or lost, so the
+  // sequence runs at everyone until it ends. That is a misconfiguration worth
+  // surfacing rather than silently honouring, so it is reported on the result
+  // and rolls up into the heartbeat.
+  const noTerminalStages = stop.size === 0;
 
   // ── Who to consider, one sequence at a time ───────────────────────────────
   //
@@ -452,6 +550,22 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     sequences: sequenceNames(seqs),
     ...(Object.keys(perSequence).length ? { by_sequence: perSequence } : {}),
     ...(unaddressed ? { unaddressed } : {}),
+    // Reported, not enforced. No won/lost stage means nothing ever removes a
+    // record from follow-up, so a customer who buys keeps receiving the
+    // sequence to its end. That is a tenant misconfiguration rather than a
+    // fault here, and refusing to send would be an overreach — but it is
+    // invisible from the outside, so it says so on every run.
+    ...(noTerminalStages ? { warning: "no won/lost stage configured — nobody is excluded from follow-up" } : {}),
+    // Reported, never enforced. If this org's own Resend key is being rejected
+    // for sending from our domain, `errors` will fill with 403s and this line
+    // says why in one sentence instead of leaving someone to work it out.
+    ...(senderMismatch
+      ? {
+        sender_warning:
+          "this organisation has its own Resend key but no sending address of its own, so mail goes " +
+          `out from ${FROM_ADDRESS} on their key — if Resend is rejecting these, set an address in Integrations`,
+      }
+      : {}),
     errors,
   };
 }
@@ -609,12 +723,28 @@ Deno.serve(async (req) => {
   // The lead-level failures are the ones that cost a customer their follow-up,
   // so they decide the status.
   const threw = results.filter((r) => "error" in r).length;
+
+  // `failed: true` is the OTHER way an org can go wrong, added alongside the
+  // fail-closed reads above: runOrg returns rather than throwing, so nothing
+  // here would have seen it. An org refused because its pipeline stages could
+  // not be read would have been counted as an ordinary skip and the run would
+  // have reported `ok` — which is precisely the shape of bug those reads were
+  // being hardened against. A signal has to be read by something.
+  const refused = results.filter((r) => (r as { failed?: boolean }).failed === true).length;
+
   const failures = results.reduce((n, r) => n + ((r as { errors?: string[] }).errors?.length ?? 0), 0);
-  const degraded = threw > 0 || failures > 0;
+
+  // Worth surfacing even though it sends nothing: an org with no won/lost
+  // stage never stops following anyone up.
+  const unbounded = results.filter((r) => (r as { warning?: string }).warning).length;
+
+  const degraded = threw > 0 || refused > 0 || failures > 0;
 
   const detail = `${results.length} org(s), ${sent} sent` +
     (threw ? `, ${threw} org(s) failed` : "") +
+    (refused ? `, ${refused} org(s) refused (read error — nothing sent)` : "") +
     (failures ? `, ${failures} lead-level failure(s)` : "") +
+    (unbounded ? `, ${unbounded} org(s) have no won/lost stage` : "") +
     (cappedAt ? `, run cap reached before ${cappedAt}` : "");
 
   await heartbeat(degraded ? "warn" : "ok", detail);
