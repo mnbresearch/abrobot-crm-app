@@ -200,6 +200,69 @@ test("the static hero is suppressed for signed-in users and off the homepage", (
   }
 });
 
+test("the static hero's claims match the React component's", () => {
+  /*
+   * The skeleton in index.html restates the six capabilities so a non-rendering
+   * crawler can read them. That makes the same sentence exist in two files, and
+   * I predicted in the skeleton's own comment that it would drift. It drifted
+   * within hours: two of the six were corrected in Landing.tsx as factually
+   * wrong ("a Telegram or WhatsApp alert" — there is no WhatsApp alert path at
+   * all; "stops the moment someone replies" — nothing reads inbound email) and
+   * the shells kept serving the false version to every crawler and social
+   * scraper. This is the check that would have caught it.
+   *
+   * Compares the `detail` strings from CAPABILITIES, which is the authoritative
+   * copy, against the <li> text in both shells.
+   */
+  const landing = read("app/src/routes/Landing.tsx");
+
+  const details = [...landing.matchAll(/^\s*detail:\s*"((?:[^"\\]|\\.)*)",\s*$/gm)]
+    .map((m) => m[1].replace(/\\"/g, '"'));
+  assert.strictEqual(details.length, 6,
+    `expected 6 CAPABILITIES details in Landing.tsx, found ${details.length}`);
+
+  for (const [name, html] of shells) {
+    const items = [...html.matchAll(/<li>([\s\S]*?)<\/li>/g)]
+      .map((m) => m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    assert.strictEqual(items.length, 6, `${name}: expected 6 <li> capabilities, found ${items.length}`);
+
+    for (let i = 0; i < 6; i++) {
+      // The skeleton prefixes each with "<b>Title.</b> ", so the detail must be
+      // the tail of the list item rather than the whole of it.
+      assert.ok(
+        items[i].endsWith(details[i]),
+        `${name}: capability ${i + 1} has drifted from Landing.tsx.\n` +
+        `  Landing.tsx : ${details[i]}\n` +
+        `  ${name} : ${items[i]}\n` +
+        `Fix the shell to match the component, then regenerate the root copy.`,
+      );
+    }
+  }
+
+  // Claims proven false by FEATURES.md. Named individually so the failure
+  // message says WHY rather than just "a regex matched".
+  const banned = [
+    [/Telegram or WhatsApp/i, "there is no WhatsApp alert path — notifyNewLead() is Telegram-only"],
+    [/stops the moment someone replies/i, "nothing in this system ingests inbound email"],
+    [/switched on from a single screen/i, "setup spans Settings, Integrations and Automations"],
+  ];
+
+  // Comments are stripped first. Each correction in Landing.tsx and in the
+  // shells documents the wording it replaced ("WAS: …"), which is exactly the
+  // string being banned — checking the raw file flags the explanation of the
+  // fix as though it were the defect. Only shipped copy counts.
+  const shipped = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, " ")        // /* block */ and JSX {/* … */}
+    .replace(/^\s*\/\/.*$/gm, " ")            // // line
+    .replace(/<!--[\s\S]*?-->/g, " ");        // <!-- html -->
+
+  for (const [re, why] of banned) {
+    for (const [name, text] of [...shells, ["app/src/routes/Landing.tsx", landing]]) {
+      assert.doesNotMatch(shipped(text), re, `${name}: reinstates a false claim — ${why}`);
+    }
+  }
+});
+
 test("the two shells agree on everything except the built asset tags", () => {
   const strip = (s) => s.split("\n")
     .filter((l) => !/\/assets\/|src="\/src\/main\.tsx"/.test(l))

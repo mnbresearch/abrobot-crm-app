@@ -19,7 +19,11 @@
   --lp-line: rgba(255, 255, 255, 0.10);
   --lp-line-2: rgba(255, 255, 255, 0.18);
   --lp-dim: #a8a29e;
-  --lp-dim-2: #78716c;
+  /* Was #78716c, which is 4.12:1 on --lp-ink (#0c0a09) — under the 4.5:1 WCAG
+     AA floor for normal text, and it carried .lp-note: "Free plan, no card.
+     Built for Indian SMEs." The pricing hook was the least readable line on the
+     page. #8a827c measures 5.24:1 and is otherwise indistinguishable. */
+  --lp-dim-2: #8a827c;
   --lp-amber: #f59e0b;
   --lp-amber-2: #fbbf24;
   --lp-glow: rgba(245, 158, 11, 0.16);
@@ -28,7 +32,14 @@
   color: var(--text);
   background: var(--bg);
   min-height: 100vh;
-  overflow-x: hidden;
+  /* `clip`, not `hidden`. Per spec a non-`visible` overflow on one axis
+     computes the other axis to `auto`, so `overflow-x: hidden` silently turned
+     .lp into a scroll container — and `position: sticky` on .lp-nav resolves
+     against its nearest scrolling ancestor. The nav therefore never stuck: you
+     scrolled to the capabilities section and the header, including the Sign in
+     button, left the screen for good. `clip` prevents the horizontal scroll
+     without creating a scroll container, so sticky works again. */
+  overflow-x: clip;
 }
 
 /* Visually hidden, still announced. The composer's label is real rather than
@@ -170,11 +181,15 @@
   background: linear-gradient(135deg, var(--lp-amber), #d97706); color: #1c1005;
   align-self: flex-end; border-bottom-right-radius: 5px; font-weight: 600;
 }
-.lp-typing { display: flex; gap: 4px; padding: 13px 15px; }
+.lp-typing { display: flex; align-items: center; gap: 4px; padding: 13px 15px; }
 .lp-typing i {
   width: 7px; height: 7px; border-radius: 50%; background: var(--lp-dim);
   animation: lp-bounce 1.3s infinite;
 }
+/* The word, not the dots, is what survives `prefers-reduced-motion` — the
+   block at the foot of this file freezes every animation here, which leaves
+   three inert dots and no other sign that anything is happening. */
+.lp-typing-label { margin-left: 6px; font-size: 13px; color: var(--lp-dim); }
 .lp-typing i:nth-child(2) { animation-delay: .18s }
 .lp-typing i:nth-child(3) { animation-delay: .36s }
 @keyframes lp-bounce { 0%,60%,100% { opacity:.3; transform: translateY(0) } 30% { opacity:1; transform: translateY(-4px) } }

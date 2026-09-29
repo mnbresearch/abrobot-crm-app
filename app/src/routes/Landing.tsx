@@ -70,19 +70,32 @@ const CAPABILITIES: { icon: string; title: string; detail: string; ask: string }
   {
     icon: "🔀",
     title: "Routes to the right person",
-    detail: "Assigns by workload so nothing lands in a shared inbox and waits.",
+    // The implementation is genuinely workload-based (org_assignment_load picks
+    // the member with fewest open leads), but free plans get max_automations = 0,
+    // so a free signup who tries to build this rule is told "Your subscription
+    // has ended" on a ten-minute-old account. Naming the plan here is honest and
+    // costs nothing; being caught by it in a demo costs the deal.
+    detail: "Assigns to whoever on your team has the lightest load, so nothing sits in a shared inbox. Starter and up.",
     ask: "How do you assign leads to my team?",
   },
   {
     icon: "🔔",
+    // WAS: "A Telegram or WhatsApp alert…". There is no WhatsApp alert path at
+    // all — the only alert primitive is notifyNewLead(), which is Telegram-only.
+    // WhatsApp sends TO a lead, typed by a human, on Growth and up. A prospect
+    // asking "where do I switch on WhatsApp alerts?" had no answer.
     title: "Tells you instantly",
-    detail: "A Telegram or WhatsApp alert the moment something worth your attention arrives.",
+    detail: "A Telegram alert on your phone the moment something worth your attention arrives.",
     ask: "How do I get notified about a new lead?",
   },
   {
     icon: "✉️",
+    // WAS: "…stops the moment someone replies or buys". Nothing in this system
+    // reads inbound email — there is no mail-ingest function. The sequence stops
+    // on won/lost or unsubscribe. Claiming reply-detection was the single most
+    // checkable false statement on the page.
     title: "Follows up by itself",
-    detail: "Runs your follow-up sequence on schedule, and stops the moment someone replies or buys.",
+    detail: "Runs your follow-up sequence on schedule, and stops as soon as the deal is won, lost or unsubscribed.",
     ask: "What happens when a lead goes quiet?",
   },
 ];
@@ -99,8 +112,24 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
 
   const msgsRef = useRef<HTMLDivElement>(null);
   // Guards against a reply landing after the component has gone.
+  //
+  // The body MUST set this back to true, not just return the cleanup. React
+  // StrictMode mounts, unmounts and remounts every effect in development, so
+  // `useEffect(() => () => { aliveRef.current = false; }, [])` — which is what
+  // this was — ran its cleanup on that simulated unmount and left the ref
+  // false for the entire life of the component.
+  //
+  // The consequence was total: every `if (!aliveRef.current) return` below
+  // short-circuited, no reply ever rendered, and the `finally` guard never
+  // cleared `busy`, so the typing dots ran forever from the first question
+  // onwards. Production builds do not double-invoke, so the deployed site was
+  // fine — which is exactly what made it dangerous. It would have broken on
+  // the first `npm run dev` dry run, and nowhere else.
   const aliveRef = useRef(true);
-  useEffect(() => () => { aliveRef.current = false; }, []);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
   useEffect(() => {
     const el = msgsRef.current;
@@ -116,10 +145,29 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
     setDraft("");
     setBusy(true);
 
+    // A deadline, because without one this board can hang forever.
+    //
+    // `fetch` only rejects when the connection fails. It does NOT reject when
+    // the connection simply never answers — captive-portal wifi, a black-holed
+    // TCP connection, a backgrounded mobile tab. In that case the promise never
+    // settles, so `finally` never runs, `busy` stays true, and every control on
+    // the board (input, send, chips, all six cards) stays disabled behind
+    // `disabled={busy}`. The visitor is left with three bouncing dots and no
+    // way out but a page reload.
+    //
+    // The server's own worst case argues for a client deadline too: chat-agent
+    // retries two models twice with a 25s timeout each, so a Groq rate-limit
+    // burst can legitimately take ~100 seconds. Nobody waits that long — they
+    // conclude the product is broken. 12s is past the measured ~8s happy path
+    // and well short of the point where a visitor gives up on us.
+    const ctrl = new AbortController();
+    const deadline = setTimeout(() => ctrl.abort(), 12_000);
+
     try {
       const r = await fetch(`${FUNCTIONS_BASE}/chat-agent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: ctrl.signal,
         body: JSON.stringify({
           org: DEMO_ORG,
           message: q,
@@ -153,13 +201,22 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
         text: j?.reply
           || "I can't reach my notes this second. The product tour at /product covers all of this — or sign in and try it on your own data.",
       }]);
-    } catch {
+    } catch (e) {
       if (!aliveRef.current) return;
+      // Our own deadline firing is not the same event as the network failing,
+      // and saying "something went wrong" when the answer was merely slow reads
+      // as a broken product rather than a busy one.
+      const timedOut = e instanceof DOMException && e.name === "AbortError";
       setMsgs((m) => [...m, {
         role: "bot",
-        text: "Something went wrong reaching the assistant. Have a look at /product in the meantime.",
+        text: timedOut
+          ? "That one is taking me longer than it should. Ask again, or see the full tour at /product."
+          : "Something went wrong reaching the assistant. Have a look at /product in the meantime.",
       }]);
     } finally {
+      // Unconditionally — this is a timer, not state. Leaving it pending on
+      // unmount would fire abort() against a dead controller.
+      clearTimeout(deadline);
       if (aliveRef.current) setBusy(false);
     }
   }, [busy, convId]);
@@ -191,10 +248,14 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
           </span>
 
           <h1 className="lp-h1">The CRM that <em>works the leads</em> while you sleep.</h1>
+          {/* "scores them … every day" implied continuous re-scoring. Scoring
+              runs once, at intake — "as they arrive" is what actually happens,
+              and it is the stronger claim anyway. */}
           <p className="lp-sub">
-            It answers your enquiries, captures who they are, scores them, routes them to the
-            right person and follows up — on its own, in the background, every day. You open
-            the app to a list of people worth calling, not a pile of unread messages.
+            It answers your enquiries, captures who they are, scores them as they arrive,
+            routes them to the right person and follows up — on its own, in the background,
+            every day. You open the app to a list of people worth calling, not a pile of
+            unread messages.
           </p>
 
           <div className="lp-cta-row">
@@ -225,9 +286,18 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
                     {m.text}
                   </div>
                 ))}
+                {/* `role="status"` rather than a bare aria-label: aria-label on
+                    a generic <div> with no role and no text content is ignored
+                    by most screen readers, so this announced nothing at all for
+                    the whole wait. The visible word matters just as much — with
+                    "Reduce Motion" enabled the OS freezes the three dots, and a
+                    presenter laptop very often has it on. Without the text the
+                    board showed no sign of life for ~8 seconds, which reads as
+                    broken well before it reads as thinking. */}
                 {busy && (
-                  <div className="lp-msg lp-msg-bot lp-typing" aria-label="Assistant is typing">
+                  <div className="lp-msg lp-msg-bot lp-typing" role="status">
                     <i /><i /><i />
+                    <span className="lp-typing-label">Thinking…</span>
                   </div>
                 )}
               </div>
@@ -287,9 +357,16 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
         <div className="lp-wrap">
           <p className="lp-kicker">Runs without you</p>
           <h2 className="lp-h2">Six things it does while nobody is watching</h2>
+          {/* WAS: "These run on their own schedule and finish the job — and
+              every one of them is switched on from a single screen." Neither
+              half held. Three of the six are request-driven, not scheduled
+              (answering, capturing and scoring happen on the enquiry, not on a
+              timer), and setup spans Settings, Integrations and Automations —
+              there is no single screen. Both were trivially falsifiable by a
+              prospect who signed up during the call. */}
           <p className="lp-lede">
-            Not suggestions or drafts waiting for approval. These run on their own schedule
-            and finish the job — and every one of them is switched on from a single screen.
+            Not suggestions or drafts waiting for approval. Each one finishes the job on its
+            own — some the instant an enquiry lands, the rest on a schedule you set once.
           </p>
 
           <div className="lp-cards">

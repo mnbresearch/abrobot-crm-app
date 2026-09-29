@@ -10,3 +10,10 @@ app/dist/
 
 # Vite temp config artifacts
 vite.config.ts.timestamp-*
+
+# FUSE mount artifacts. When a file is rewritten while something still holds the
+# old inode open, the mount leaves the orphan behind as .fuse_hidden<hex>. They
+# are stale copies of files that already exist under their real names — never
+# content of their own. They matter here because deploy-all.sh runs `git add -A`,
+# so without this line an ordinary deploy silently commits them.
+.fuse_hidden*
