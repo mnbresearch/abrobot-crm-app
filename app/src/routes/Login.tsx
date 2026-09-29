@@ -65,6 +65,20 @@ export function Login() {
             <button className="btn btn-primary" style={{ width: "100%" }} onClick={send} disabled={busy}>
               {busy ? "Sending…" : "Send sign-in link"}
             </button>
+
+            {/* A way back out.
+                `/` now renders the landing page for signed-out visitors, so
+                without this the sign-in form is a dead end for anyone who
+                arrived by a deep link or a stale bookmark and simply wanted to
+                find out what this is. A full navigation rather than a router
+                push, because the router's `navigate` is not in scope here and
+                this is a rare, deliberate exit. */}
+            <p className="sub" style={{ fontSize: 13, marginTop: 14, textAlign: "center" }}>
+              New here?{" "}
+              <a href="/" style={{ color: "var(--industry)", fontWeight: 600 }}>
+                See what AbroBot CRM does
+              </a>
+            </p>
           </>
         )}
       </div>

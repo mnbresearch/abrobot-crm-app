@@ -3,33 +3,101 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AbroBot CRM — Sign in</title>
 
     <!--
-      THIS is the file that must carry the noindex, not the copy at the repo
-      root. deploy-all.sh ends with `cp app/dist/index.html index.html`, so the
-      root file is a build artifact and anything edited there is silently
-      overwritten by the next deploy.
+      ══════════════════════════════════════════════════════════════════════
+      THIS is the file to edit, not the copy at the repo root. deploy-all.sh
+      ends with `cp app/dist/index.html index.html`, so the root file is a
+      build artifact and anything edited there is overwritten by the next
+      deploy. (The root copy is kept byte-identical in the <head> by hand so
+      the metadata below is live even before the next rebuild — if you change
+      anything here, change it there too, or just redeploy.)
+      ══════════════════════════════════════════════════════════════════════
 
-      Why noindex at all — it does two jobs:
+      WHY THIS FILE IS NOW INDEXABLE, AND WHAT REPLACED THE noindex
+      ─────────────────────────────────────────────────────────────
+      It used to carry `noindex, follow`, for two stated reasons. Both still
+      exist as facts; neither is a reason for noindex any more.
 
-      1. The application is served from this shell (/, /leads, /settings …).
-         Indexing it puts a sign-in form in the results for our own brand name.
-      2. `_redirects` ends with `/* /index.html 200`, so EVERY url that does not
-         exist also returns this shell with HTTP 200. /pricng, /prodcut, any
-         typo anyone ever links. Google calls those soft 404s, and left alone
-         they let a five-page site look like unlimited duplicate pages.
+      1. "The application is served from this shell, and indexing it puts a
+         sign-in form in the results for our own brand name."
 
-      `follow` is deliberate: links out of here still pass value to the
-      marketing pages. Those are real files at the root — product.html,
-      pricing.html and the rest — served directly, never through this shell,
-      and indexed normally.
+         No longer true of `/`. App.tsx now renders <Landing/> at `/` for
+         signed-out visitors, so the front door is a marketing page. The
+         sign-in form lives at every OTHER route, and those are fenced off in
+         robots.txt by path, which is the precise tool for that job — noindex
+         on the shared shell was a blunt one that also took out `/`.
+
+      2. "`_redirects` ends with `/* /index.html 200`, so EVERY url that does
+         not exist also returns this shell with HTTP 200 — soft 404s."
+
+         Still exactly true, and it cannot be fixed in _redirects: Cloudflare
+         Pages only supports 3xx redirects and 200 rewrites there, not a 404
+         status, and the `/*` rule has to stay or client-side routes like
+         /leads would 404 on a hard refresh. (Nor can `/` be pointed at a
+         separate static file: Pages serves matching assets BEFORE consulting
+         _redirects — which is why /pricing already resolves to pricing.html
+         despite the catch-all — so `/` is always this file. A dedicated
+         home.html at the root would simply never be reached.)
+
+         So the soft 404s are handled where they can be: the canonical below.
+         Every typo URL returns this shell, and this shell tells every crawler
+         that its canonical address is `/`. Google consolidates the lot into
+         one page instead of indexing /pricng, /prodcut and friends as
+         duplicates. That is the textbook remedy for a 200-serving catch-all,
+         and unlike noindex it costs us nothing on the page we DO want ranked.
+
+      A blanket canonical pointing at `/` is technically wrong for the real app
+      routes served from this same shell (/leads says its canonical is `/`).
+      That is harmless and deliberate: those paths are Disallow-ed in
+      robots.txt, so no compliant crawler fetches them to read it.
+
+      WHAT A CRAWLER ACTUALLY GETS
+      ────────────────────────────
+      The landing page is React, so a fetch of this URL used to return meta
+      tags and an empty <div id="root">. Googlebot renders JS and would find
+      the page eventually, but every other crawler, every social scraper and
+      every AI retriever reads the static HTML and nothing else. So the parts
+      that decide how this page is represented — title, description, canonical,
+      OG/Twitter, structured data — are all static below, and <div id="root">
+      ships a real text skeleton of the hero rather than a blank div.
+
+      That skeleton is not decoration. It is what a non-rendering client reads,
+      and it doubles as the first paint, so the page shows its headline instead
+      of white while the bundle downloads. React replaces it on mount
+      (createRoot().render() overwrites the container's children — this is not
+      hydration, so there is no mismatch to reconcile).
     -->
-    <meta name="robots" content="noindex, follow" />
+
+    <title>AbroBot CRM — the AI CRM that works your leads while you sleep</title>
+    <link rel="canonical" href="https://crm.mnbresearch.com/" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <meta
       name="description"
-      content="Sign in to AbroBot CRM. See the product at https://crm.mnbresearch.com/product"
+      content="AbroBot CRM answers your enquiries, captures who they are, scores them, routes them to the right person and follows up — on its own, around the clock. Ask the live AI on the homepage anything. Free plan, no card."
     />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="AbroBot CRM" />
+    <meta property="og:locale" content="en_IN" />
+    <meta property="og:url" content="https://crm.mnbresearch.com/" />
+    <meta property="og:title" content="AbroBot CRM — the AI CRM that works your leads while you sleep" />
+    <meta
+      property="og:description"
+      content="It answers, captures, scores, routes and follows up on its own. Open the app to a list of people worth calling, not a pile of unread messages. Free plan, no card."
+    />
+    <meta property="og:image" content="https://crm.mnbresearch.com/og-cover.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="AbroBot CRM — capture every lead, and close it." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="AbroBot CRM — the AI CRM that works your leads while you sleep" />
+    <meta
+      name="twitter:description"
+      content="It answers, captures, scores, routes and follows up on its own. Ask the live AI on the homepage anything. Free plan, no card."
+    />
+    <meta name="twitter:image" content="https://crm.mnbresearch.com/og-cover.png" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -37,9 +105,232 @@
       rel="stylesheet"
     />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>" />
+
+    <!--
+      Structured data. `#org` reuses the SAME @id as product.html so the two
+      pages describe one organisation rather than two similarly-named ones;
+      the SoftwareApplication node gets its own @id because product.html
+      already owns `/product#software`.
+
+      Only facts that are true today. Nothing on the roadmap, no invented
+      ratings — an aggregateRating we cannot substantiate is both a structured
+      data violation and a claim we would have to defend.
+    -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Organization",
+          "@id": "https://crm.mnbresearch.com/#org",
+          "name": "AbroBot Technologies Private Limited",
+          "alternateName": "AbroBot CRM",
+          "url": "https://crm.mnbresearch.com",
+          "logo": "https://crm.mnbresearch.com/og-cover.png",
+          "parentOrganization": { "@type": "Organization", "name": "MNB Research" },
+          "contactPoint": [
+            {
+              "@type": "ContactPoint",
+              "telephone": "+91-97114-88480",
+              "contactType": "customer support",
+              "areaServed": "IN",
+              "availableLanguage": ["en", "hi"]
+            }
+          ]
+        },
+        {
+          "@type": "WebSite",
+          "@id": "https://crm.mnbresearch.com/#website",
+          "url": "https://crm.mnbresearch.com/",
+          "name": "AbroBot CRM",
+          "inLanguage": "en-IN",
+          "publisher": { "@id": "https://crm.mnbresearch.com/#org" }
+        },
+        {
+          "@type": "WebPage",
+          "@id": "https://crm.mnbresearch.com/#webpage",
+          "url": "https://crm.mnbresearch.com/",
+          "name": "AbroBot CRM — the AI CRM that works your leads while you sleep",
+          "description": "AbroBot CRM answers your enquiries, captures who they are, scores them, routes them to the right person and follows up — on its own, around the clock.",
+          "isPartOf": { "@id": "https://crm.mnbresearch.com/#website" },
+          "about": { "@id": "https://crm.mnbresearch.com/#org" },
+          "primaryImageOfPage": "https://crm.mnbresearch.com/og-cover.png",
+          "inLanguage": "en-IN"
+        },
+        {
+          "@type": "SoftwareApplication",
+          "@id": "https://crm.mnbresearch.com/#software",
+          "name": "AbroBot CRM",
+          "applicationCategory": "BusinessApplication",
+          "applicationSubCategory": "CRM",
+          "operatingSystem": "Web browser",
+          "url": "https://crm.mnbresearch.com/",
+          "description": "AI lead-management platform for Indian small and medium businesses. An AI agent answers enquiries on your website, captures the lead, scores it on intent, routes it by workload, alerts your phone and runs the follow-up sequence on its own.",
+          "publisher": { "@id": "https://crm.mnbresearch.com/#org" },
+          "featureList": [
+            "AI assistant that answers website enquiries, trained on your business",
+            "Automatic lead capture from chat with no form to fill in",
+            "Intent and urgency scoring to rank every enquiry",
+            "Workload-based routing and assignment to your team",
+            "Instant Telegram and WhatsApp alerts on new leads",
+            "Scheduled follow-up sequences that stop when someone replies"
+          ],
+          "offers": {
+            "@type": "Offer",
+            "name": "Free plan",
+            "price": "0",
+            "priceCurrency": "INR",
+            "url": "https://crm.mnbresearch.com/pricing",
+            "availability": "https://schema.org/InStock"
+          }
+        }
+      ]
+    }
+    </script>
+
+    <style>
+      /* Only the skeleton's own rules live here. Everything else arrives in the
+         bundled stylesheet, which is a blocking <link> in the built output.
+         Inline because these must hold even if that stylesheet is slow or
+         fails — a skeleton that cannot be hidden is worse than no skeleton.
+
+         `.pre-off` is set synchronously by the script below, so this rule is in
+         effect before the first paint. Suppressing the hero on DOMContentLoaded
+         instead would be too late: the document has finished parsing by then and
+         the browser is free to have painted already, which is precisely the
+         flash this exists to prevent. */
+      html.pre-off #pre { display: none !important; }
+
+      /* Identical to what tokens.css already declares, repeated here only so it
+         holds if the bundled stylesheet is slow or fails: without it the UA's
+         default 8px body margin draws a light frame around the dark hero. */
+      body { margin: 0; }
+
+      /* Deliberately matched to `.lp-hero` in app/src/styles/landing.css:
+         background #0c0a09, white text, amber links. The real hero is dark
+         regardless of the app's light/dark theme, so inheriting the app's
+         default (usually light) here would flash white and then snap to black
+         the instant React mounts — a worse first impression than the blank
+         screen this replaces. min-height fills the viewport so the dark does
+         not stop abruptly halfway down. */
+      #pre {
+        min-height: 100vh;
+        margin: 0;
+        padding: 56px 20px 48px;
+        text-align: center;
+        background: #0c0a09;
+        color: #fff;
+        font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+      }
+      #pre a { color: #fbbf24; font-weight: 700; }
+      #pre .pre-eyebrow {
+        font-size: 13px; font-weight: 600; letter-spacing: 0.04em;
+        text-transform: uppercase; color: #a8a29e; margin: 0;
+      }
+      #pre h1 {
+        font-size: clamp(30px, 6vw, 52px); line-height: 1.08; font-weight: 800;
+        max-width: 18ch; margin: 14px auto 0;
+      }
+      #pre h2 { font-size: 21px; font-weight: 700; margin: 40px auto 0; }
+      #pre .pre-sub {
+        max-width: 62ch; margin: 18px auto 0; font-size: 17px;
+        line-height: 1.6; color: #d6d3d1;
+      }
+      #pre ul {
+        max-width: 60ch; margin: 14px auto 0; text-align: left;
+        line-height: 1.65; font-size: 15.5px; color: #d6d3d1;
+      }
+      #pre .pre-note { margin: 26px auto 0; font-size: 14px; color: #78716c; }
+    </style>
+
+    <script>
+      /*
+       * Decide, BEFORE the first paint, whether the static hero should be shown
+       * at all. Two cases where it must not be:
+       *
+       *  - A signed-in user. They are heading for their dashboard, and a flash
+       *    of the marketing headline on the way there is a regression on the
+       *    blank div they get today.
+       *  - Any path other than `/`. The catch-all serves this shell for /leads,
+       *    for a magic-link return and for every typo; none of those render the
+       *    landing page, so none should preview it.
+       *
+       * Sets a class on <html> rather than touching #pre, because #pre does not
+       * exist yet — this runs in <head>, while the element is parsed later. The
+       * class is the only handle available this early, and it is also the only
+       * one that takes effect without waiting for an event.
+       *
+       * The session test looks for any `sb-*-auth-token` key rather than
+       * hardcoding the project ref, because the ref is derived from
+       * VITE_SUPABASE_URL and differs between environments.
+       *
+       * localStorage THROWS rather than returning null in Safari Lockdown Mode,
+       * in a storage-blocked iframe and with site data disabled — the same
+       * hazard main.tsx already guards initTheme against. Failing open here
+       * shows the hero, which is the right default for a visitor we cannot
+       * identify, and is what every crawler gets.
+       */
+      (function () {
+        function off() { document.documentElement.className += " pre-off"; }
+        if (location.pathname !== "/") { off(); return; }
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && /^sb-.+-auth-token$/.test(k) && localStorage.getItem(k)) { off(); return; }
+          }
+        } catch (e) {
+          /* storage unavailable — leave the hero visible */
+        }
+      })();
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!--
+        The crawler-visible, paint-visible skeleton. Kept to the hero only:
+        one H1, the sub, the two calls to action and the six capabilities as
+        real sentences. It is a summary, not a copy of Landing.tsx — the full
+        page has the live assistant board, the three-step section and the
+        closing CTA, none of which mean anything without JS.
+
+        Keeping it short is the point. A duplicate of the whole component here
+        would drift out of sync with the component within a release, and a
+        stale skeleton is worse than a brief one.
+
+        `aria-hidden` is NOT set: for a screen-reader user with JS disabled
+        this is the entire page. React removes it on mount, so there is never
+        a moment where both this and the real hero are in the tree.
+      -->
+      <div id="pre">
+        <p class="pre-eyebrow">AbroBot CRM</p>
+        <h1>The CRM that works the leads while you sleep.</h1>
+        <p class="pre-sub">
+          AbroBot CRM answers your enquiries, captures who they are, scores them, routes them to
+          the right person and follows up — on its own, in the background, every day. You open the
+          app to a list of people worth calling, not a pile of unread messages. Built for Indian
+          small and medium businesses, on a free plan with no card.
+        </p>
+        <p>
+          <a href="/login">Start free</a>
+          &nbsp;·&nbsp;
+          <a href="/product">See everything it does</a>
+          &nbsp;·&nbsp;
+          <a href="/pricing">Pricing</a>
+        </p>
+        <h2>Six things it does while nobody is watching</h2>
+        <ul>
+          <li><b>Answers, day or night.</b> Trained on your business, not a generic bot. It handles the question and keeps the conversation going.</li>
+          <li><b>Captures the enquiry.</b> Asks for one detail at the right moment and files a record — no form, no drop-off.</li>
+          <li><b>Scores and prioritises.</b> Ranks every enquiry on intent and urgency so your team works the right one first.</li>
+          <li><b>Routes to the right person.</b> Assigns by workload so nothing lands in a shared inbox and waits.</li>
+          <li><b>Tells you instantly.</b> A Telegram or WhatsApp alert the moment something worth your attention arrives.</li>
+          <li><b>Follows up by itself.</b> Runs your follow-up sequence on schedule, and stops the moment someone replies or buys.</li>
+        </ul>
+        <p class="pre-note">
+          Loading the live assistant — you can ask it any of this yourself in a moment.
+        </p>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

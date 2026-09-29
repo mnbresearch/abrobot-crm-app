@@ -2,32 +2,53 @@
 <!--
   AbroBot CRM — crm.mnbresearch.com
 
-  Only the five marketing pages. The application at / and its routes are
-  deliberately absent: they render as an empty React shell to a crawler and
-  resolve to a login screen, so indexing them would put a sign-in form in the
-  results for our own brand name.
+  `/` IS LISTED NOW. It previously was not, and the note here said why: "the
+  application at / and its routes are deliberately absent: they render as an
+  empty React shell to a crawler and resolve to a login screen". Both halves of
+  that have changed.
+
+  `/` no longer resolves to a login screen — App.tsx renders the landing page
+  there for signed-out visitors — and it no longer renders as an empty shell,
+  because index.html now ships a real text hero inside <div id="root"> for
+  clients that do not execute JavaScript. It also carries its own canonical,
+  title, description, OG tags and structured data. So it is a real page, it is
+  the page this product should be found by, and it belongs here.
+
+  The app's OTHER routes are still absent, and still for the original reason.
+  They are Disallow-ed in robots.txt; listing a disallowed URL in a sitemap is
+  a direct contradiction — it asks a crawler to index something it has been
+  told not to fetch, and Search Console reports it as an error.
 
   Extensionless URLs throughout. Cloudflare Pages normalises .html away, so
   /product is the address that answers 200 and /product.html 308-redirects to
   it — listing the .html form would advertise a redirect as a canonical.
 
-  Note there is no <loc> for /. That is intentional while the app owns the root;
-  /product carries the canonical for the product itself.
+  Priorities are relative, and only meaningful against each other. `/` takes
+  the 1.0 that /product used to hold: it is the front door, it carries the
+  live assistant, and it is where we want the brand query to land. /product
+  keeps the long-form detail and stays just behind it.
 -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+
+  <url>
+    <loc>https://crm.mnbresearch.com/</loc>
+    <lastmod>2026-09-29</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
 
   <url>
     <loc>https://crm.mnbresearch.com/product</loc>
     <lastmod>2026-09-12</lastmod>
     <changefreq>weekly</changefreq>
-    <priority>1.0</priority>
+    <priority>0.9</priority>
   </url>
 
   <url>
     <loc>https://crm.mnbresearch.com/pricing</loc>
     <lastmod>2026-09-12</lastmod>
     <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
   </url>
 
   <url>

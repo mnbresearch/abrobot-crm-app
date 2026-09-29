@@ -1,3 +1,150 @@
+# 29 September — the front door
+
+`/` rendered the sign-in form. Anyone arriving from a link, a search result or
+a business card met a password-less login box and no explanation of what they
+had arrived at — the product pages existed at `/product` and `/pricing` and
+nothing pointed at them from the front.
+
+**New:** `app/src/routes/Landing.tsx` + `app/src/styles/landing.css`.
+
+## The routing change is one line
+
+```ts
+if (!session) {
+  return path === "/" ? <Landing navigate={go} /> : <Login />;
+}
+```
+
+Deliberately narrow. A signed-in user's path through the app is byte-for-byte
+what it was — this sits inside the existing `!session` branch. And every route
+other than `/` still goes to the sign-in form, so a bookmarked `/leads` or a
+magic-link return is unaffected. Only the front door changed, which is the only
+place someone arrives without context. `Login` gained a link back, so it is not
+a dead end.
+
+## The demo is real
+
+The board calls the **same `chat-agent` endpoint the customer widget uses**.
+Nothing is scripted. A canned animation of an AI answering questions proves
+nothing, and anyone evaluating this has seen a hundred of them.
+
+It talks to the **`mnb-research`** organisation on purpose. MNB Research is the
+business that sells this CRM and its agent already holds a knowledge base about
+the product, so a visitor's question is answered accurately — and if they leave
+a contact detail it lands in the right sales pipeline. Pointing it at `abrobot`
+would file prospective CRM buyers into a study-abroad counselling pipeline
+where nobody would ever work them.
+
+Verified live before building on it. Asked *"What can your AI do on its own?"*
+and got a correct, on-brand answer that closed by asking for **one** detail —
+the one-field capture change, working in production.
+
+Failure is handled: a 429 says "give me a few seconds", an unreachable agent
+points at `/product`. A prospect never sees the product failing on its own
+front page.
+
+## Indexing — done, and not the way I first proposed
+
+You said make it visible, so `/` is now indexable. The `noindex` is gone.
+
+I had offered to do this with "a dedicated static file served only at `/`".
+**That approach cannot work, and it is worth knowing why** before anyone tries
+it again: Cloudflare Pages only consults `_redirects` for requests that do not
+match a static asset. That is exactly why `/pricing` already serves
+`pricing.html` in spite of the `/*` catch-all sitting above it — and it means
+`/` will always be served by `index.html`. A `home.html` at the root would
+never be reached, no matter where its rule went in the file.
+
+So `index.html` had to become the indexable page itself. Four parts:
+
+1. **`noindex` → `index, follow, max-image-preview:large, max-snippet:-1`**,
+   plus a real title, description, Open Graph and Twitter cards, and a
+   `SoftwareApplication` / `Organization` / `WebSite` / `WebPage` JSON-LD graph.
+   The `Organization` deliberately reuses the same `@id` `product.html` already
+   uses, so the two pages describe one company rather than two.
+
+2. **A self-referencing `<link rel="canonical">` to `/`** — this is what
+   replaces the `noindex`, and it is a strictly better tool for the job. Every
+   mistyped URL still returns the shell with HTTP 200, but the shell now tells
+   the crawler its canonical address is `/`, so Google consolidates the lot into
+   one page instead of indexing `/pricng` and friends as duplicates. Unlike
+   `noindex`, it costs nothing on the page we *do* want ranked.
+
+3. **Real text in `<div id="root">`.** The landing page is React, so a fetch of
+   `/` previously returned meta tags and an empty div — I confirmed that against
+   the live site. Googlebot renders JS, but no social scraper and few AI
+   retrievers do. So the shell now ships the H1, the sub, the six capabilities
+   and links to `/product` and `/pricing` as static markup. It doubles as the
+   first paint, so the page shows its headline instead of white while the bundle
+   loads. React clears it on mount — I verified that against the app's own
+   react-dom 18.3.1 rather than trusting my memory of `createRoot` semantics.
+
+4. **Two gates so this does not become a regression.** An inline `<head>` script
+   suppresses that static hero when there is a Supabase session, or when the
+   path is not `/`. Without it, a signed-in user would see the marketing
+   headline flash over their dashboard load, and `/leads` would preview a hero
+   it never renders. It sets a class on `<html>` rather than waiting for
+   `DOMContentLoaded`, because by then the browser may already have painted.
+
+Also: `/login` was missing from `robots.txt` — the sign-in form itself, the one
+URL we least want ranking for "abrobot crm". It went unnoticed because the
+shared `noindex` covered it. It is listed now. With the `noindex` gone, that
+`Disallow` list is the *only* thing keeping the app's screens out of results,
+which is now noted at the top of the file. `sitemap.xml` lists `/` at priority
+1.0, and `App.tsx` sets `document.title` per route so signed-in screens no
+longer all inherit the marketing title.
+
+`tests/seo-shell.test.cjs` (12 tests) locks all of this down, including a jsdom
+test that *executes* the head script to prove the signed-in gate works rather
+than merely that it was written. I mutation-tested it — 30 deliberate breakages,
+all 30 caught — because a test written alongside the code it checks proves very
+little on its own.
+
+**One thing to do by hand after deploying:** in Google Search Console, request
+indexing for `https://crm.mnbresearch.com/` and resubmit the sitemap. `noindex`
+has been on that URL for months, so Google will not revisit it quickly on its
+own.
+
+## Not yet verified visually
+
+I cannot run the Vite build here — `app/node_modules` holds macOS binaries.
+`npx tsc --noEmit` is clean, but **neither of us has seen it rendered**, so I
+generated `landing-preview.html` (real CSS, real markup, static copy of the
+demo) to look at before deploying.
+
+---
+
+# ✅ SHIPPED AND CONFIRMED — 28 September 2026
+
+Commit `79aafd1`, working tree clean, no lock. **All six migrations applied,
+all 14 functions deployed, new frontend bundle live.** Verified by query and
+by probing the running system, not by assumption:
+
+| | |
+|---|---|
+| Migrations 1–6 | **APPLIED** — confirmed by catalogue query |
+| Unique lead indexes | Created, so **no existing duplicates** had to be merged |
+| `my_org` / `is_super_admin` / `is_active_member` | now `security definer` with **search_path pinned** — the reproducibility blocker is closed |
+| All 14 edge functions | deployed (`save-integration` returns the new fields; its select on the new columns proves migration 1 too) |
+| Frontend `index-DqFV5jMQ.js` | Scoring tab, `assign_to`, sending-address fields, `admin_set_member`, three-state pills, retired-model notice — all present |
+| Widget XSS fix | serving |
+| Archived record | still hidden; Students shows 22 live, 1 archived |
+| `system-health` | `alarm_status: ok` — advisory split working |
+
+## First signal on the capture change
+
+A new enquiry arrived **4 hours after the deploy**: `dennishk1985@gmail.com`,
+captured by the chat agent, **6 messages**. Worth noting because the pattern
+this change targeted was one-message conversations that never convert — before
+it, 97 of 139 conversations were a single message. This one ran to six and gave
+an address.
+
+**One data point is not a trend.** The number to watch is still the share of
+single-message conversations, measured in a fortnight. But nothing is broken,
+and the first capture after the change behaved the way it was meant to.
+
+---
+
 # Run this next — 24 September 2026
 
 A full-surface build: six parallel audits of every subsystem, then fixes, then

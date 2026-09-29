@@ -3,6 +3,7 @@ import { useApp } from "./lib/store";
 import { match, useRoute } from "./lib/router";
 import { LoadError, Spinner } from "./components/ui";
 import { Login } from "./routes/Login";
+import { Landing } from "./routes/Landing";
 import { Onboarding } from "./routes/Onboarding";
 import { Dashboard } from "./routes/Dashboard";
 import { Leads } from "./routes/Leads";
@@ -146,6 +147,30 @@ export default function App() {
     closeNav();
   }, [navigate, closeNav]);
 
+  // ── the document title ───────────────────────────────────────────────────
+  //
+  // index.html is a single shell shared by the landing page, the sign-in form
+  // and every screen in the app, so whatever <title> it ships is wrong
+  // everywhere except one place. It used to ship "AbroBot CRM — Sign in",
+  // which was wrong for all fifteen app routes. It now ships the marketing
+  // title, because that is what `/` is and what search results and shared
+  // links need — which would leave the same defect pointing the other way.
+  //
+  // So the title is corrected here, per route, once we know which of the three
+  // states we are in. This is why the router is worth having: a hand-rolled
+  // popstate router gives no title handling for free.
+  //
+  // Runs on every render path INCLUDING the early returns below, because hooks
+  // must not sit behind a conditional. `loading` is the exception: session is
+  // not yet known then, and writing a title we are about to contradict would
+  // flicker the tab and pollute the history entry.
+  useEffect(() => {
+    if (loading) return;
+    document.title = !session
+      ? (path === "/" ? LANDING_TITLE : "Sign in · AbroBot CRM")
+      : `${titleFor(path, ui.leadNoun, ui.leadNounPlural)} · ${org?.name ?? "AbroBot CRM"}`;
+  }, [loading, session, path, ui.leadNoun, ui.leadNounPlural, org?.name]);
+
   if (loading) return <Spinner />;
 
   // Signed out wins over every other state, and it has to be tested FIRST.
@@ -155,7 +180,19 @@ export default function App() {
   // control was Retry — which re-ran the same request with the same dead token
   // and failed identically, forever. No sign-out, no way to the login form, and
   // nothing on screen saying the session was the problem.
-  if (!session) return <Login />;
+  //
+  // `/` gets the landing page; every other route still gets the sign-in form.
+  //
+  // Deliberately narrow. A bookmarked /leads or a magic-link return must still
+  // land on the form rather than a marketing page — the visitor already knows
+  // what this is and is trying to get in. Only the front door changes, which
+  // is the only place someone arrives without context.
+  //
+  // This sits inside the existing `!session` branch, so a signed-in user's
+  // path through the app is byte-for-byte what it was.
+  if (!session) {
+    return path === "/" ? <Landing navigate={go} /> : <Login />;
+  }
 
   // The shell's own load failed. Previously this state did not exist: a failed
   // profile read left profile null, which is indistinguishable from "no
@@ -363,6 +400,16 @@ function PlanPill() {
     </span>
   );
 }
+
+/**
+ * Kept character-for-character identical to the <title> in app/index.html.
+ *
+ * Not cosmetic. A crawler that renders JavaScript reads the title AFTER React
+ * has mounted; one that does not reads the static tag. If the two disagree,
+ * the page's own description of itself depends on how it was fetched, and the
+ * version the crawler indexes is the one nobody reviewed.
+ */
+const LANDING_TITLE = "AbroBot CRM — the AI CRM that works your leads while you sleep";
 
 const KNOWN = [
   "/", "/leads", "/pipeline", "/calendar", "/conversations",

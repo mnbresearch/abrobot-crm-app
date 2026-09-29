@@ -7,6 +7,12 @@
 #
 # A real file at the repo root wins over the catch-all on Cloudflare Pages —
 # the same reason /product already serves product.html.
+#
+# `/` is now a landing page, not a login screen, and index.html no longer
+# carries `noindex`. That makes the Disallow list below the ONLY thing keeping
+# the application's own screens out of the results, where before it was a
+# belt-and-braces second line behind the noindex. Anything added to App.tsx's
+# NAV that should not be a search result has to be added here as well.
 
 User-agent: *
 Allow: /
@@ -14,6 +20,11 @@ Allow: /
 # The application itself. These are behind a login, they render as an empty
 # shell to a crawler, and indexing them would put a login screen in the results
 # for our own brand name. Not secret — just not search results.
+#
+# /login was missing from this list for as long as it existed, and went
+# unnoticed because the shared noindex covered it. It is the sign-in form
+# itself — the single URL we least want ranking for "abrobot crm".
+Disallow: /login
 Disallow: /leads
 Disallow: /pipeline
 Disallow: /calendar
