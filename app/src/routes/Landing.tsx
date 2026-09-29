@@ -341,7 +341,10 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
                   onClick={() => void ask(c.ask, c.title)}
                 >
                   <span className="lp-cap-ico" aria-hidden="true">{c.icon}</span>
-                  <span>
+                  {/* Needs the class: as a bare <span> this flex item kept its
+                      default min-width:auto and would not shrink below its
+                      longest word. See .lp-cap-body in landing.css. */}
+                  <span className="lp-cap-body">
                     <span className="lp-cap-t">{c.title}</span>
                     <span className="lp-cap-d">{c.detail}</span>
                   </span>

@@ -230,8 +230,24 @@
 .lp-cap:disabled { opacity: .5; cursor: default; }
 .lp-cap.is-live { background: rgba(245,158,11,.13); border-color: rgba(245,158,11,.38); }
 .lp-cap-ico { font-size: 18px; line-height: 1.2; flex-shrink: 0; }
-.lp-cap-t { font-weight: 700; font-size: 13.5px; color: #fff; }
-.lp-cap-d { font-size: 12.5px; color: var(--lp-dim); line-height: 1.55; margin-top: 2px; }
+
+/* `display: block` is load-bearing on both of these, not tidiness.
+   The markup is two sibling <span>s — a <button> may not contain <div>s, so
+   spans were the right elements — and a span is display:inline by default.
+   That meant the title and the detail ran together on one line with no break:
+   "Captures the enquiryAsks for one detail at the right moment…". The
+   `margin-top: 2px` below was silently doing nothing too, because vertical
+   margins do not apply to inline boxes.
+
+   min-width: 0 on the wrapper because it is a flex item next to the icon, and
+   a flex item's default min-width:auto refuses to shrink below its longest
+   word, which pushes the longest detail line out past the card. */
+.lp-cap-body { min-width: 0; }
+.lp-cap-t { display: block; font-weight: 700; font-size: 13.5px; color: #fff; }
+.lp-cap-d {
+  display: block; font-size: 12.5px; color: var(--lp-dim);
+  line-height: 1.55; margin-top: 3px;
+}
 
 /* ── sections below the fold ─────────────────────────────────────────────── */
 .lp-section { padding: 84px 0; }
