@@ -72,8 +72,19 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
   };
 
   const revoke = async (id: string) => {
-    const { error } = await supabase.from("invites").delete().eq("id", id);
+    // `.select("id")` so a refusal is distinguishable from success. PostgREST
+    // answers a DELETE whose WHERE matches no VISIBLE row with 204 and
+    // error: null — identical to a real delete. An admin whose own access was
+    // revoked keeps a usable token for up to an hour, and in that hour this said
+    // "Invite revoked" while the invite stayed live and the person could still
+    // walk in at sign-in.
+    const { data, error } = await supabase.from("invites").delete().eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error("Nothing was revoked — the invite is already gone, or you no longer have permission to revoke it.");
+      return;
+    }
     await load();
     toast.show("Invite revoked");
   };
@@ -204,8 +215,17 @@ export function Team() {
   useEffect(() => { void load(); /* eslint-disable-next-line */ }, [org]);
 
   const update = async (id: string, patch: Partial<Profile>) => {
-    const { error } = await supabase.from("profiles").update(patch).eq("id", id);
+    // `.select("id")` so a refusal is distinguishable from success: an UPDATE
+    // matching no visible row is a 204 with error: null. This control changes
+    // roles and disables members — "Updated" over a write that never happened
+    // meant an admin believed someone had been locked out when they had not.
+    const { data, error } = await supabase.from("profiles").update(patch).eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error("Nothing was changed — that member is no longer visible to you, or you no longer have permission to change them.");
+      return;
+    }
     await load();
     toast.show("Updated");
   };

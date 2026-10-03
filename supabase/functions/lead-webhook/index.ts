@@ -11,16 +11,15 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-const PHONE_RE = /(?:\+?\d[\d\s\-()]{8,}\d)/;
-
-function normPhone(p?: string | null): string | null {
-  if (!p) return null;
-  const digits = p.replace(/[^\d+]/g, "");
-  if (digits.length < 8) return null;
-  if (/^\d{10}$/.test(digits)) return "+91" + digits;
-  return digits.startsWith("+") ? digits : "+" + digits;
-}
+// Shared with chat-agent and the public API — see _shared/capture.ts.
+//
+// The copy that used to live here had its own bug: `digits.length < 8` was
+// measured on a string that still contained the "+", so a 7-digit number
+// counted as 8 characters and was accepted. Three normalisers with three
+// different rules meant the same person could be stored two different ways
+// depending on which door they came through, and so never deduped against
+// themselves.
+import { EMAIL_RE, EMAIL_ONLY, PHONE_RE, normPhone, displayName } from "../_shared/capture.ts";
 
 // deno-lint-ignore no-explicit-any
 function extractLead(body: any, source: string) {
@@ -47,7 +46,19 @@ function extractLead(body: any, source: string) {
 
   if (!email && EMAIL_RE.test(message)) email = message.match(EMAIL_RE)![0];
   if (!phone && PHONE_RE.test(message)) phone = normPhone(message.match(PHONE_RE)![0]);
-  if (!name) name = email?.split("@")[0] ?? phone ?? "Unknown lead";
+
+  // An address typed into the NAME field is still an address, and discarding it
+  // left the record with no way to be emailed at all. Harvest it before the
+  // display-name fallback decides what to show.
+  const nameStr = String(name ?? "").trim();
+  if (!email && EMAIL_ONLY.test(nameStr)) email = nameStr;
+
+  // `name = email?.split("@")[0] ?? phone ?? "Unknown lead"` put the PHONE
+  // NUMBER in the name column — which is how a live record ended up reading
+  // "👤 +918745821142" with the same digits repeated on the phone line below,
+  // in the CRM and in every Telegram alert. It also never trimmed, so a
+  // whitespace-only name was truthy and rendered as "👤 <b>   </b>".
+  name = displayName(name, email, phone);
 
   // Validate rather than trust. Two separate bugs came from not doing this:
   // a non-string body.email (a number, or a nested object from a badly mapped

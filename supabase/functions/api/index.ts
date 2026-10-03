@@ -24,6 +24,13 @@
 // there is no parameter through which to ask.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+// Shared contact normalisation, so a number pushed through the API dedupes
+// against the same number captured by the widget or the webhook.
+import { normPhone, displayName } from "../_shared/capture.ts";
+// Resolves the org's actual first pipeline stage. Only 2 of 13 industry packs
+// have a stage keyed "new", so the old literal fallback made records invisible
+// on the board for the other 11.
+import { firstStageKey } from "../_shared/stage.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -121,8 +128,17 @@ Deno.serve(async (req) => {
   try {
     // ── GET /me ────────────────────────────────────────────────────────────
     if (path === "/me" && req.method === "GET") {
-      const { data: org } = await admin
+      // Checked: an unchecked error here returned HTTP 200 with every field
+      // undefined, which is what an integration health-check reads as "fine".
+      const { data: org, error: orgErr } = await admin
         .from("organizations").select("name, slug, plan").eq("id", auth.orgId).single();
+      if (orgErr) {
+        // PGRST116 is "no rows" — permanent, so 404. Advertising it as a
+        // transient 503 would have an integration retry forever.
+        if ((orgErr as { code?: string }).code === "PGRST116") return err("Organisation not found", 404);
+        console.error(`api GET /me: org read failed for ${auth.orgId}:`, orgErr.message);
+        return err("Could not read your organisation — please retry", 503);
+      }
       return json({ org: org?.name, slug: org?.slug, plan: org?.plan, scopes: auth.scopes });
     }
 
@@ -155,7 +171,12 @@ Deno.serve(async (req) => {
       let q = admin.from("conversations")
         .select("id, lead_id, visitor_name, visitor_email, visitor_phone, page_url, message_count, created_at, last_message_at",
                 { count: "exact" })
-        .eq("org_id", auth.orgId);
+        .eq("org_id", auth.orgId)
+        // Matches the /leads routes. This function runs as service role and so
+        // bypasses the RLS that hides archived rows; without it, the moment
+        // conversation archiving ships the API hands archived transcripts —
+        // including visitor_email and visitor_phone — back to integrations.
+        .is("deleted_at", null);
 
       if (p.get("lead_id")) q = q.eq("lead_id", p.get("lead_id"));
       if (p.get("since"))   q = q.gte("last_message_at", p.get("since"));
@@ -266,13 +287,11 @@ Deno.serve(async (req) => {
       const phoneRaw = typeof body.phone === "string" ? body.phone : null;
       // Same normalisation the widget and webhook use, so a lead created
       // through the API dedupes against one captured on the website.
-      let phone: string | null = null;
-      if (phoneRaw) {
-        const d = phoneRaw.replace(/[^\d+]/g, "");
-        if (d.replace("+", "").length >= 8) {
-          phone = /^\d{10}$/.test(d) ? "+91" + d : (d.startsWith("+") ? d : "+" + d);
-        }
-      }
+      // Shared normaliser — see _shared/capture.ts. This was a third inline
+      // copy with slightly different rules from chat-agent's and
+      // lead-webhook's, so a number pushed through the API did not necessarily
+      // dedupe against the same number captured on the website.
+      const phone: string | null = normPhone(phoneRaw);
       if (!email && !phone) {
         return err("A record needs an email or a phone number", 422);
       }
@@ -293,31 +312,69 @@ Deno.serve(async (req) => {
       dq = email && phone
         ? dq.or(`email.eq.${noDelims(email)},phone.eq.${noDelims(phone)}`)
         : (email ? dq.eq("email", email) : dq.eq("phone", phone!));
-      const { data: existing } = await dq.limit(1);
+      // FAIL CLOSED on a dedupe read error. This was `const { data: existing }`
+      // with the error discarded — and postgrest-js RESOLVES with
+      // `{data: null, error}` rather than throwing, so a failed read was shaped
+      // exactly like "nothing matched" and the insert below created a SECOND
+      // record for someone already in the CRM: counted twice against the plan,
+      // worked by two people. lead-webhook and chat-agent both carry long
+      // comments about precisely this; the public API was the one path never
+      // fixed.
+      const { data: existing, error: dupErr } = await dq.limit(1);
+      if (dupErr) {
+        console.error(`api POST /leads: dedupe read failed for org ${auth.orgId}:`, dupErr.message);
+        return err("Could not check for an existing record — please retry", 503);
+      }
       if (existing?.length) {
         return json({ ok: true, deduped: true, id: existing[0].id,
           message: "A record with that email or phone already exists" }, 200);
       }
 
-      const { data: stage } = await admin.from("pipeline_stages")
-        .select("key").eq("org_id", auth.orgId).order("position").limit(1).maybeSingle();
+      // `stage?.key ?? "new"` was wrong for 11 of the 13 industry packs: only
+      // two of them have a stage literally keyed "new", and the Pipeline board
+      // silently drops any record whose stage_key has no column. A clinic's
+      // integration got a 201 and an invisible record. firstStageKey() resolves
+      // the org's actual first stage and is what the other two write paths use.
+      const stageKey = await firstStageKey(admin, auth.orgId);
 
       const { data: created, error: insErr } = await admin.from("leads").insert({
         org_id: auth.orgId,
-        name: (typeof body.name === "string" && body.name.trim())
-          || email?.split("@")[0] || phone || "API record",
+        // Same rule as every other intake path — an address or a phone number
+        // posted in `name` is not a name.
+        name: displayName(body.name, email, phone),
         email, phone,
         source: "other",
-        stage_key: stage?.key ?? "new",
+        stage_key: stageKey,
         custom: typeof body.custom === "object" && body.custom ? body.custom : {},
         next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
       }).select(LEAD_COLS).single();
 
       if (insErr) {
+        // 23505 means the unique index caught a race between our dedupe read
+        // and this insert. The record exists and belongs to this caller — so
+        // re-read it and answer as a dedupe, rather than returning a raw
+        // Postgres constraint string and DROPPING the enquiry, which is what
+        // 20260924092000's own verify notes warned would happen here.
+        if ((insErr as { code?: string }).code === "23505") {
+          // Re-read on the SAME predicate the dedupe used. Looking up by email
+          // alone dropped the enquiry whenever both were supplied and the index
+          // had fired on PHONE — the 500 this branch exists to prevent.
+          let rq = admin.from("leads").select("id").eq("org_id", auth.orgId).is("deleted_at", null);
+          rq = email && phone
+            ? rq.or(`email.eq.${noDelims(email)},phone.eq.${noDelims(phone)}`)
+            : (email ? rq.eq("email", email) : rq.eq("phone", phone!));
+          const { data: raced } = await rq.limit(1);
+          if (raced?.length) {
+            return json({ ok: true, deduped: true, id: raced[0].id,
+              message: "A record with that email or phone already exists" }, 200);
+          }
+        }
         // Plan-limit rejections are written to be read by a person, so pass
         // them through rather than flattening to "500".
         const overLimit = /plan includes|subscription has ended/i.test(insErr.message);
-        return err(insErr.message, overLimit ? 402 : 500);
+        if (overLimit) return err(insErr.message, 402);
+        console.error(`api POST /leads: insert failed for org ${auth.orgId}:`, insErr.message);
+        return err("Could not create the record — please retry", 500);
       }
       return json(created, 201);
     }

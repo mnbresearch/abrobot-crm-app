@@ -186,7 +186,25 @@ Deno.serve(async (req) => {
   const type: string = event?.type ?? "";
   const order = event?.data?.order ?? {};
   const payment = event?.data?.payment ?? {};
-  const orderId: string | undefined = order?.order_id;
+  // Read from every place Cashfree puts it, not just `data.order`.
+  //
+  // This was `order?.order_id` alone. Cashfree's PAYMENT_* webhooks carry a
+  // `data.order` block, but REFUND_STATUS_WEBHOOK carries the entity at
+  // `data.refund` and dispute webhooks at `data.dispute` — neither ships a
+  // `data.order`. So `orderId` was undefined for exactly those events, the
+  // handler returned `{received:true, ignored:"no order_id"}` at the line
+  // below, and the entire refund/chargeback revocation path further down was
+  // unreachable code.
+  //
+  // Net effect: pay, get the plan granted, charge back, keep the plan. That is
+  // the bug 20260917090000 was written to close, defeated by where the id was
+  // read from. Falling back costs nothing if a payload shape ever differs.
+  const orderId: string | undefined =
+    order?.order_id
+    ?? event?.data?.refund?.order_id
+    ?? event?.data?.dispute?.order_id
+    ?? event?.data?.dispute?.order_details?.order_id
+    ?? payment?.order_id;
 
   if (!orderId) {
     console.error("webhook had no order_id:", JSON.stringify(event).slice(0, 300));

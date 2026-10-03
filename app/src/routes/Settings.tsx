@@ -470,13 +470,25 @@ function PipelineTab() {
     // still on screen. Won/Lost flags failing silently is worse than cosmetic:
     // conversion rates are computed from them.
     for (const [i, r] of rows.entries()) {
-      const { error } = await supabase.from("pipeline_stages")
+      // `.select("id")` so a refusal is distinguishable from success. PostgREST
+      // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+      // error: null — byte-identical to a real save. A member whose access was
+      // revoked keeps a usable token for up to an hour, and for that hour this
+      // loop reported "Pipeline saved" and wrote nothing at all.
+      const { data, error } = await supabase.from("pipeline_stages")
         .update({ label: r.label, position: i, is_won: r.is_won, is_lost: r.is_lost })
-        .eq("id", r.id);
+        .eq("id", r.id)
+        .select("id");
       if (error) {
         setSaving(false);
         await refresh();
         toast.error(`Could not save "${r.label}": ${error.message}`);
+        return;
+      }
+      if (!data?.length) {
+        setSaving(false);
+        await refresh();
+        toast.error(`Could not save "${r.label}" — the stage is no longer there, or you no longer have permission to change it.`);
         return;
       }
     }
@@ -515,8 +527,16 @@ function PipelineTab() {
       ? `Delete "${stage?.label}"?\n\n${stranded} record(s) are in this stage. They will not be deleted, but they will disappear from the pipeline board until you move them to another stage.`
       : `Delete "${stage?.label ?? "this stage"}"? This cannot be undone.`;
     if (!confirm(msg)) return;
-    const { error } = await supabase.from("pipeline_stages").delete().eq("id", id);
+    // Same reason as `save` above: a DELETE matching no visible row is a 204
+    // with error: null, so "Stage removed" was printed over a stage that is
+    // still there — and the refresh then put it straight back on screen.
+    const { data, error } = await supabase.from("pipeline_stages").delete().eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await refresh();
+      toast.error("Nothing was removed — the stage is already gone, or you no longer have permission to delete it.");
+      return;
+    }
     await refresh();
     toast.show("Stage removed");
   };
@@ -571,8 +591,18 @@ function FieldsTab() {
   const toast = useToast();
 
   const toggleList = async (f: FieldDef) => {
-    const { error } = await supabase.from("field_defs").update({ show_in_list: !f.show_in_list }).eq("id", f.id);
+    // `.select("id")` so a refusal is distinguishable from success: an UPDATE
+    // matching no visible row comes back 204 with error: null, so the tickbox
+    // flipped, nothing was written, and the refresh below flipped it back —
+    // which reads as "the checkbox is broken" rather than "you can't do that".
+    const { data, error } = await supabase.from("field_defs")
+      .update({ show_in_list: !f.show_in_list }).eq("id", f.id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await refresh();
+      toast.error(`Could not change "${f.label}" — the field is no longer there, or you no longer have permission to change it.`);
+      return;
+    }
     await refresh();
   };
 
@@ -601,8 +631,17 @@ function FieldsTab() {
         ? `Delete "${field.label}"?\n\n${count} record(s) have a value for this field. The values are not deleted, but they will no longer appear on any record, as a column in the ${ui.leadNounPlural.toLowerCase()} list, or in your CSV exports — re-adding a field with the same key is the only way to see them again.`
         : `Delete "${field.label}"? No records have a value for it. This cannot be undone.`;
     if (!confirm(msg)) return;
-    const { error } = await supabase.from("field_defs").delete().eq("id", id);
+    // Same as the stage delete above: no visible row means 204 and error: null,
+    // so "Field removed" was asserted about a field that is still on every
+    // record. The confirm just told the user how many records are affected, so
+    // being wrong here is worse than usual.
+    const { data, error } = await supabase.from("field_defs").delete().eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await refresh();
+      toast.error("Nothing was removed — the field is already gone, or you no longer have permission to delete it.");
+      return;
+    }
     await refresh();
     toast.show("Field removed");
   };
@@ -662,17 +701,26 @@ function AddField({ orgId, onClose, onSaved }: { orgId: string; onClose: () => v
   const [type, setType] = useState<FieldType>("text");
   const [options, setOptions] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // The Add button had no busy guard, so an impatient second click while the
+  // insert was still in flight created two identical field definitions — two
+  // rows with the same key, both rendering on every record. Same `saving` shape
+  // as AddLead in Leads.tsx.
+  const [saving, setSaving] = useState(false);
 
   const save = async () => {
+    if (saving) return;
     if (!label.trim()) { setErr("Give the field a label"); return; }
     const key = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
     if (!key) { setErr("Use at least one letter or number"); return; }
+    setSaving(true);
+    setErr(null);
     const { error } = await supabase.from("field_defs").insert({
       org_id: orgId, key, label: label.trim(), type,
       options: type === "select" || type === "multiselect"
         ? options.split(",").map((o) => o.trim()).filter(Boolean)
         : [],
     });
+    setSaving(false);
     if (error) { setErr(error.message); return; }
     onSaved();
   };
@@ -697,8 +745,10 @@ function AddField({ orgId, onClose, onSaved }: { orgId: string; onClose: () => v
       )}
       {err && <p style={{ color: "var(--red)", fontSize: 13 }}>{err}</p>}
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save}>Add</button>
+        <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn btn-primary" onClick={save} disabled={saving}>
+          {saving ? "Adding…" : "Add"}
+        </button>
       </div>
     </Modal>
   );

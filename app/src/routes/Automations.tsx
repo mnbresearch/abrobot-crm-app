@@ -111,6 +111,10 @@ export function Automations() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<Automation> | null>(null);
+  // "Save rule" had no busy guard, so a second click while the insert was still
+  // in flight created two identical rules — both armed, both firing, so every
+  // record got chased twice. Same `saving` shape as AddLead in Leads.tsx.
+  const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   // Who `assign_to` can point at. Active members only: assigning to a disabled
   // or still-pending profile writes a real id that no longer works a shift, and
@@ -144,6 +148,7 @@ export function Automations() {
   useEffect(() => { void load(); /* eslint-disable-next-line */ }, [org]);
 
   const save = async () => {
+    if (saving) return;
     if (!org || !editing) return;
     if (!editing.name?.trim()) { toast.error("Give the rule a name"); return; }
     if (!editing.actions?.length) { toast.error("Add at least one action"); return; }
@@ -178,10 +183,27 @@ export function Automations() {
       actions: editing.actions,
       cooldown_hours: Number(editing.cooldown_hours ?? 24),
     };
-    const { error } = editing.id
-      ? await supabase.from("automations").update(payload).eq("id", editing.id)
-      : await supabase.from("automations").insert(payload);
+    // `.select("id")` so a refusal is distinguishable from success. PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null — identical to a real save. A member whose access was revoked
+    // keeps a working token for up to an hour, and in that hour this screen
+    // reported "Rule saved" for a rule that was never written: the automation
+    // that was supposed to chase customers quietly did not exist.
+    setSaving(true);
+    const { data, error } = editing.id
+      ? await supabase.from("automations").update(payload).eq("id", editing.id).select("id")
+      : await supabase.from("automations").insert(payload).select("id");
+    setSaving(false);
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error(
+        editing.id
+          ? "Nothing was saved — the rule is no longer there, or you no longer have permission to change it."
+          : "Nothing was saved — you no longer have permission to add rules here.",
+      );
+      return;
+    }
     setEditing(null);
     await load();
     toast.show("Rule saved");
@@ -195,10 +217,22 @@ export function Automations() {
     // control that arms something acting on customer records.
     setRows((rs) => rs.map((r) => (r.id === a.id ? { ...r, enabled: next } : r)));
 
-    const { error } = await supabase.from("automations").update({ enabled: next }).eq("id", a.id);
+    // `.select("id")` for the same reason as `save`: no visible row means 204
+    // with error: null, so the optimistic pill above stuck, nothing was written,
+    // and the screen claimed a rule acting on customer records was armed when it
+    // was not. An unarmed rule the user believes is armed is the worse half of
+    // this control's two failure modes.
+    const { data, error } = await supabase.from("automations")
+      .update({ enabled: next }).eq("id", a.id).select("id");
     if (error) {
       setRows((rs) => rs.map((r) => (r.id === a.id ? { ...r, enabled: a.enabled } : r))); // roll back
       toast.error(error.message);
+      return;
+    }
+    if (!data?.length) {
+      setRows((rs) => rs.map((r) => (r.id === a.id ? { ...r, enabled: a.enabled } : r))); // roll back
+      toast.error("The rule was not changed — it is no longer there, or you no longer have permission to change it.");
+      await load();
       return;
     }
     toast.show(next ? "Rule is now active" : "Rule paused");
@@ -207,8 +241,16 @@ export function Automations() {
 
   const remove = async (id: string) => {
     if (!confirm("Delete this automation? This cannot be undone.")) return;
-    const { error } = await supabase.from("automations").delete().eq("id", id);
+    // Same as above: a DELETE matching no visible row is a 204 with error: null,
+    // so "Rule deleted" was printed over a rule that is still running — and the
+    // reload then put it back in the list a moment later.
+    const { data, error } = await supabase.from("automations").delete().eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error("Nothing was deleted — the rule is already gone, or you no longer have permission to delete it.");
+      return;
+    }
     await load();
     toast.show("Rule deleted");
   };
@@ -554,8 +596,10 @@ export function Automations() {
           )}
 
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setEditing(null)}>Cancel</button>
-            <button className="btn btn-primary" onClick={save}>Save rule</button>
+            <button className="btn" onClick={() => setEditing(null)} disabled={saving}>Cancel</button>
+            <button className="btn btn-primary" onClick={save} disabled={saving}>
+              {saving ? "Saving…" : "Save rule"}
+            </button>
           </div>
         </Modal>
       )}

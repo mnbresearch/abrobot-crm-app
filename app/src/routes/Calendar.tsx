@@ -89,11 +89,22 @@ export function Calendar({ navigate }: { navigate: (to: string) => void }) {
   const reschedule = async (lead: Lead, days: number) => {
     const next = new Date();
     next.setDate(next.getDate() + days);
-    const { error } = await supabase
+    // `.select("id")` so a refusal is distinguishable from success. PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null — identical to a real save. A member whose access was revoked
+    // keeps a usable token for up to an hour, and in that hour every reschedule
+    // named a date, moved nothing, and left the follow-up sitting on its old day.
+    const { data, error } = await supabase
       .from("leads")
       .update({ next_follow_up_at: next.toISOString() })
-      .eq("id", lead.id);
+      .eq("id", lead.id)
+      .select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await reload();
+      toast.error(`${lead.name} was not moved — the record is no longer visible to you, or you no longer have permission to change it.`);
+      return;
+    }
     await reload();
     toast.show(`${lead.name} moved to ${next.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`);
   };

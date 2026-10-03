@@ -267,8 +267,11 @@ commit;
 -- run, and the natural reaction to that is to run the removals again. Checking
 -- only the legacy remainder is the whole point.
 
+-- `kb_all`, not `full`. FULL is a reserved keyword in Postgres (FULL OUTER
+-- JOIN), so an unquoted `length(full)` below is a syntax error at the
+-- parenthesis — which is exactly what this returned on the first run.
 with k as (
-  select ac.knowledge as full,
+  select ac.knowledge as kb_all,
          -- NOT coalesce(split_part(...), knowledge): split_part returns '' when
          -- the delimiter is absent, and '' is not NULL, so coalesce would never
          -- fall back. If this script had not run at all, `legacy` would be empty
@@ -284,10 +287,10 @@ with k as (
    where o.slug = 'mnb-research'
 )
 select
-  length(full)                                              as knowledge_chars,
+  length(kb_all)                                              as knowledge_chars,
   length(legacy)                                            as legacy_chars,
-  full like '%== AUTHORITATIVE: AbroBot CRM ==%'             as has_authoritative_block,
-  left(full, 32) = '== AUTHORITATIVE: AbroBot CRM =='        as block_is_first,
+  kb_all like '%== AUTHORITATIVE: AbroBot CRM ==%'             as has_authoritative_block,
+  left(kb_all, 32) = '== AUTHORITATIVE: AbroBot CRM =='        as block_is_first,
   legacy ~* '\mauto[- ]?renew'                               as still_claims_autorenew,
   legacy ~* 'renews? (each|every) month'                     as still_claims_monthly_renewal,
   legacy ~* '\mfree trial\M'                                 as still_offers_trial,

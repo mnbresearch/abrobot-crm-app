@@ -159,9 +159,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (error) { toast.error(error.message); return false; }
     // "Last contacted" drives the follow-up queue, so a silent failure here
     // means someone gets chased twice or not at all.
-    const { error: touchErr } = await supabase.from("leads")
-      .update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id);
+    // `.select("id")` so a refusal is distinguishable from success: PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null, so this "succeeded" without touching anything. Still not
+    // fatal to the note that has already been written — same console.warn as
+    // the error branch — but no longer invisible.
+    const { data: touched, error: touchErr } = await supabase.from("leads")
+      .update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id).select("id");
     if (touchErr) console.warn("could not update last_contacted_at:", touchErr.message);
+    else if (!touched?.length) console.warn("last_contacted_at matched no visible row — permission may have been revoked");
     await load();
     return true;
   };
@@ -178,14 +184,25 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
 
     // stage_key is the source of truth; the DB trigger mirrors it back to the
     // legacy enum so the old frontend stays consistent.
-    const { error } = await supabase
+    // `.select("id")` so a refusal is distinguishable from success. PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null — so the optimistic pill above stayed put, the activity below
+    // was written, "Moved to X" appeared, and the stage never changed. A member
+    // whose access was revoked keeps a usable token for up to an hour.
+    const { data, error } = await supabase
       .from("leads")
       .update({ stage_key: key, updated_at: new Date().toISOString() })
-      .eq("id", lead.id);
+      .eq("id", lead.id)
+      .select("id");
 
     if (error) {
       setLead(previous);
       toast.error(error.message);
+      return false;
+    }
+    if (!data?.length) {
+      setLead(previous);
+      toast.error("The stage was not changed — this record is no longer visible to you, or you no longer have permission to change it.");
       return false;
     }
     await log("stage_change", `Moved to ${label}.`);
@@ -200,8 +217,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (tags.includes(clean)) return;
     const next = [...tags, clean];
     setLead({ ...lead, tags: next });
-    const { error } = await supabase.from("leads").update({ tags: next }).eq("id", lead.id);
-    if (error) { setLead({ ...lead, tags }); toast.error(error.message); }
+    // `.select("id")` for the same reason as moveStage: no visible row means 204
+    // with error: null, so the tag stayed on screen until the next reload and
+    // was never saved.
+    const { data, error } = await supabase.from("leads").update({ tags: next }).eq("id", lead.id).select("id");
+    if (error) { setLead({ ...lead, tags }); toast.error(error.message); return; }
+    if (!data?.length) {
+      setLead({ ...lead, tags });
+      toast.error("The tag was not saved — this record is no longer visible to you, or you no longer have permission to change it.");
+    }
   };
 
   const removeTag = async (tag: string) => {
@@ -209,8 +233,14 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
     const next = tags.filter((t) => t !== tag);
     setLead({ ...lead, tags: next });
-    const { error } = await supabase.from("leads").update({ tags: next }).eq("id", lead.id);
-    if (error) { setLead({ ...lead, tags }); toast.error(error.message); }
+    // Same as addTag: a 204 with error: null meant the tag vanished from the
+    // screen and stayed on the record.
+    const { data, error } = await supabase.from("leads").update({ tags: next }).eq("id", lead.id).select("id");
+    if (error) { setLead({ ...lead, tags }); toast.error(error.message); return; }
+    if (!data?.length) {
+      setLead({ ...lead, tags });
+      toast.error("The tag was not removed — this record is no longer visible to you, or you no longer have permission to change it.");
+    }
   };
 
   const archive = async () => {
@@ -523,8 +553,16 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
                     const before = lead.custom ?? {};
                     const next = { ...before, [f.key]: v };
                     setLead({ ...lead, custom: next });
-                    const { error } = await supabase.from("leads").update({ custom: next }).eq("id", lead.id);
-                    if (error) { setLead({ ...lead, custom: before }); toast.error(error.message); }
+                    // `.select("id")` for the same reason as moveStage above: an
+                    // UPDATE matching no visible row is a 204 with error: null,
+                    // so the typed value sat on screen looking saved and was
+                    // gone on the next load.
+                    const { data, error } = await supabase.from("leads").update({ custom: next }).eq("id", lead.id).select("id");
+                    if (error) { setLead({ ...lead, custom: before }); toast.error(error.message); return; }
+                    if (!data?.length) {
+                      setLead({ ...lead, custom: before });
+                      toast.error(`"${f.label}" was not saved — this record is no longer visible to you, or you no longer have permission to change it.`);
+                    }
                   }}
                 />
               </div>

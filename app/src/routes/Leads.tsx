@@ -146,11 +146,22 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
   const bulkUpdate = async (patch: Record<string, unknown>, label: string) => {
     const ids = Array.from(selected);
     if (!ids.length) return;
-    const { error } = await supabase.from("leads").update(patch).in("id", ids);
+    // `.select("id")` so a refusal is distinguishable from success, and so the
+    // count below comes from the server rather than from the selection. PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null, so "12 updated" was really "12 rows were selected" — a member
+    // whose access was revoked keeps a usable token for up to an hour, and every
+    // bulk action in that hour confirmed twelve changes and made none.
+    const { data, error } = await supabase.from("leads").update(patch).in("id", ids).select("id");
     if (error) { toast.error(error.message); return; }
-    if (org) {
+    const n = data?.length ?? 0;
+    // Log against the records that actually changed, not against everything that
+    // was ticked — an activity entry saying a record was moved is a claim about
+    // that record, and the rows the server refused were never moved.
+    const changed = (data ?? []).map((r) => r.id);
+    if (org && changed.length) {
       const { error: actErr } = await supabase.from("activities").insert(
-        ids.map((id) => ({
+        changed.map((id) => ({
           org_id: org.id, lead_id: id, user_id: profile?.id ?? null,
           type: "system" as const, content: `${label} (bulk action).`,
         })),
@@ -159,7 +170,10 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
     }
     setSelected(new Set());
     await reload();
-    toast.show(`${ids.length} updated`);
+    // The number comes from the server now. It used to come from the selection,
+    // so a bulk action that changed nothing still reported the full count.
+    if (n < ids.length) toast.error(`Only ${n} of ${ids.length} could be updated — you may no longer have permission.`);
+    else toast.show(`${n} updated`);
   };
 
   if (loading) return <Skeleton kind="table" />;
@@ -404,6 +418,10 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [dupe, setDupe] = useState<Lead | null>(null);
+  // Why the duplicate lookup failed, when it does. The absence of the warning
+  // below reads as "this person is not in your CRM", and off a failed read that
+  // is a claim we have no basis for.
+  const [dupeError, setDupeError] = useState<string | null>(null);
 
   const first = stages[0]?.key ?? "new";
 
@@ -411,11 +429,16 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
   // someone after the fact is the most common way CRM data rots.
   useEffect(() => {
     const term = email.trim().toLowerCase() || phone.trim();
-    if (term.length < 5) { setDupe(null); return; }
+    if (term.length < 5) { setDupe(null); setDupeError(null); return; }
     const t = setTimeout(async () => {
       let query = supabase.from("leads").select("id, name, email, phone, stage_key, stage, score").eq("org_id", orgId);
       query = email.trim() ? query.eq("email", email.trim().toLowerCase()) : query.eq("phone", phone.trim());
-      const { data } = await query.limit(1);
+      // The error was discarded, so a failed lookup looked exactly like "no
+      // match" — the warning below simply never appeared and the second record
+      // got created with nothing on screen to stop it.
+      const { data, error } = await query.limit(1);
+      if (error) { setDupe(null); setDupeError(error.message); return; }
+      setDupeError(null);
       setDupe((data?.[0] as Lead) ?? null);
     }, 400);
     return () => clearTimeout(t);
@@ -473,6 +496,20 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
           <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
         </div>
       </div>
+
+      {/* Said out loud rather than left blank: a missing warning is read as "not
+          a duplicate", which is the one thing a failed check cannot tell us. */}
+      {!dupe && dupeError && (
+        <div
+          className="card"
+          style={{ background: "var(--bg)", marginBottom: 14, padding: 12 }}
+        >
+          <div style={{ fontWeight: 700, fontSize: 13 }}>Couldn't check for duplicates</div>
+          <div className="sub" style={{ fontSize: 12.5, marginTop: 3 }}>
+            {dupeError} — this record may already exist. Search for it before saving.
+          </div>
+        </div>
+      )}
 
       {dupe && (
         <div

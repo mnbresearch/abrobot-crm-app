@@ -59,6 +59,12 @@ export function Templates() {
   // omit the ones that do — and an audience matching no record is a sequence
   // that silently never sends.
   const [segments, setSegments] = useState<string[]>([]);
+  // The Save button had no busy guard, so a second click while the write was
+  // still in flight inserted the template twice — two rows with the same name,
+  // and on a sequence step the second one trips the unique index and reports a
+  // "duplicate step" the user did not create. Same `saving` shape as AddLead in
+  // Leads.tsx.
+  const [saving, setSaving] = useState(false);
   const toast = useToast();
 
   const load = async () => {
@@ -109,6 +115,7 @@ export function Templates() {
   }, [rows]);
 
   const save = async () => {
+    if (saving) return;
     if (!org || !editing) return;
     if (!editing.name?.trim() || !editing.body?.trim()) { toast.error("Name and message are required"); return; }
 
@@ -131,9 +138,16 @@ export function Templates() {
       nurture_step: step,
       nurture_segment: audience,
     };
-    const { error } = editing.id
-      ? await supabase.from("message_templates").update(payload).eq("id", editing.id)
-      : await supabase.from("message_templates").insert(payload);
+    // `.select("id")` on the update so a refusal is distinguishable from
+    // success. PostgREST answers an UPDATE whose WHERE matches no VISIBLE row
+    // with 204 and error: null — identical to a real save. A member whose
+    // access was revoked keeps a working token for up to an hour, and for that
+    // hour every template edit said "Template saved" and changed nothing.
+    setSaving(true);
+    const { data, error } = editing.id
+      ? await supabase.from("message_templates").update(payload).eq("id", editing.id).select("id")
+      : await supabase.from("message_templates").insert(payload).select("id");
+    setSaving(false);
     if (error) {
       // The unique index on the step is the likeliest failure, and "duplicate
       // key value violates..." tells a business owner nothing.
@@ -155,6 +169,15 @@ export function Templates() {
       );
       return;
     }
+    if (!data?.length) {
+      await load();
+      toast.error(
+        editing.id
+          ? "Nothing was saved — the template is no longer there, or you no longer have permission to change it."
+          : "Nothing was saved — you no longer have permission to add templates here.",
+      );
+      return;
+    }
     setEditing(null);
     await load();
     toast.show("Template saved");
@@ -162,8 +185,16 @@ export function Templates() {
 
   const remove = async (id: string) => {
     if (!confirm("Delete this template? This cannot be undone.")) return;
-    const { error } = await supabase.from("message_templates").delete().eq("id", id);
+    // Same reason as `save`: a DELETE matching no visible row is a 204 with
+    // error: null, so "Deleted" was printed over a template the reload then put
+    // straight back in the list.
+    const { data, error } = await supabase.from("message_templates").delete().eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error("Nothing was deleted — the template is already gone, or you no longer have permission to delete it.");
+      return;
+    }
     await load();
     toast.show("Deleted");
   };
@@ -434,8 +465,10 @@ export function Templates() {
             </p>
           </div>
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setEditing(null)}>Cancel</button>
-            <button className="btn btn-primary" onClick={save}>Save</button>
+            <button className="btn" onClick={() => setEditing(null)} disabled={saving}>Cancel</button>
+            <button className="btn btn-primary" onClick={save} disabled={saving}>
+              {saving ? "Saving…" : "Save"}
+            </button>
           </div>
         </Modal>
       )}

@@ -18,6 +18,12 @@ import { notifyNewLead } from "../_shared/notify.ts";
 import { scoreLead } from "../_shared/score.ts";
 import { firstStageKey } from "../_shared/stage.ts";
 import { fetchWithTimeout } from "../_shared/http.ts";
+// Contact extraction lives in _shared/capture.ts so that chat-agent,
+// lead-webhook and the public API cannot disagree about what a phone number is.
+// They previously held three separate normalisers with three different rules,
+// which meant the same person normalised differently depending on which door
+// they came through — and therefore did not dedupe against themselves.
+import { EMAIL_RE, PHONE_RE, normPhone, grabName, displayName } from "../_shared/capture.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -80,19 +86,6 @@ const CORS = {
 };
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: CORS });
 
-const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-const PHONE_RE = /(?:\+?\d[\d\s\-()]{8,}\d)/;
-function normPhone(p?: string | null): string | null {
-  if (!p) return null;
-  const d = p.replace(/[^\d+]/g, "");
-  if (d.replace("+", "").length < 8) return null;
-  if (/^\d{10}$/.test(d)) return "+91" + d;
-  return d.startsWith("+") ? d : "+" + d;
-}
-function grabName(t: string): string | null {
-  const m = t.match(/\b(?:my name is|i am|i'm|this is|name[:\-]?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
-  return m ? m[1].trim().slice(0, 60) : null;
-}
 
 /**
  * Strip chain-of-thought before it reaches a visitor.
@@ -477,7 +470,28 @@ Deno.serve(async (req) => {
   // do not say so, nobody ever learns the enquiry was lost.
   let captureFailed: string | null = null;
 
-  const convText = (history ?? []).map((h) => h.content).join("\n") + "\n" + message;
+  // VISITOR TURNS ONLY. This was `(history ?? []).map(h => h.content)`, which
+  // included the assistant's own replies — and several of those replies embed
+  // `cfg.whatsapp`, the tenant's own WhatsApp number:
+  //
+  //   "Sorry, I'm having trouble right now. Please reach {brand} or WhatsApp
+  //    us at {cfg.whatsapp} and our team will help you."
+  //
+  // That reply is written to chat_messages, so on the NEXT turn PHONE_RE found
+  // the business's own number in its own history and captured it as the
+  // visitor's. One Groq blip, then any further message, and a lead was created
+  // whose phone is the tenant's own switchboard. Worse, that number then became
+  // the dedupe key, so every later visitor whose conversation hit the same
+  // fallback MERGED INTO THAT ONE RECORD — dozens of real enquiries collapsing
+  // into a single lead nobody could untangle.
+  //
+  // Reading contact details out of our own output was never intended; the
+  // visitor is the only party whose details we are extracting.
+  const visitorText = (history ?? [])
+    .filter((h) => h.role !== "assistant")
+    .map((h) => h.content)
+    .join("\n");
+  const convText = visitorText + "\n" + message;
   const email = (convText.match(EMAIL_RE) || [])[0]?.toLowerCase() || null;
   const phone = normPhone((convText.match(PHONE_RE) || [])[0] || null);
   const name = grabName(convText);
@@ -556,7 +570,10 @@ Deno.serve(async (req) => {
       );
       captureFailed = `could not check for an existing record: ${existingErr.message}`;
     } else if (!leadId) {
-      const leadName = name || email?.split("@")[0] || phone || "Website chat";
+      // displayName, not `|| phone`. The widget is the path that produced the live
+      // record reading "👤 +918745821142" — lead-webhook was fixed first and this,
+      // the one that actually caused it, was left on the old fallback.
+      const leadName = displayName(name, email, phone);
       // a chat lead has already engaged — count the turns so far
       const { score } = scoreLead({
         email, phone, stage: "new",
@@ -598,6 +615,45 @@ Deno.serve(async (req) => {
             captureFailed = leadErr.message;
           }
         } else {
+          // A plan-limit refusal is the one failure the TENANT can act on, and
+          // until now it was the quietest. On the free plan inbound capture is
+          // NOT exempt from the record cap, so once a free account reaches 50
+          // records every subsequent website enquiry was refused with P0001,
+          // logged to a function log nobody reads, and answered with a perfectly
+          // normal AI reply. The visitor typed their phone number, got a helpful
+          // answer, and left. No record, no alert, nothing on any screen.
+          //
+          // That is exactly the tier the widget exists to demonstrate, so the
+          // first thing a trialling customer experienced was silent data loss.
+          // Telling them on the FIRST lost enquiry rather than the hundredth is
+          // the difference between a prompt to upgrade and a reason to leave.
+          //
+          // Deliberately non-fatal and awaited loosely: the visitor still gets
+          // their answer either way, and a Telegram outage must not become a
+          // chat outage.
+          if (leadErr.code === "P0001") {
+            // Shape matches NewLeadAlert exactly — `score` is omitted rather
+            // than sent as 0, because buildMessage renders any number and
+            // "⭐ Score 0/100" on an alert about a LOST enquiry is noise.
+            // notifyNewLead resolves to an AlertResult and never rejects, so no
+            // try/catch is needed and adding one would only hide a contract
+            // change.
+            const alerted = await notifyNewLead(supabase, org.id, {
+              id: "capture-blocked",
+              name: "⚠️ An enquiry could not be saved",
+              email,
+              phone,
+              source: "website",
+              message: `Your plan's record limit stopped this enquiry being saved. ${leadErr.message}`,
+            });
+            if (!alerted.sent) {
+              console.error(
+                `chat-agent: a capture was blocked for org ${org.id} AND the alert did not send ` +
+                `(${alerted.reason}${alerted.detail ? ": " + alerted.detail : ""}). ` +
+                `Nobody has been told this enquiry was lost.`,
+              );
+            }
+          }
           // Loud, and visible to system-health, which already watches this org.
           console.error(
             `chat-agent: LEAD CAPTURE FAILED for org ${org.id} (${org.name}) — ` +

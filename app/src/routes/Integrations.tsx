@@ -152,7 +152,12 @@ export function Integrations() {
   const [emTestTo, setEmTestTo] = useState("");
 
   const load = async () => {
-    if (!org) return;
+    // Returning here without setting these left all three null, and the render
+    // below treats null as "still loading" — so the screen spun forever, because
+    // `load` only re-runs when `org` changes and `org` is what is missing. Empty
+    // lists instead, matching the `setLoading(false)` guard in Team.tsx,
+    // Templates.tsx and Automations.tsx.
+    if (!org) { setKeys([]); setHooks([]); setEndpoints([]); return; }
     const [k, w, e] = await Promise.all([
       supabase.from("api_keys").select("*").eq("org_id", org.id)
         .is("revoked_at", null).order("created_at", { ascending: false }),
@@ -233,9 +238,19 @@ export function Integrations() {
 
   const revokeKey = async (id: string, name: string) => {
     if (!confirm(`Revoke "${name}"? Anything using this key stops working immediately.`)) return;
-    const { error } = await supabase.from("api_keys")
-      .update({ revoked_at: new Date().toISOString() }).eq("id", id);
+    // `.select("id")` so a refusal is distinguishable from success. PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null — identical to a real revoke. "Key revoked" over a key that is
+    // still live is the worst lie this screen can tell: the admin stops looking
+    // for the thing that is reading their whole database.
+    const { data, error } = await supabase.from("api_keys")
+      .update({ revoked_at: new Date().toISOString() }).eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error(`"${name}" was NOT revoked — it may still be working. You no longer have permission to revoke it, or it is already gone.`);
+      return;
+    }
     toast.show("Key revoked");
     await load();
   };
@@ -262,9 +277,18 @@ export function Integrations() {
   };
 
   const toggleHook = async (h: WebhookKey) => {
-    const { error } = await supabase.from("webhook_keys")
-      .update({ active: !h.active }).eq("id", h.id);
+    // Same as revokeKey: no visible row means 204 with error: null, so pausing a
+    // capture URL appeared to work while the URL kept accepting leads — or, the
+    // other way round, a URL the user believed they had re-enabled stayed off and
+    // every form submission went nowhere.
+    const { data, error } = await supabase.from("webhook_keys")
+      .update({ active: !h.active }).eq("id", h.id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error(`"${h.label}" was not changed — it is no longer there, or you no longer have permission to change it.`);
+      return;
+    }
     await load();
   };
 
@@ -295,18 +319,36 @@ export function Integrations() {
   // endpoint returns already 19 failures deep and the next slow reply kills it
   // again immediately.
   const toggleEndpoint = async (e: Endpoint) => {
-    const { error } = await supabase.from("webhook_endpoints")
+    // Same as the two above: 204 with error: null when no visible row matched, so
+    // "Endpoint resumed" was said over an endpoint that is still disabled — which
+    // sends the customer off to debug their own receiver for events that were
+    // never going to be sent.
+    const { data, error } = await supabase.from("webhook_endpoints")
       .update({ active: !e.active, failure_count: 0, last_error: null })
-      .eq("id", e.id);
+      .eq("id", e.id)
+      .select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error("The endpoint was not changed — it is no longer there, or you no longer have permission to change it.");
+      return;
+    }
     toast.show(e.active ? "Endpoint paused" : "Endpoint resumed");
     await load();
   };
 
   const removeEndpoint = async (id: string, url: string) => {
     if (!confirm(`Stop sending events to ${url}?`)) return;
-    const { error } = await supabase.from("webhook_endpoints").delete().eq("id", id);
+    // A DELETE matching no visible row is also a 204 with error: null, so
+    // "Endpoint removed" was printed over an endpoint that is still being sent
+    // every lead — and the reload then put it back in the list.
+    const { data, error } = await supabase.from("webhook_endpoints").delete().eq("id", id).select("id");
     if (error) { toast.error(error.message); return; }
+    if (!data?.length) {
+      await load();
+      toast.error(`${url} was NOT removed — it may still be receiving events. It is already gone, or you no longer have permission to remove it.`);
+      return;
+    }
     toast.show("Endpoint removed");
     await load();
   };
