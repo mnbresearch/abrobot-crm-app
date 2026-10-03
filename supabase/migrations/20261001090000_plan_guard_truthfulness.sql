@@ -293,7 +293,11 @@ select
      join pg_namespace n on n.oid = p.pronamespace
      cross join lateral regexp_matches(
        pg_get_functiondef(p.oid),
-       '''(plan|purchased_plan|label|period|is_expired|not_activated|access_until|days_left|ai_messages|emails|whatsapp_messages|leads|seats|automations|whatsapp|api_access)'''',
+       -- Dollar-quoted. Written as a normal SQL literal this needed a quote
+       -- escaped inside a quoted string inside a quoted string, and I got the
+       -- count wrong by one — 7 quotes, so the literal never closed and the
+       -- parser failed on the next token. $re$...$re$ has no escaping at all.
+       $re$'(plan|purchased_plan|label|period|is_expired|not_activated|access_until|days_left|ai_messages|emails|whatsapp_messages|leads|seats|automations|whatsapp|api_access)'$re$,
        'g') as m
     where n.nspname = 'public' and p.proname = 'usage_snapshot')          as snapshot_key_count,
   (select pg_get_functiondef(p.oid) like '%Automations come with a paid plan%'
