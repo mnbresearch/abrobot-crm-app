@@ -175,6 +175,25 @@ test("digit grouping that is not phone-shaped is refused", () => {
   assert.strictEqual(normPhone("98765-43210"), "+919876543210");
 });
 
+test("grabName stops at a connective instead of running into the next clause", () => {
+  // Caught by a LIVE Telegram alert after deploying: the real sentence
+  // "my name is Jean-Luc Picard and my email is ..." stored the name as
+  // "Jean-Luc Picard and my". There is no punctuation before "and", so the
+  // sentence splitter could not help and the four-word allowance ran on.
+  assert.strictEqual(
+    grabName("my name is Jean-Luc Picard and my email is zz@example.invalid"),
+    "Jean-Luc Picard");
+  assert.strictEqual(grabName("my name is Priya and I want to study in Canada"), "Priya");
+  assert.strictEqual(grabName("my name is Ravi my phone is 9876543210"), "Ravi");
+  assert.strictEqual(grabName("name: Anil Gupta email anil@x.com"), "Anil Gupta");
+});
+
+test("name particles are NOT treated as connectives", () => {
+  // Truncating these would be the same class of error in the other direction.
+  assert.strictEqual(grabName("my name is Jean van der Berg"), "Jean van der Berg");
+  assert.strictEqual(grabName("my name is Maria de Souza"), "Maria de Souza");
+});
+
 test("grabName does not match a trigger buried inside another word", () => {
   // "[Tt]his is" matched inside "Mathis is"; "[Ii] ?am" inside "Miriam".
   assert.strictEqual(grabName("my friend Miriam Sharma referred me"), null);

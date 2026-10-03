@@ -153,6 +153,28 @@ function cleanName(raw: string): string | null {
   name = name.replace(/[.,;:!?]+$/, "").trim();
   if (!name) return null;
 
+  // Stop at a connective. Caught live: "my name is Jean-Luc Picard and my
+  // email is ..." stored the name as "Jean-Luc Picard and my". The sentence
+  // splitter above cannot help — there is no punctuation before "and" — so the
+  // four-word allowance simply ran on into the next clause.
+  //
+  // Only words that are vanishingly unlikely inside a real name. Particles like
+  // van, de, da, bin, ibn, al are deliberately ABSENT: "Jean van der Berg" and
+  // "Zainab bint Ali" are names, and truncating them would be the same class of
+  // error in the other direction.
+  const STOP_AFTER = new Set([
+    "and", "or", "but", "my", "your", "our", "his", "her", "their",
+    "email", "e-mail", "mail", "phone", "mobile", "number", "contact", "whatsapp",
+    "is", "was", "am", "are", "here", "from", "at", "please", "thanks", "thank",
+    "i", "we", "you", "it", "this", "that", "looking", "interested", "regarding",
+  ]);
+  {
+    const parts = name.split(" ");
+    const cut = parts.findIndex((w) => STOP_AFTER.has(w.toLowerCase().replace(/[^\p{L}]/gu, "")));
+    if (cut === 0) return null;                    // starts with one: not a name at all
+    if (cut > 0) name = parts.slice(0, cut).join(" ");
+  }
+
   // Every word must be vetted, not just the first. "This is Regarding
   // Admission" passed because only "regarding" was checked against the list
   // and it was absent — the real tell is that no word is a plausible name.
