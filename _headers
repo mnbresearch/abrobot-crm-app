@@ -1,0 +1,67 @@
+# AbroBot CRM — security headers for Cloudflare Pages.
+#
+# The portfolio audit of 4 October 2026 found this site serving only
+# `X-Content-Type-Options` and `Referrer-Policy`: no HSTS, no CSP, no
+# X-Frame-Options. Every other product in the portfolio had at least HSTS.
+#
+# Cloudflare Pages reads this file from the publish root. Rules are matched
+# per-path, most specific first; `/*` applies to everything.
+
+/*
+  # Force HTTPS for a year, including subdomains. `preload` is the submission
+  # token for the browser preload list — harmless if never submitted, and the
+  # prerequisite if you ever do.
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+
+  # Clickjacking. The CRM is a session-bearing app; nothing should frame it.
+  # `frame-ancestors` in the CSP below is the modern equivalent and supersedes
+  # this in current browsers, but XFO is kept for older ones.
+  X-Frame-Options: DENY
+
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+  # Features this product never uses. Denying them means an injected script
+  # cannot silently turn on a camera or read location.
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(), usb=()
+
+  # ── Content-Security-Policy ───────────────────────────────────────────────
+  #
+  # Every origin below was enumerated from the shipped HTML and the app source,
+  # not guessed:
+  #   fonts.googleapis.com  — the Plus Jakarta Sans stylesheet link
+  #   fonts.gstatic.com     — the font files that stylesheet references
+  #   *.supabase.co         — the API and the edge functions the app calls
+  #   data:                 — the inline SVG favicon in index.html
+  #
+  # `script-src` carries 'unsafe-inline' DELIBERATELY, and it is the one
+  # compromise here. index.html contains one inline script — the pre-paint
+  # block that decides whether to show the static hero — and Cloudflare Pages
+  # serves static files, so there is no request-time nonce available. The
+  # alternative is a sha256 hash, which is tighter but brittle: the hash lives
+  # in this file while the script lives in app/index.html, so any edit to that
+  # script silently blocks it, the skeleton never hides, and a signed-in user
+  # gets a flash of the marketing hero over their dashboard. Given this site had
+  # NO policy at all until now, a working policy beats a stricter one that
+  # breaks on the next edit.
+  #
+  # What it still buys with 'unsafe-inline' in place is worth being precise
+  # about, because it is easy to assume the answer is "nothing":
+  #   - script-src 'self' blocks <script src="//evil.example"> outright.
+  #   - connect-src is the real prize: even if someone lands an injected inline
+  #     script, it cannot fetch/XHR stolen records to an attacker's host,
+  #     because only Supabase and this origin are reachable.
+  #   - base-uri and form-action stop <base> hijacking and form redirection.
+  #   - frame-ancestors 'none' is the enforcing half of clickjacking defence.
+  #
+  # To tighten later, replace 'unsafe-inline' with the script's hash:
+  #   printf '%s' "<contents of the inline <script> block>" | openssl dgst -sha256 -binary | openssl base64
+  # and add a test asserting the hash matches app/index.html, so it cannot rot.
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https://pomsltnrxvbcafwtbtlc.supabase.co https://*.supabase.co; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'
+
+# The embeddable widget is loaded BY other companies' websites, so it must stay
+# cross-origin readable. It is a static script with no credentials and no
+# cross-tenant defaults — the org is supplied by the embedding page.
+/widget.js
+  Access-Control-Allow-Origin: *
+  Cache-Control: public, max-age=300

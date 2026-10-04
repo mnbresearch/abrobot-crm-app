@@ -447,9 +447,10 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
         <nav className="lp-foot-links" aria-label="Footer">
           <a href="/product">Product</a>
           <a href="/pricing">Pricing</a>
-          <a href="/contact-us.html">Contact</a>
-          <a href="/terms-and-conditions.html">Terms</a>
-          <a href="/refund-and-cancellation-policy.html">Refunds</a>
+          <a href="/contact-us">Contact</a>
+          <a href="/privacy-policy">Privacy</a>
+          <a href="/terms-and-conditions">Terms</a>
+          <a href="/refund-and-cancellation-policy">Refunds</a>
         </nav>
       </footer>
     </div>

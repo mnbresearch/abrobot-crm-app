@@ -80,7 +80,13 @@ const ATTACKS = [
   'https://a.com/%22onmouseover=%22alert(1)',                   // percent-encoded
 ];
 
-for (const file of ["widget.js", "abrobot-crm-site-v15/widget.js"]) {
+// Only the root copy now. `abrobot-crm-site-v15/widget.js` used to be a full
+// second widget — a stale August build that shipped two customers' real phone
+// numbers, defaulted to the "abrobot" tenant when a page had no data-org, and
+// wrote config into innerHTML unescaped. It was replaced on 3 October with a
+// three-line loader that fetches this file, so there is no longer a second
+// linkify() to test. The loader is asserted below instead.
+for (const file of ["widget.js"]) {
   const abs = path.join(REPO_ROOT, file);
   const linkify = extractLinkify(abs);
 
@@ -136,7 +142,7 @@ if (fail > 0) {
 }
 
 if (parse) {
-  console.log(`PASS - ${pass} assertions across both widget copies (DOM-parsed)`);
+  console.log(`PASS - ${pass} assertions on widget.js (DOM-parsed) + the v15 loader guard`);
 } else {
   // Deliberately the harness's SKIP word, which CI treats as a hard failure.
   // The string assertions above did run and did pass, but they are the weaker
@@ -147,3 +153,30 @@ if (parse) {
   console.log(`       ${pass} string-level assertions passed. Run: npm install --no-save jsdom`);
 }
 process.exit(0);
+
+
+// ── The v15 path must stay a loader, not become a second widget ─────────────
+//
+// It was a 17 KB duplicate for weeks, and the duplicate is what served two
+// customers' phone numbers and the cross-tenant default to every site that
+// pointed at the old URL. If someone copies the real widget back over it, this
+// fails — which is the only thing standing between that mistake and a repeat.
+{
+  const v15 = path.join(REPO_ROOT, "abrobot-crm-site-v15", "widget.js");
+  if (fs.existsSync(v15)) {
+    const src = fs.readFileSync(v15, "utf8");
+    if (src.length > 3000) {
+      console.log(`FAILED - ${v15} is ${src.length} bytes; it should be a small loader, not a widget copy`);
+      process.exit(1);
+    }
+    if (/PRESETS|\|\|\s*"abrobot"/.test(src)) {
+      console.log(`FAILED - ${v15} has regained per-org PRESETS or the cross-tenant default`);
+      process.exit(1);
+    }
+    if (!/\/widget\.js/.test(src)) {
+      console.log(`FAILED - ${v15} no longer loads the real widget`);
+      process.exit(1);
+    }
+    pass += 3;
+  }
+}
