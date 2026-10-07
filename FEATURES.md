@@ -37,7 +37,7 @@ written history of several outages and they are load-bearing.
     widget.js  ──POST /chat-agent?org=slug──►  chat-agent  ──────►│              │
       (Groq answers, regex extracts email/phone, inserts lead)    │              │
                                                                   │              │
- 2. Capture form / WhatsApp Cloud API / Zapier / Meta lead ad      │   leads      │
+ 2. Form / WhatsApp / Zapier / IndiaMART / JustDial / Google Ads   │   leads      │
     ──POST /lead-webhook?key=<capture key>──►  lead-webhook ──────►│   (RLS,      │
       (dedupes, scores, alerts, optional WhatsApp autoreply)       │   org_id)    │
                                                                   │              │
@@ -297,9 +297,32 @@ can pass on markup a browser would still build."*
 
 ## 4b. `lead-webhook` — the public HTTP endpoint
 
-**What it does.** A URL a customer can paste into a capture form, Zapier, Meta
-lead ads, IndiaMART, or WhatsApp Cloud API. Handles inbound WhatsApp payloads
-(Meta and Twilio shapes) and generic JSON.
+**What it does.** A URL a customer can paste into a capture form, Zapier,
+IndiaMART, JustDial, TradeIndia, a Google Ads lead form, or WhatsApp Cloud API.
+Accepts JSON and form-encoded bodies (`_shared/sources.ts` `parseBody` — form
+encoding is what Twilio and plain HTML forms send). Handles inbound WhatsApp
+payloads (Meta and Twilio shapes) and generic JSON.
+
+**Native adapters** (`_shared/sources.ts`, tested in `sources.test.cjs`):
+IndiaMART Push API (`SENDER_*`, `QUERY_*`, `UNIQUE_QUERY_ID`, with or without the
+`RESPONSE` wrapper), Google Ads lead forms (`user_column_data[]`; `google_key`
+must equal the capture key, else 403), TradeIndia (`sender_*`, `rfi_id`), JustDial
+(`leadid`, or any `mobile` payload on a key whose source is `justdial`). Each maps
+onto the flat shape the generic path already validates, dedupes and scores; the
+record's `source` is the detected provider. JustDial and TradeIndia field names
+are from their commonly documented formats — confirm against the first live lead.
+
+**Meta Lead Ads are NOT natively supported, and cannot be via this URL.** Meta's
+leadgen webhook carries only a `leadgen_id`; the contact details must be fetched
+from the Graph API with a page token and the `leads_retrieval` permission (app
+review). Such payloads are recognised and answered 422 with Zapier guidance
+rather than silently dropped. Use Zapier: Facebook Lead Ads → Webhooks by Zapier.
+
+**Source values.** `indiamart`, `justdial`, `tradeindia`, `google_ads`,
+`meta_ads` are added to `lead_source` by migration `20261007090000`, which also
+keeps them inbound-exempt in `guard_lead_limit`. Until it is applied, an insert
+with a new source fails 22P02 and lead-webhook retries with the key's own source,
+so no lead is lost.
 
 **Path.** `POST /lead-webhook?key=<capture key>` → `webhook_keys` lookup →
 dedupe against `leads` → insert or enrich → `activities` → Telegram alert →

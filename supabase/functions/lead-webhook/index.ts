@@ -20,6 +20,9 @@ const supabase = createClient(
 // depending on which door they came through, and so never deduped against
 // themselves.
 import { EMAIL_RE, EMAIL_ONLY, PHONE_RE, normPhone, displayName } from "../_shared/capture.ts";
+// Native adapters for IndiaMART, JustDial, TradeIndia and Google Ads lead forms,
+// plus form-encoded body parsing. See _shared/sources.ts.
+import { adaptPayload, parseBody } from "../_shared/sources.ts";
 
 // deno-lint-ignore no-explicit-any
 function extractLead(body: any, source: string) {
@@ -38,7 +41,11 @@ function extractLead(body: any, source: string) {
   } else {
     name = body.name ?? body.Name ?? body.full_name ?? body.customer_name ?? "";
     email = body.email ?? body.Email ?? null;
-    phone = normPhone(body.phone ?? body.Phone ?? body.phone_number ?? null);
+    // `mobile` / `Mobile` / `whatsapp`: the field name most Indian website forms
+    // actually use. Only phone / Phone / phone_number were read, so a form that
+    // said "mobile" arrived with no number and, with no email, was refused 422.
+    phone = normPhone(body.phone ?? body.Phone ?? body.phone_number ?? body.mobile ?? body.Mobile
+      ?? body.mobile_number ?? body.whatsapp ?? null);
     message = body.message ?? body.query ?? body.conversation_summary ?? body.body ?? "";
     if (!email && body.from && EMAIL_RE.test(body.from)) email = body.from.match(EMAIL_RE)![0];
     if (body.subject) message = body.subject + "\n" + message;
@@ -253,7 +260,11 @@ Deno.serve(async (req) => {
     if (text.length > MAX_BODY_BYTES) {
       return json({ ok: false, error: "payload too large" }, 413);
     }
-    body = JSON.parse(text);
+    // JSON or form-encoded. JSON-only answered "400 invalid JSON" to Twilio
+    // (which only sends form-encoded — so the Twilio WhatsApp branch in
+    // extractLead could never run), to plain HTML <form> posts, and to the
+    // marketplaces that post form data. JSON parsing itself is unchanged.
+    body = parseBody(text, req.headers.get("content-type"));
   } catch {
     return json({ ok: false, error: "invalid JSON" }, 400);
   }
@@ -265,7 +276,31 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "expected a JSON object" }, 400);
   }
 
-  const lead = extractLead(body, wk.source);
+  // ── Provider adapters ───────────────────────────────────────────────────
+  // A recognised marketplace or ad-platform payload is mapped onto the flat
+  // shape below; anything else falls through untouched to the generic path.
+  const adapted = adaptPayload(body, String(wk.source ?? ""));
+
+  if (adapted?.unsupported) {
+    // Loud, not silent: whoever pointed Meta here sees this in Meta's own
+    // webhook test tool, which is the only place they would look.
+    console.error(`lead-webhook: ${adapted.provider} payload refused for org ${wk.org_id}: ${adapted.unsupported}`);
+    return json({ ok: false, error: adapted.unsupported }, 422);
+  }
+
+  // Google sends back the key you typed into the lead form's webhook settings.
+  // Requiring it to equal this capture key catches a misconfigured Google form
+  // visibly, in Google's own UI. It is NOT an extra secret: the capture key is
+  // already in the URL, so anyone holding the URL can supply it.
+  if (adapted?.provider === "google_ads" && adapted.googleKey !== key) {
+    return json({ ok: false, error: "google_key does not match this capture key" }, 403);
+  }
+
+  // An adapter that matched but yielded no contact at all has misread the
+  // payload (e.g. a generic form that happens to carry a `leadid` field). Fall
+  // back to the generic path, which is exactly what ran before adapters existed.
+  const useAdapter = !!adapted && !!(adapted.flat.email || adapted.flat.phone);
+  const lead = extractLead(useAdapter ? adapted!.flat : body, useAdapter ? adapted!.provider : wk.source);
   if (!lead.email && !lead.phone) {
     return json({ ok: false, error: "no email or phone found" }, 422);
   }
@@ -308,8 +343,10 @@ Deno.serve(async (req) => {
     // returning 200, so the sender never retried. Fail loudly instead; the
     // dedupe path is idempotent, so a retry re-runs it safely.
     const { error: actErr } = await supabase.from("activities").insert({
-      org_id: wk.org_id, lead_id: existing[0].id, type: wk.source === "whatsapp" ? "whatsapp" : "note",
-      content: "New inbound message via " + wk.source + ":\n" + lead.message,
+      org_id: wk.org_id, lead_id: existing[0].id, type: lead.source === "whatsapp" ? "whatsapp" : "note",
+      // lead.source, not wk.source: a repeat IndiaMART enquiry through a key
+      // marked "website" should still say where it actually came from.
+      content: "New inbound message via " + lead.source + ":\n" + lead.message,
     });
     if (actErr) {
       console.error(`lead-webhook: could not record the inbound message for lead ${existing[0].id}:`, actErr.message);
@@ -414,11 +451,16 @@ Deno.serve(async (req) => {
   const stageKey = await firstStageKey(supabase, wk.org_id);
   const custom = await resolveCustom(supabase, wk.org_id, lead.custom);
 
-  const { data: inserted, error } = await supabase.from("leads").insert({
+  const leadRow = {
     org_id: wk.org_id, name: lead.name, email: lead.email, phone: lead.phone,
     stage_key: stageKey,
     source: lead.source, target_country: lead.target_country, course: lead.course,
-    course_level: lead.course_level, intake: lead.intake, raw: body, assigned_to: assignTo,
+    course_level: lead.course_level, intake: lead.intake,
+    // google_key equals the capture key; do not copy it into a row every
+    // member can read.
+    raw: (useAdapter && adapted!.provider === "google_ads" && body && typeof body === "object")
+      ? { ...(body as Record<string, unknown>), google_key: undefined } : body,
+    assigned_to: assignTo,
     // Which audience this record belongs to, for follow-up. Free text from the
     // capture key — deliberately NOT `source`, which is an enum a tenant
     // cannot extend. See 20260908120000.
@@ -426,7 +468,23 @@ Deno.serve(async (req) => {
     ...(custom ? { custom } : {}),
     score,
     next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-  }).select("id").single();
+  };
+  let { data: inserted, error } = await supabase.from("leads").insert(leadRow).select("id").single();
+
+  // Deploy-order safety. Marketplace sources ("indiamart", "google_ads"…) only
+  // exist in the lead_source enum once 20261007090000 has run. If this function
+  // ships first, the insert fails 22P02 — and without this retry every
+  // IndiaMART enquiry in that window would be LOST rather than mis-labelled.
+  // Mis-labelled is recoverable (the original payload is in `raw`); lost is not.
+  // The key's own source can be a new value too (a key created as "indiamart"
+  // if webhook_keys.source is text), so the last resort is "website", which
+  // has always existed.
+  for (const fallback of [wk.source, "website"]) {
+    if (error?.code !== "22P02" || leadRow.source === fallback) continue;
+    console.warn(`lead-webhook: source "${leadRow.source}" not in lead_source enum yet — apply 20261007090000. Saving as "${fallback}".`);
+    leadRow.source = fallback;
+    ({ data: inserted, error } = await supabase.from("leads").insert(leadRow).select("id").single());
+  }
 
   if (error) {
     // ── Lost the race to create this person ────────────────────────────────
@@ -473,7 +531,7 @@ Deno.serve(async (req) => {
   if (lead.message) {
     await supabase.from("activities").insert({
       org_id: wk.org_id, lead_id: inserted.id, type: "system",
-      content: "First inbound message via " + wk.source + ":\n" + lead.message,
+      content: "First inbound message via " + leadRow.source + ":\n" + lead.message,
     });
   }
 

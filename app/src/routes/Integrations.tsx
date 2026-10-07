@@ -28,6 +28,24 @@ interface WebhookKey {
   // `source`, which is a fixed enum shared by every tenant on the platform.
   segment: string | null;
 }
+// Where a capture URL's records come from. The lead-webhook function reads
+// this to recognise the provider's payload (sources.ts) and to stamp `source`
+// on every record. Meta is absent on purpose: its webhook carries no contact
+// details (only a leadgen_id needing a Graph API token), so it goes via Zapier.
+const HOOK_SOURCES: { value: string; label: string; steps: string }[] = [
+  { value: "website", label: "Website form / Zapier / other",
+    steps: "POST JSON or form data with name, email, phone, message. For Facebook Lead Ads use Zapier: Facebook Lead Ads → Webhooks by Zapier (POST) → this URL." },
+  { value: "indiamart", label: "IndiaMART",
+    steps: "IndiaMART seller panel → Lead Manager → Settings → CRM Integration → Push API → paste this URL. Every enquiry arrives here with buyer name, mobile, product and message." },
+  { value: "google_ads", label: "Google Ads lead form",
+    steps: "Google Ads → your lead form asset → Lead delivery → Webhook. Paste this URL, and paste the part after key= (starting wh_) as the Key. Send test data to check." },
+  { value: "justdial", label: "JustDial",
+    steps: "Ask your JustDial account manager to enable lead push (API) to this URL, method POST. Check the first lead that arrives." },
+  { value: "tradeindia", label: "TradeIndia",
+    steps: "TradeIndia seller panel → My Inquiries → CRM / API integration → give this URL as the push endpoint. Check the first lead that arrives." },
+];
+const sourceLabel = (v: string) => HOOK_SOURCES.find((x) => x.value === v)?.label ?? v;
+
 interface Endpoint {
   id: string; url: string; secret: string; events: string[]; active: boolean;
   description: string | null; failure_count: number; last_status: number | null;
@@ -128,6 +146,7 @@ export function Integrations() {
   const [keyScopes, setKeyScopes] = useState<string[]>(["leads:read"]);
   const [hookLabel, setHookLabel] = useState("");
   const [hookSegment, setHookSegment] = useState("");
+  const [hookSource, setHookSource] = useState("website");
   const [epUrl, setEpUrl] = useState("");
   const [epEvents, setEpEvents] = useState<string[]>(["lead.created"]);
 
@@ -266,12 +285,20 @@ export function Integrations() {
     // with the difference invisible on screen — is a trap not worth leaving out.
     const segment = hookSegment.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 40) || null;
     const { error } = await supabase.from("webhook_keys").insert({
-      org_id: org.id, key, label: hookLabel.trim(), source: "website", active: true, segment,
+      org_id: org.id, key, label: hookLabel.trim(), source: hookSource, active: true, segment,
     });
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
+    if (error) {
+      // 22P02 = the database does not know this source yet (the marketplace
+      // migration has not been applied). Say so instead of a raw enum error.
+      toast.error(error.code === "22P02"
+        ? `${sourceLabel(hookSource)} is not enabled on the server yet. Choose "Website form / Zapier / other" for now.`
+        : error.message);
+      return;
+    }
     setHookLabel("");
     setHookSegment("");
+    setHookSource("website");
     toast.show("Capture URL created");
     await load();
   };
@@ -811,11 +838,16 @@ export function Integrations() {
       {/* ── Inbound capture ───────────────────────────────────────────────── */}
       <Card title={`Capture URLs — send ${ui.leadNounPlural.toLowerCase()} in`}>
         <p className="sub" style={{ marginTop: -8 }}>
-          Point a website form, Facebook Lead Ads, IndiaMART, or a Zapier action at one of
-          these. Anything that arrives is scored, assigned and alerted like any other record.
+          Point a website form, IndiaMART, JustDial, TradeIndia, a Google Ads lead form, or a
+          Zapier action (including Facebook Lead Ads) at one of these. Anything that arrives is
+          scored, assigned and alerted like any other record.
         </p>
 
         <div className="row row-wrap" style={{ marginTop: 12, marginBottom: 6 }}>
+          <select className="input" style={{ maxWidth: 230 }} aria-label="Lead source"
+            value={hookSource} onChange={(e) => setHookSource(e.target.value)}>
+            {HOOK_SOURCES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
           <input className="input" style={{ maxWidth: 260 }}
             placeholder="Where from? e.g. Website contact form"
             value={hookLabel} onChange={(e) => setHookLabel(e.target.value)} />
@@ -855,13 +887,20 @@ export function Integrations() {
             <div className="code" style={{ marginTop: 6, fontSize: 11.5, wordBreak: "break-all" }}>
               {captureUrl(h.key)}
             </div>
+            {h.source !== "website" && HOOK_SOURCES.some((o) => o.value === h.source) && (
+              <p className="sub" style={{ fontSize: 12, marginTop: 6 }}>
+                <b>{sourceLabel(h.source)} setup:</b> {HOOK_SOURCES.find((o) => o.value === h.source)!.steps}
+              </p>
+            )}
           </div>
         ))}
 
         <p className="sub" style={{ fontSize: 12, marginTop: 12 }}>
           POST JSON with any of <code>name</code>, <code>email</code>, <code>phone</code>,{" "}
           <code>message</code>. WhatsApp Cloud API and Twilio payloads are recognised
-          automatically. Treat the URL as a password — anyone holding it can add records.
+          automatically, as are IndiaMART, JustDial, TradeIndia and Google Ads lead-form pushes.{" "}
+          {HOOK_SOURCES.find((o) => o.value === hookSource)?.steps}{" "}
+          Treat the URL as a password — anyone holding it can add records.
         </p>
       </Card>
 

@@ -10,7 +10,10 @@ export type ActivityType =
 
 export type LeadSource =
   | "whatsapp" | "chatbase" | "email" | "website" | "csv_import"
-  | "pdf_import" | "manual" | "referral" | "other";
+  | "pdf_import" | "manual" | "referral" | "other"
+  // Marketplaces and ad platforms, recognised natively by the capture URL.
+  // Added by migration 20261007090000.
+  | "indiamart" | "justdial" | "tradeindia" | "google_ads" | "meta_ads";
 
 /** Legacy enum. Retained for compatibility; new code reads `stage_key`. */
 export type LegacyStage =
