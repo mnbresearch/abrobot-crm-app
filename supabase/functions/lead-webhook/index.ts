@@ -469,7 +469,7 @@ Deno.serve(async (req) => {
     score,
     next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
   };
-  let { data: inserted, error } = await supabase.from("leads").insert(leadRow).select("id").single();
+  let { data: inserted, error } = await supabase.from("leads").insert(leadRow).select("id, score").single();
 
   // Deploy-order safety. Marketplace sources ("indiamart", "google_ads"…) only
   // exist in the lead_source enum once 20261007090000 has run. If this function
@@ -483,7 +483,7 @@ Deno.serve(async (req) => {
     if (error?.code !== "22P02" || leadRow.source === fallback) continue;
     console.warn(`lead-webhook: source "${leadRow.source}" not in lead_source enum yet — apply 20261007090000. Saving as "${fallback}".`);
     leadRow.source = fallback;
-    ({ data: inserted, error } = await supabase.from("leads").insert(leadRow).select("id").single());
+    ({ data: inserted, error } = await supabase.from("leads").insert(leadRow).select("id, score").single());
   }
 
   if (error) {
@@ -528,6 +528,13 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "could not save the record" }, 500);
   }
 
+  // The score the database actually holds. Something on the live database
+  // adjusts it after insert (seen: computed 27, stored 20), so the alert, the
+  // automations and this response must report the stored value — otherwise the
+  // Telegram alert and the record disagree about the same lead.
+  const storedScore = typeof (inserted as { score?: unknown })?.score === "number"
+    ? (inserted as { score: number }).score : score;
+
   if (lead.message) {
     await supabase.from("activities").insert({
       org_id: wk.org_id, lead_id: inserted.id, type: "system",
@@ -538,8 +545,8 @@ Deno.serve(async (req) => {
   // best-effort phone alert — must not affect the webhook's response
   const alert = await notifyNewLead(supabase, wk.org_id, {
     id: inserted.id, name: lead.name, email: lead.email, phone: lead.phone,
-    source: lead.source, target_country: lead.target_country, course: lead.course,
-    score, message: lead.message,
+    source: leadRow.source, target_country: lead.target_country, course: lead.course,
+    score: storedScore, message: lead.message,
   });
 
   // WhatsApp autoreply — only for inbound WhatsApp, only if the org enabled it.
@@ -595,12 +602,12 @@ Deno.serve(async (req) => {
   // alert is out, so a misconfigured rule can never cost us the enquiry.
   const automations = await fireEventAutomations(
     supabase, wk.org_id,
-    { ...lead, id: inserted.id, score, tags: [], stage_key: null },
+    { ...lead, source: leadRow.source, id: inserted.id, score: storedScore, tags: [], stage_key: null },
     "lead_created",
   );
 
   return json({
-    ok: true, deduped: false, lead_id: inserted.id, score,
+    ok: true, deduped: false, lead_id: inserted.id, score: storedScore,
     alert, autoreply, automations,
   });
 });
