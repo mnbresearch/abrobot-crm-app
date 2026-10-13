@@ -196,3 +196,28 @@ jobs:
               print(f"::error::{len(bad)} SQL file(s) failed to parse")
               sys.exit(1)
           PY
+
+      - name: Every PL/pgSQL body must parse
+        run: |
+          # parse_sql above treats a function body as an opaque string, so a
+          # typo inside `as $$ ... $$` (retrun, a missing `end if;`) passed CI
+          # and only failed in the SQL editor — after the statements before it
+          # had already run. This parses each plpgsql function and DO block.
+          python - <<'PY'
+          import glob, sys
+          from pglast.parser import parse_plpgsql_json, split
+          bad = 0
+          for f in sorted(glob.glob("supabase/migrations/*.sql") + glob.glob("scripts/*.sql")):
+              for stmt in split(open(f).read()):
+                  s = stmt.strip(); low = s.lower()
+                  if (low.startswith("create") and "language plpgsql" in low) or low.startswith("do "):
+                      try:
+                          parse_plpgsql_json(s)
+                      except Exception as e:
+                          bad += 1
+                          print(f"  FAIL {f}: {s[:70]!r}: {e}")
+          if bad:
+              print(f"::error::{bad} PL/pgSQL body/bodies failed to parse")
+              sys.exit(1)
+          print("  all PL/pgSQL bodies parse")
+          PY

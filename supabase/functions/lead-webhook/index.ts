@@ -527,6 +527,12 @@ Deno.serve(async (req) => {
     console.error("lead-webhook: insert failed:", error.message);
     return json({ ok: false, error: "could not save the record" }, 500);
   }
+  if (!inserted) {
+    // .single() returns a row or an error; this is unreachable in practice and
+    // here so the compiler (and a future edit) cannot treat a null as a lead.
+    console.error("lead-webhook: insert returned no row and no error");
+    return json({ ok: false, error: "could not save the record" }, 500);
+  }
 
   // The score the database actually holds. Something on the live database
   // adjusts it after insert (seen: computed 27, stored 20), so the alert, the

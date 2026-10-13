@@ -423,9 +423,11 @@ interpolation.
 
 ## `hit_rate_limit()` — complete caller list
 
-Defined once (`20260906100000_prelaunch_hardening.sql:387`). Exactly two
-callers: `lead-webhook/index.ts:184` (60/min) and `chat-agent/index.ts:379`
-(20/min). **Not** called by `api/index.ts` — see §14.
+Defined once (`20260906100000_prelaunch_hardening.sql:387`). Callers:
+`lead-webhook` (60/min), `chat-agent` (20/min), `api` (120/min per key, keyed
+on a hash of the presented key and checked BEFORE the key is resolved — since
+13 Oct 2026), and `track_event()` (60/min per user or client IP, 600/min
+globally for anonymous visitors — since 13 Oct 2026).
 
 ---
 
@@ -931,10 +933,32 @@ move a record to another org.
 **Configured by.** `api_keys` table; `plan_allows_api()`; Business plan and
 above. Deployed `--no-verify-jwt` because the app's own key *is* the auth.
 
-**Status: Working with caveats.** Two:
+**Since 13 October 2026** (`20261013090000_api_key_lifecycle.sql`, `api/index.ts`):
 
-- **No rate limiting whatsoever.** `hit_rate_limit()` exists and is never called from `api/index.ts`. This is a `--no-verify-jwt` endpoint that does a row-locking `UPDATE` and an unbounded `count(*)` per request. `API.md:184` states it plainly: *"None enforced yet, beyond a hard cap of 200 records per page."* Finding H5, open.
-- **Pagination is offset-based with no cursor**, which `API.md:200` documents as able to skip or repeat rows under concurrent writes.
+- **Rate limit** 120/min per key, `429` + `Retry-After`, `X-RateLimit-*`
+  headers. Finding H5 closed. **Body limit** 64 KB (`413`).
+- **Validation** of every PATCH field (`_shared/api-validate.ts`): `assigned_to`
+  must be an active member of the caller's org (it could previously be any
+  uuid, including another tenant's user), score 0–100, email lower-cased, phone
+  normalised, tags/custom bounded. All problems returned together in `details`.
+- **No database text in errors.** 5xx bodies are generic; detail goes to the
+  log under the `X-Request-Id` every response now carries.
+- **OpenAPI 3.1** at `GET /openapi.json` (unauthenticated), from
+  `_shared/openapi.ts`; `api-validate.test.cjs` fails the build if the spec and
+  the served routes differ in either direction.
+- **Key lifecycle:** `rotate_api_key(id, overlap_minutes)` (0 to 7 days of
+  overlap, inherits scopes and lifetime, refuses to rotate twice),
+  `revoke_api_key(id, reason)`, `api_key_events` history written only by
+  triggers. A guard trigger makes key identity immutable, revocation one-way and
+  expiry shorten-only — previously an org admin could un-revoke a key through
+  the REST interface. New keys default to a 1-year expiry in the UI.
+- Behavioural tests: `scripts/test-api-keys.sql` (create, hash-only storage,
+  member denied, cross-tenant rotate/revoke/read/forge denied, guard rails,
+  rotation with/without overlap, double rotation, revoke, expiry). Rolls itself
+  back.
+
+**Remaining caveat:** pagination is offset-based with no cursor, which
+`API.md` documents as able to skip or repeat rows under concurrent writes.
 
 **Verified by.** No automated test. `scripts/api-isolation-test.sh` is an
 **interactive** script requiring two orgs' API keys pasted in by hand, and
@@ -1571,3 +1595,53 @@ The defences now in place — fail-closed RPC checks, bounded queries with resum
 cursors, durable incident rows before any notification, and explicit
 "unavailable" states distinct from "empty" — are all reactions to specific
 instances of that one shape.
+
+
+---
+
+# 20. Product analytics (13 October 2026)
+
+**What it does.** First-party funnel for AbroBot CRM itself: landing → pricing →
+sign-in link → workspace created → first record → checkout opened → paid, plus
+activation, payments, API usage and most-used screens. Platform screen →
+"Product analytics".
+
+**How.** `product_events` (`20261013100000_product_analytics.sql`). Server events
+come from triggers on `payments`, `subscriptions`, `organizations`, `profiles`,
+`pipeline_stages`, `api_keys` — so payment and signup numbers are as trustworthy
+as those tables, and a browser cannot claim a payment. Browser events go through
+`track_event()` (allow-listed events and property keys; user/org from the JWT;
+query strings and record ids stripped; rate-limited per user/IP and globally).
+`app/src/lib/analytics.ts` for the app, `/track.js` for the static pages.
+Nothing is sent under Do Not Track / Global Privacy Control; no cookies; 13-month
+retention (`purge-product-events` cron); `forget_user_analytics()` for erasure.
+Disclosed in privacy-policy.html.
+
+**Verified by.** `scripts/test-analytics-recovery.sql` (rolls back).
+
+# 21. Abandoned-checkout reminders (13 October 2026)
+
+**What it does.** Emails the admin who opened Cashfree checkout and did not pay:
+up to N reminders (default 2), first after 2h, then 48h apart.
+
+**How.** `checkout_recovery_candidates()` decides eligibility from `payments`
+(status written only by billing-checkout and the verified webhook): newest
+unpaid checkout per org, not paid since, not already on that plan or higher
+(expired/free always eligible), creator still an active member of that org,
+address not suppressed, nothing sent to that address in 20h. The
+`checkout-recovery` function claims each (payment, attempt) with an
+insert-before-send unique index, **re-checks the order with Cashfree** before
+sending (no send if Cashfree says PAID or cannot be reached), and sends via
+Resend with an idempotency key. Unsubscribe: `/unsubscribe?list=checkout` page
+on the CRM site plus RFC 8058 one-click headers.
+
+**Ships OFF and in dry-run.** Platform screen → "Abandoned-checkout reminders":
+enable, dry run, test send (sample data, configured test recipient only), log.
+
+**Not built:** Resend delivery/bounce webhooks (bounces are not yet added to
+`platform_email_suppressions` automatically); WhatsApp reminders (needs an
+approved Meta template).
+
+**Also fixed alongside:** the nurture unsubscribe page was unusable — Supabase
+serves edge-function GETs as `text/plain`, so recipients saw raw HTML with no
+button. Footer links now go to `/unsubscribe?list=nurture` on the CRM site.

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "./lib/store";
 import { match, useRoute } from "./lib/router";
+import { arrivedFromSignInLink, track, trackOnce } from "./lib/analytics";
 import { LoadError, Spinner } from "./components/ui";
 import { Login } from "./routes/Login";
 import { Landing } from "./routes/Landing";
@@ -170,6 +171,18 @@ export default function App() {
       ? (path === "/" ? LANDING_TITLE : "Sign in · AbroBot CRM")
       : `${titleFor(path, ui.leadNoun, ui.leadNounPlural)} · ${org?.name ?? "AbroBot CRM"}`;
   }, [loading, session, path, ui.leadNoun, ui.leadNounPlural, org?.name]);
+
+  // ── product analytics (lib/analytics.ts) ─────────────────────────────────
+  // One event per route change. Signed out: the landing page or the sign-in
+  // form. Signed in: which screen, so the platform owner can see which
+  // features are actually used. No record ids — only the route pattern.
+  useEffect(() => {
+    if (loading) return;
+    if (!session) { track(path === "/" ? "landing_view" : "login_view"); return; }
+    if (arrivedFromSignInLink) trackOnce("login_succeeded");
+    const route = path.replace(/\/[0-9a-f-]{36}/gi, "/:id");
+    track("page_view", { route });
+  }, [loading, session, path]);
 
   if (loading) return <Spinner />;
 

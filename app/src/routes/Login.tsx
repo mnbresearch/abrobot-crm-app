@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { supabase } from "../lib/supabase";
+import { track } from "../lib/analytics";
 
 // Magic-link only. No password field by design: passwords are the single
 // biggest support and breach surface in a small SaaS, and Supabase's OTP flow
@@ -21,7 +22,8 @@ export function Login() {
       options: { emailRedirectTo: window.location.origin },
     });
     setBusy(false);
-    if (error) { setErr(error.message); return; }
+    if (error) { setErr(error.message); track("login_link_requested", { result: "error" }); return; }
+    track("login_link_requested", { result: "sent" });
     setSent(true);
   };
 

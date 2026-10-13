@@ -17,3 +17,9 @@ vite.config.ts.timestamp-*
 # content of their own. They matter here because deploy-all.sh runs `git add -A`,
 # so without this line an ordinary deploy silently commits them.
 .fuse_hidden*
+
+# Local environment files. Real secrets live in Supabase Edge Function secrets
+# and app_settings; .env.example documents the names with no values.
+.env
+.env.*
+!.env.example

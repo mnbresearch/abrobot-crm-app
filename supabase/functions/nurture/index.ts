@@ -41,6 +41,13 @@ const supabase = createClient(
 const PLATFORM_RESEND_KEY = Deno.env.get("RESEND_API_KEY") ?? "";
 const FROM_ADDRESS = Deno.env.get("NURTURE_FROM") || "hello@updates.mnbresearch.com";
 const FN_BASE = (Deno.env.get("SUPABASE_URL") || "") + "/functions/v1";
+// Where the footer "unsubscribe" link points. Supabase serves every edge
+// function GET response as text/plain, so the confirm page this function
+// returns showed the recipient raw HTML with no working button (verified
+// 13 Oct 2026). The page now lives on the CRM site and POSTs back here; the
+// List-Unsubscribe header still points straight at this function, because
+// one-click unsubscribe from the mail client is a POST and never renders.
+const SITE = Deno.env.get("CRM_BASE_URL") || "https://crm.mnbresearch.com";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -485,7 +492,8 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
 
       try {
         const unsubUrl = `${FN_BASE}/nurture?unsub=${l.nurture_token}`;
-        const { subject, html } = buildEmail(tpl, l, brand, unsubUrl, (cfg.contact_url || "").trim());
+        const unsubPage = `${SITE}/unsubscribe?list=nurture&t=${l.nurture_token}`;
+        const { subject, html } = buildEmail(tpl, l, brand, unsubPage, (cfg.contact_url || "").trim());
 
         await sendEmail(key, from, l.email, replyTo, subject, html, unsubUrl);
 
@@ -627,8 +635,12 @@ Deno.serve(async (req) => {
       .eq("nurture_token", unsub)
       .select("id");
 
-    const page = (title: string, body: string, status: number) =>
-      new Response(
+    // The CRM-site unsubscribe page calls this with Accept: application/json
+    // and reads the outcome; a mail client's one-click POST gets the page.
+    const wantsJson = (req.headers.get("accept") ?? "").includes("application/json");
+    const page = (title: string, body: string, status: number) => wantsJson
+      ? new Response(JSON.stringify({ ok: status < 400, title, message: body }), { status, headers: CORS })
+      : new Response(
         `<html><body style="font-family:sans-serif;text-align:center;padding:60px">` +
         `<h2>${title}</h2><p>${body}</p></body></html>`,
         { status, headers: { "Content-Type": "text/html" } },

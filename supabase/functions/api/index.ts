@@ -16,6 +16,13 @@
 //   PATCH  /api/v1/leads/:id
 //   GET    /api/v1/stages
 //   GET    /api/v1/me            -- what this key can do; good for a health check
+//   GET    /api/v1/conversations, /api/v1/conversations/:id
+//   GET    /api/v1/openapi.json  -- the OpenAPI 3.1 description (no key needed)
+//
+// Limits (20261013): 120 requests/minute per key (429 + Retry-After), 64 KB
+// request bodies (413), 200 items per page. Every response carries an
+// X-Request-Id that is also written to the function log, so a customer's
+// support ticket can be matched to the exact request.
 //
 // Scopes: leads:read, leads:write, conversations:read, stages:read.
 //
@@ -31,6 +38,12 @@ import { normPhone, displayName } from "../_shared/capture.ts";
 // have a stage keyed "new", so the old literal fallback made records invisible
 // on the board for the other 11.
 import { firstStageKey } from "../_shared/stage.ts";
+import {
+  MAX_BODY_BYTES, pageParams, validateLeadCreate, validateLeadPatch, validSince,
+} from "../_shared/api-validate.ts";
+import { openapiSpec } from "../_shared/openapi.ts";
+
+const RATE_LIMIT_PER_MIN = 120;
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -41,6 +54,7 @@ const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, content-type",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
+  "Access-Control-Expose-Headers": "x-request-id, x-ratelimit-limit, x-ratelimit-remaining, retry-after",
   "Content-Type": "application/json",
 };
 
@@ -104,6 +118,59 @@ async function authenticate(req: Request): Promise<Auth | Response> {
 
 const can = (a: Auth, scope: string) => a.scopes.includes(scope);
 
+/**
+ * A database failure, reported without the database's own text. Raw Postgres
+ * messages name tables, columns and constraints — useful to an attacker,
+ * useless to an integration. The detail goes to the function log instead,
+ * tagged with the request id the caller receives.
+ */
+function dbFail(where: string, e: { message?: string } | null, status = 500): Response {
+  console.error(`api ${where}:`, e?.message ?? e);
+  return err("Something went wrong reading or writing your data — please retry", status);
+}
+
+/**
+ * Read a JSON body with a size limit. Content-Length is checked first so an
+ * oversized upload is refused before it is read; the text length is checked
+ * too, because Content-Length is optional (chunked) and caller-supplied.
+ */
+async function readJson(req: Request): Promise<{ body?: unknown; res?: Response }> {
+  const len = Number(req.headers.get("content-length") ?? "0");
+  if (len > MAX_BODY_BYTES) return { res: err("Request body too large", 413, "The limit is 64 KB.") };
+  const text = await req.text();
+  if (text.length > MAX_BODY_BYTES) return { res: err("Request body too large", 413, "The limit is 64 KB.") };
+  try { return { body: JSON.parse(text) }; } catch { return { res: err("Body must be valid JSON", 400) }; }
+}
+
+/**
+ * 120 requests per minute per key, on the fixed-window counter chat-agent
+ * already uses. Fails OPEN on a limiter error: an outage in the limiter must
+ * not become an outage of every customer's integration. The failure is logged.
+ */
+async function rateLimit(bucket: string): Promise<{ res?: Response; headers: Record<string, string> }> {
+  const { data, error } = await admin.rpc("hit_rate_limit", {
+    p_key: `api:${bucket}`, p_limit: RATE_LIMIT_PER_MIN, p_window_seconds: 60,
+  });
+  if (error) {
+    console.error("api: rate limiter unavailable, allowing request:", error.message);
+    return { headers: {} };
+  }
+  const hits = Number((data as { hits?: number })?.hits ?? 0);
+  const headers = {
+    "X-RateLimit-Limit": String(RATE_LIMIT_PER_MIN),
+    "X-RateLimit-Remaining": String(Math.max(0, RATE_LIMIT_PER_MIN - hits)),
+  };
+  if ((data as { allowed?: boolean })?.allowed === false) {
+    const retry = 60 - (Math.floor(Date.now() / 1000) % 60);
+    return {
+      headers,
+      res: json({ error: "Rate limit exceeded", hint: `At most ${RATE_LIMIT_PER_MIN} requests per minute per key.` },
+        429, { ...headers, "Retry-After": String(retry) }),
+    };
+  }
+  return { headers };
+}
+
 function needScope(a: Auth, scope: string): Response | null {
   if (can(a, scope)) return null;
   return err(`This key does not have the "${scope}" scope`, 403,
@@ -111,10 +178,21 @@ function needScope(a: Auth, scope: string): Response | null {
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  const requestId = crypto.randomUUID();
+  let res: Response;
+  try {
+    res = await handle(req);
+  } catch (e) {
+    console.error(`api [${requestId}] unhandled`, e);
+    res = err("Something went wrong on our side", 500);
+  }
+  res.headers.set("X-Request-Id", requestId);
+  if (res.status >= 500) console.error(`api [${requestId}] ${req.method} ${new URL(req.url).pathname} -> ${res.status}`);
+  return res;
+});
 
-  const auth = await authenticate(req);
-  if (auth instanceof Response) return auth;
+async function handle(req: Request): Promise<Response> {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
   const url = new URL(req.url);
   // Tolerate /api, /api/v1/... and the bare function path, so a customer who
@@ -124,6 +202,33 @@ Deno.serve(async (req) => {
     .replace(/^\/api/, "")
     .replace(/^\/v1/, "")
     .replace(/\/+$/, "") || "/";
+
+  // The API description is public: it documents the contract, not any data.
+  if (path === "/openapi.json" && req.method === "GET") {
+    return json(openapiSpec(`${Deno.env.get("SUPABASE_URL")}/functions/v1/api/v1`));
+  }
+
+  // Rate-limit BEFORE resolving the key. resolve_api_key writes to the key's
+  // row on every call, so limiting afterwards still let a flood generate a
+  // hot-row write per request. Bucketed by a hash of the presented key, which
+  // also throttles floods of invalid keys.
+  const presented = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  let limited: { res?: Response; headers: Record<string, string> } = { headers: {} };
+  if (presented.startsWith("abk_")) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(presented));
+    const bucket = Array.from(new Uint8Array(digest).slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
+    limited = await rateLimit(bucket);
+    if (limited.res) return limited.res;
+  }
+
+  const auth = await authenticate(req);
+  if (auth instanceof Response) return auth;
+  const res = await route(req, url, path, auth);
+  for (const [k, v] of Object.entries(limited.headers)) res.headers.set(k, v);
+  return res;
+}
+
+async function route(req: Request, url: URL, path: string, auth: Auth): Promise<Response> {
 
   try {
     // ── GET /me ────────────────────────────────────────────────────────────
@@ -139,7 +244,14 @@ Deno.serve(async (req) => {
         console.error(`api GET /me: org read failed for ${auth.orgId}:`, orgErr.message);
         return err("Could not read your organisation — please retry", 503);
       }
-      return json({ org: org?.name, slug: org?.slug, plan: org?.plan, scopes: auth.scopes });
+      // The key's own prefix and expiry, so an integration can warn before its
+      // credential lapses instead of discovering it from a 401.
+      const { data: keyRow } = await admin.from("api_keys")
+        .select("key_prefix, expires_at").eq("id", auth.keyId).maybeSingle();
+      return json({
+        org: org?.name, slug: org?.slug, plan: org?.plan, scopes: auth.scopes,
+        key: { id: auth.keyId, prefix: keyRow?.key_prefix ?? null, expires_at: keyRow?.expires_at ?? null },
+      });
     }
 
     // ── GET /stages ────────────────────────────────────────────────────────
@@ -150,7 +262,7 @@ Deno.serve(async (req) => {
         .from("pipeline_stages")
         .select("key, label, position, is_won, is_lost")
         .eq("org_id", auth.orgId).order("position");
-      if (error) return err(error.message, 500);
+      if (error) return dbFail("GET /stages", error);
       return json({ stages: data ?? [] });
     }
 
@@ -165,8 +277,9 @@ Deno.serve(async (req) => {
       if (bad) return bad;
 
       const p = url.searchParams;
-      const limit = Math.min(Math.max(Number(p.get("limit") ?? 50), 1), 200);
-      const offset = Math.max(Number(p.get("offset") ?? 0), 0);
+      const { limit, offset } = pageParams(p.get("limit"), p.get("offset"));
+      const since = validSince(p.get("since"));
+      if (since === false) return err("since must be an ISO 8601 timestamp", 400);
 
       let q = admin.from("conversations")
         .select("id, lead_id, visitor_name, visitor_email, visitor_phone, page_url, message_count, created_at, last_message_at",
@@ -178,13 +291,16 @@ Deno.serve(async (req) => {
         // including visitor_email and visitor_phone — back to integrations.
         .is("deleted_at", null);
 
-      if (p.get("lead_id")) q = q.eq("lead_id", p.get("lead_id"));
-      if (p.get("since"))   q = q.gte("last_message_at", p.get("since"));
+      if (p.get("lead_id")) {
+        if (!/^[0-9a-f-]{36}$/i.test(p.get("lead_id")!)) return err("lead_id must be a uuid", 400);
+        q = q.eq("lead_id", p.get("lead_id"));
+      }
+      if (since) q = q.gte("last_message_at", since);
 
       const { data, error, count } = await q
         .order("last_message_at", { ascending: false })
         .range(offset, offset + limit - 1);
-      if (error) return err(error.message, 500);
+      if (error) return dbFail("GET /conversations", error);
 
       return json({
         conversations: data ?? [],
@@ -205,7 +321,7 @@ Deno.serve(async (req) => {
       const { data: head, error: headErr } = await admin.from("conversations")
         .select("id, lead_id, visitor_name, visitor_email, visitor_phone, page_url, message_count, created_at, last_message_at")
         .eq("id", convo[1]).eq("org_id", auth.orgId).maybeSingle();
-      if (headErr) return err(headErr.message, 500);
+      if (headErr) return dbFail("GET /conversations/:id", headErr);
       if (!head) return err("No such conversation", 404);
 
       const { data: msgs, error: msgErr } = await admin.from("chat_messages")
@@ -213,7 +329,7 @@ Deno.serve(async (req) => {
         .eq("conversation_id", head.id)
         .order("created_at")
         .limit(500);
-      if (msgErr) return err(msgErr.message, 500);
+      if (msgErr) return dbFail("GET /conversations/:id messages", msgErr);
 
       return json({ conversation: head, messages: msgs ?? [] });
     }
@@ -226,8 +342,12 @@ Deno.serve(async (req) => {
       const p = url.searchParams;
       // Capped at 200. An unbounded limit is how one integration takes the
       // database down for every tenant on a shared free-tier project.
-      const limit = Math.min(Math.max(Number(p.get("limit") ?? 50), 1), 200);
-      const offset = Math.max(Number(p.get("offset") ?? 0), 0);
+      const { limit, offset } = pageParams(p.get("limit"), p.get("offset"));
+      const since = validSince(p.get("since"));
+      if (since === false) return err("since must be an ISO 8601 timestamp", 400);
+      if (p.get("assigned") && !/^[0-9a-f-]{36}$/i.test(p.get("assigned")!)) {
+        return err("assigned must be a user id (uuid)", 400);
+      }
 
       // Soft-deleted records are invisible to the app but NOT to the service
       // role: 20260903150000 enforces deletion in RLS only, and this function
@@ -241,7 +361,7 @@ Deno.serve(async (req) => {
       if (p.get("stage"))    q = q.eq("stage_key", p.get("stage"));
       if (p.get("assigned")) q = q.eq("assigned_to", p.get("assigned"));
       if (p.get("source"))   q = q.eq("source", p.get("source"));
-      if (p.get("since"))    q = q.gte("created_at", p.get("since"));
+      if (since)             q = q.gte("created_at", since);
       const search = p.get("q");
       if (search) {
         // Escape PostgREST's delimiters. Interpolating a raw value into an
@@ -254,7 +374,14 @@ Deno.serve(async (req) => {
         .order("created_at", { ascending: false })
         .range(offset, offset + limit - 1);
 
-      if (error) return err(error.message, 500);
+      if (error) {
+        // 22P02: a filter value that is not a valid enum/uuid (e.g. ?source=bogus).
+        // The caller's mistake, not ours — and worth saying so.
+        if ((error as { code?: string }).code === "22P02") {
+          return err("A filter value is not valid", 400, "Check source, stage and assigned against GET /api/v1/stages and the documented values.");
+        }
+        return dbFail("GET /leads", error);
+      }
       return json({
         leads: data ?? [],
         pagination: { total: count ?? 0, limit, offset, has_more: (count ?? 0) > offset + limit },
@@ -270,7 +397,7 @@ Deno.serve(async (req) => {
         .eq("id", one[1]).eq("org_id", auth.orgId)
         .is("deleted_at", null)   // deleted means gone, including over the API
         .maybeSingle();
-      if (error) return err(error.message, 500);
+      if (error) return dbFail("GET /leads/:id", error);
       if (!data) return err("No such record", 404);
       return json(data);
     }
@@ -280,8 +407,11 @@ Deno.serve(async (req) => {
       const bad = needScope(auth, "leads:write");
       if (bad) return bad;
 
-      let body: Record<string, unknown>;
-      try { body = await req.json(); } catch { return err("Body must be valid JSON", 400); }
+      const read = await readJson(req);
+      if (read.res) return read.res;
+      const createErrors = validateLeadCreate(read.body);
+      if (createErrors.length) return json({ error: "Invalid record", details: createErrors }, 422);
+      const body = read.body as Record<string, unknown>;
 
       const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : null;
       const phoneRaw = typeof body.phone === "string" ? body.phone : null;
@@ -384,17 +514,24 @@ Deno.serve(async (req) => {
       const bad = needScope(auth, "leads:write");
       if (bad) return bad;
 
-      let body: Record<string, unknown>;
-      try { body = await req.json(); } catch { return err("Body must be valid JSON", 400); }
+      const read = await readJson(req);
+      if (read.res) return read.res;
 
-      // Allowlist. Without one, a caller could PATCH org_id and move a record
-      // into another tenant.
-      const patch: Record<string, unknown> = {};
-      for (const f of ["name", "email", "phone", "stage_key", "score",
-                       "assigned_to", "tags", "custom", "next_follow_up_at"]) {
-        if (f in body) patch[f] = body[f];
-      }
+      // Allowlist AND content validation (_shared/api-validate.ts). The
+      // allowlist alone stopped a caller writing org_id but let any value
+      // through the allowed fields — including assigned_to pointing at a user
+      // in another organisation.
+      const v = validateLeadPatch(read.body, (raw) => (typeof raw === "string" ? normPhone(raw) : null));
+      if (v.errors.length) return json({ error: "Invalid update", details: v.errors }, 422);
+      const patch = v.patch;
       if (!Object.keys(patch).length) return err("Nothing to update", 400);
+
+      if (v.assignTo) {
+        const { data: member, error: memErr } = await admin.from("profiles")
+          .select("id").eq("id", v.assignTo).eq("org_id", auth.orgId).eq("status", "active").maybeSingle();
+        if (memErr) return dbFail("PATCH /leads assignee check", memErr, 503);
+        if (!member) return err("assigned_to is not an active member of your organisation", 422);
+      }
 
       if (typeof patch.stage_key === "string") {
         const { data: valid } = await admin.from("pipeline_stages")
@@ -410,15 +547,20 @@ Deno.serve(async (req) => {
         .is("deleted_at", null)   // a deleted record is not editable over the API
         .select(LEAD_COLS).maybeSingle();
 
-      if (error) return err(error.message, 500);
+      if (error) {
+        if ((error as { code?: string }).code === "23505") {
+          return err("Another record in your organisation already has that email or phone", 409);
+        }
+        return dbFail("PATCH /leads/:id", error);
+      }
       if (!data) return err("No such record", 404);
       return json(data);
     }
 
     return err(`No route for ${req.method} ${path}`, 404,
-      "Try GET /api/v1/me, /api/v1/leads or /api/v1/stages");
+      "Try GET /api/v1/me, /api/v1/leads, /api/v1/stages — or GET /api/v1/openapi.json for the full list");
   } catch (e) {
     console.error("api: unhandled", e);
     return err("Something went wrong on our side", 500);
   }
-});
+}

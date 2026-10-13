@@ -68,6 +68,7 @@ FUNCTIONS=(
   "save-integration:"
   "billing-checkout:"
   "rescore-leads:"
+  "checkout-recovery:--no-verify-jwt"
 )
 
 echo "==> Checking the deploy list against supabase/functions/"
@@ -159,6 +160,12 @@ $SUPA functions deploy billing-checkout
 
 echo "==> rescore-leads  (JWT ON)"
 $SUPA functions deploy rescore-leads
+
+# JWT OFF: pg_cron calls it with the cron secret, and recipients open its
+# unsubscribe link with no session. requireCronOrMember + a super-admin role
+# check, and the unsubscribe token, are the boundaries.
+echo "==> checkout-recovery  (JWT off, cron secret or super admin)"
+$SUPA functions deploy checkout-recovery --no-verify-jwt
 echo
 
 # ── 2b. Prove they are actually there ───────────────────────────────────────
@@ -171,7 +178,7 @@ BASE="https://${PROJECT_REF}.supabase.co/functions/v1"
 MISSING=0
 for f in chat-agent app-signup lead-webhook api nurture run-automations \
          summarize-chats whatsapp-send send-campaign save-integration \
-         system-health billing-webhook billing-checkout rescore-leads; do
+         system-health billing-webhook billing-checkout rescore-leads checkout-recovery; do
   code=$(curl -sS --max-time 20 -o /tmp/abx-deploy-check -w '%{http_code}' \
          -X OPTIONS "$BASE/$f" 2>/dev/null || echo 000)
   if grep -q NOT_FOUND /tmp/abx-deploy-check 2>/dev/null; then

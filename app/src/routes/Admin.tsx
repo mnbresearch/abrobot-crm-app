@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import { Card, Empty, LoadError, Modal, Spinner, timeAgo, useToast } from "../components/ui";
+import { CheckoutRecoveryCard, ProductAnalyticsCard } from "./AdminGrowth";
 
 /**
  * Platform admin console — every organisation, from one screen.
@@ -182,6 +183,9 @@ export function Admin() {
       {/* MRR above counts the LISTED price of each org's effective plan. It is
           not revenue: enterprise is custom-priced, and an org set by hand has
           no payment behind it. Named rather than dressed up as a metric. */}
+
+      <ProductAnalyticsCard />
+      <CheckoutRecoveryCard />
 
       <Card title="Organisations">
         <div className="table-wrap">

@@ -25,6 +25,8 @@ Allow: /
 # unnoticed because the shared noindex covered it. It is the sign-in form
 # itself — the single URL we least want ranking for "abrobot crm".
 Disallow: /login
+# Per-recipient unsubscribe page; also carries noindex.
+Disallow: /unsubscribe
 Disallow: /leads
 Disallow: /pipeline
 Disallow: /calendar

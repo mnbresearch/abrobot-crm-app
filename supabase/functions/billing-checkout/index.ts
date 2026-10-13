@@ -93,7 +93,8 @@ Deno.serve(async (req) => {
       phone: null,
       name: profile.full_name ?? org.name,
     },
-    returnUrl: `${SITE}/settings?billing=return&order_id=${orderId}`,
+    // tab=usage opens the Plan & usage tab, where the return is acknowledged.
+    returnUrl: `${SITE}/settings?tab=usage&billing=return&order_id=${orderId}`,
     notifyUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/billing-webhook`,
     note: `${planRow.label} · ${months} month(s) · ${org.name}`,
   });

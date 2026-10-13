@@ -21,6 +21,18 @@ interface ApiKey {
   id: string; name: string; key_prefix: string; scopes: string[];
   last_used_at: string | null; use_count: number; created_at: string; expires_at: string | null;
 }
+// Written by triggers (20261013090000), readable by admins, never writable
+// from the browser. Absent until that migration is applied — the screen
+// treats a missing table as "no history yet", not as an error.
+interface KeyEvent {
+  id: number; key_id: string; event: string; key_prefix: string | null;
+  detail: Record<string, unknown>; created_at: string;
+}
+const KEY_EVENT_LABEL: Record<string, string> = {
+  created: "created", rotated: "rotated", revoked: "revoked",
+  expiry_changed: "expiry changed", scopes_changed: "permissions changed", renamed: "renamed",
+};
+const isExpired = (k: ApiKey) => !!k.expires_at && new Date(k.expires_at).getTime() <= Date.now();
 interface WebhookKey {
   id: string; key: string; label: string; source: string; active: boolean; created_at: string;
   // Free-text audience. Records captured on this key inherit it, and Templates
@@ -144,6 +156,9 @@ export function Integrations() {
 
   const [keyName, setKeyName] = useState("");
   const [keyScopes, setKeyScopes] = useState<string[]>(["leads:read"]);
+  const [keyExpiry, setKeyExpiry] = useState<string>("365");
+  const [rotateOverlap, setRotateOverlap] = useState<string>("60");
+  const [keyEvents, setKeyEvents] = useState<KeyEvent[]>([]);
   const [hookLabel, setHookLabel] = useState("");
   const [hookSegment, setHookSegment] = useState("");
   const [hookSource, setHookSource] = useState("website");
@@ -191,6 +206,13 @@ export function Integrations() {
     setKeys((k.data as ApiKey[]) ?? []);
     setHooks((w.data as WebhookKey[]) ?? []);
     setEndpoints((e.data as Endpoint[]) ?? []);
+
+    // Key history. Its own call, and its failure is not the screen's failure:
+    // before 20261013090000 is applied the table does not exist.
+    const ev = await supabase.from("api_key_events")
+      .select("id, key_id, event, key_prefix, detail, created_at")
+      .eq("org_id", org.id).order("created_at", { ascending: false }).limit(15);
+    setKeyEvents(ev.error ? [] : ((ev.data as KeyEvent[]) ?? []));
 
     // Separate call: this goes through an edge function because the browser
     // must never be able to read the tokens themselves.
@@ -245,7 +267,7 @@ export function Integrations() {
     if (!keyScopes.length) { toast.error("Pick at least one permission"); return; }
     setBusy(true);
     const { data, error } = await supabase.rpc("create_api_key", {
-      p_name: keyName.trim(), p_scopes: keyScopes, p_expires_days: null,
+      p_name: keyName.trim(), p_scopes: keyScopes, p_expires_days: keyExpiry ? Number(keyExpiry) : null,
     });
     setBusy(false);
     if (error) { toast.error(error.message); return; }
@@ -255,8 +277,33 @@ export function Integrations() {
     await load();
   };
 
+  const rotateKey = async (k: ApiKey) => {
+    const mins = Number(rotateOverlap);
+    const when = mins === 0 ? "immediately"
+      : mins < 60 ? `in ${mins} minutes` : mins < 1440 ? `in ${mins / 60} hour(s)` : `in ${mins / 1440} day(s)`;
+    if (!confirm(`Rotate "${k.name}"?\n\nYou get a new key with the same permissions. The current key stops working ${when}.`)) return;
+    setBusy(true);
+    const { data, error } = await supabase.rpc("rotate_api_key", { p_key_id: k.id, p_overlap_minutes: mins });
+    setBusy(false);
+    if (error) {
+      toast.error(error.code === "PGRST202"
+        ? "Rotation is not enabled on the server yet. Create a new key, switch your integration to it, then revoke this one."
+        : error.message);
+      return;
+    }
+    const res = data as { key?: string };
+    if (res?.key) setFreshKey(res.key);
+    toast.show(mins === 0 ? "Rotated — the old key no longer works" : `Rotated — the old key works until ${when.replace(/^in /, "")} from now`);
+    await load();
+  };
+
   const revokeKey = async (id: string, name: string) => {
     if (!confirm(`Revoke "${name}"? Anything using this key stops working immediately.`)) return;
+    // The function records who revoked it in the key history. Falls back to the
+    // direct update below when the server predates it (PGRST202).
+    const fn = await supabase.rpc("revoke_api_key", { p_key_id: id, p_reason: "revoked in Integrations" });
+    if (!fn.error) { toast.show("Key revoked"); await load(); return; }
+    if (fn.error.code !== "PGRST202") { toast.error(fn.error.message); await load(); return; }
     // `.select("id")` so a refusal is distinguishable from success. PostgREST
     // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
     // error: null — identical to a real revoke. "Key revoked" over a key that is
@@ -782,12 +829,21 @@ export function Integrations() {
       <Card title="API keys">
         <p className="sub" style={{ marginTop: -8 }}>
           For reading and writing records from your own systems. Base URL{" "}
-          <code>{API_BASE}/api/v1</code>
+          <code>{API_BASE}/api/v1</code> ·{" "}
+          <a href={`${API_BASE}/api/v1/openapi.json`} target="_blank" rel="noreferrer">OpenAPI spec</a>.
+          Each key is limited to 120 requests a minute.
         </p>
 
         <div className="row row-wrap" style={{ marginTop: 12, marginBottom: 6 }}>
           <input className="input" style={{ maxWidth: 260 }} placeholder="What is it for? e.g. Zapier"
             value={keyName} onChange={(e) => setKeyName(e.target.value)} />
+          <select className="input" style={{ maxWidth: 190 }} aria-label="Key expiry"
+            value={keyExpiry} onChange={(e) => setKeyExpiry(e.target.value)}>
+            <option value="30">Expires in 30 days</option>
+            <option value="90">Expires in 90 days</option>
+            <option value="365">Expires in 1 year</option>
+            <option value="">Never expires</option>
+          </select>
           <button className={`btn btn-primary${busy ? " btn-busy" : ""}`}
             onClick={() => void createKey()} disabled={busy}>
             {busy ? "Creating…" : "Create key"}
@@ -810,7 +866,7 @@ export function Integrations() {
         ) : (
           <div className="table-wrap">
             <table className="data">
-              <thead><tr><th>Name</th><th>Key</th><th>Can do</th><th>Last used</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>Key</th><th>Can do</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
               <tbody>
                 {keys.map((k) => (
                   <tr key={k.id}>
@@ -822,15 +878,54 @@ export function Integrations() {
                     <td className="sub" style={{ fontSize: 12 }}>
                       {k.last_used_at ? `${timeAgo(k.last_used_at)} · ${k.use_count} calls` : "never"}
                     </td>
+                    <td className="sub" style={{ fontSize: 12 }}>
+                      {!k.expires_at ? "never"
+                        : isExpired(k) ? <span className="pill pill-muted">expired</span>
+                        : new Date(k.expires_at).toLocaleDateString()}
+                    </td>
                     <td>
-                      <button className="btn btn-sm btn-danger"
-                        onClick={() => void revokeKey(k.id, k.name)}>Revoke</button>
+                      <div className="row" style={{ gap: 6 }}>
+                        {!isExpired(k) && (
+                          <button className="btn btn-sm" disabled={busy}
+                            onClick={() => void rotateKey(k)}>Rotate</button>
+                        )}
+                        <button className="btn btn-sm btn-danger"
+                          onClick={() => void revokeKey(k.id, k.name)}>Revoke</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        )}
+
+        {keys.length > 0 && (
+          <div className="row row-wrap" style={{ gap: 8, marginTop: 10 }}>
+            <span className="sub" style={{ fontSize: 12 }}>When rotating, keep the old key working for</span>
+            <select className="input" style={{ maxWidth: 170 }} aria-label="Rotation overlap"
+              value={rotateOverlap} onChange={(e) => setRotateOverlap(e.target.value)}>
+              <option value="0">no time — stop at once</option>
+              <option value="60">1 hour</option>
+              <option value="1440">24 hours</option>
+              <option value="10080">7 days</option>
+            </select>
+          </div>
+        )}
+
+        {keyEvents.length > 0 && (
+          <details style={{ marginTop: 12 }}>
+            <summary className="sub" style={{ cursor: "pointer", fontSize: 12.5 }}>Key history</summary>
+            <div style={{ marginTop: 8 }}>
+              {keyEvents.map((e) => (
+                <div key={e.id} className="sub" style={{ fontSize: 12, padding: "3px 0" }}>
+                  <code>{e.key_prefix ?? "key"}…</code> {KEY_EVENT_LABEL[e.event] ?? e.event}
+                  {typeof e.detail?.reason === "string" && e.detail.reason ? ` — ${e.detail.reason}` : ""}
+                  {" · "}{timeAgo(e.created_at)}
+                </div>
+              ))}
+            </div>
+          </details>
         )}
       </Card>
       )}

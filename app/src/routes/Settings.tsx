@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase, callFunction } from "../lib/supabase";
 import { getIndustry } from "../lib/industries";
+import { track, trackOnce } from "../lib/analytics";
 import { Card, Empty, Modal, useToast } from "../components/ui";
 import type { AgentConfig, FieldDef, FieldType, PipelineStage } from "../lib/types";
 
@@ -204,6 +205,18 @@ function UpgradeCard({ current }: { current: string }) {
 
   const [plansErr, setPlansErr] = useState<string | null>(null);
 
+  // Back from Cashfree (returnUrl = /settings?billing=return&order_id=…). The
+  // redirect proves nothing about payment — only the verified webhook grants a
+  // plan — so this records the return and says so, rather than congratulating
+  // anyone. The plan pill updates on the next load once the webhook lands.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("billing") !== "return") return;
+    trackOnce("checkout_returned");
+    toast.show("Thanks — we're confirming your payment with the bank. Your plan updates as soon as it's confirmed.");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     void supabase.from("plan_limits").select("*").order("position")
       .then(({ data, error }) => {
@@ -230,6 +243,7 @@ function UpgradeCard({ current }: { current: string }) {
 
   const checkout = async (plan: string) => {
     setBusy(plan);
+    track("plan_selected", { plan, months });
     try {
       const r = await callFunction<{ payment_session_id: string; env: string; order_id: string }>(
         "billing-checkout", { plan, months },
@@ -251,6 +265,7 @@ function UpgradeCard({ current }: { current: string }) {
       const CF = (window as unknown as { Cashfree?: (o: unknown) => { checkout: (o: unknown) => Promise<void> } }).Cashfree;
       if (!CF) throw new Error("Payment SDK unavailable");
       const cf = CF({ mode: r.env === "production" ? "production" : "sandbox" });
+      track("checkout_opened", { plan, months });
       await cf.checkout({ paymentSessionId: r.payment_session_id, redirectTarget: "_self" });
     } catch (e) {
       toast.error((e as Error).message);

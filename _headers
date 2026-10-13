@@ -23,7 +23,7 @@
 
   # Features this product never uses. Denying them means an injected script
   # cannot silently turn on a camera or read location.
-  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(), usb=()
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(self "https://sdk.cashfree.com" "https://payments.cashfree.com"), usb=()
 
   # ── Content-Security-Policy ───────────────────────────────────────────────
   #
@@ -33,6 +33,15 @@
   #   fonts.gstatic.com     — the font files that stylesheet references
   #   *.supabase.co         — the API and the edge functions the app calls
   #   data:                 — the inline SVG favicon in index.html
+  #   sdk.cashfree.com      — the payment SDK Settings → Upgrade loads on demand
+  #   *.cashfree.com        — that SDK's API calls, its checkout frame, and the
+  #                           form it posts to payments.cashfree.com
+  #
+  # The Cashfree entries were MISSING from the first version of this policy
+  # (4 October). It enumerated app/index.html but not the script Settings.tsx
+  # injects at runtime, so from that deploy the Upgrade button could not load
+  # its SDK and no customer could pay. tests/csp.test.cjs now fails the build if
+  # any https:// script, fetch or frame origin in app/src is not allowed here.
   #
   # `script-src` carries 'unsafe-inline' DELIBERATELY, and it is the one
   # compromise here. index.html contains one inline script — the pre-paint
@@ -57,7 +66,7 @@
   # To tighten later, replace 'unsafe-inline' with the script's hash:
   #   printf '%s' "<contents of the inline <script> block>" | openssl dgst -sha256 -binary | openssl base64
   # and add a test asserting the hash matches app/index.html, so it cannot rot.
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https://pomsltnrxvbcafwtbtlc.supabase.co https://*.supabase.co; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://sdk.cashfree.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https://pomsltnrxvbcafwtbtlc.supabase.co https://*.supabase.co https://*.cashfree.com; frame-src https://*.cashfree.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://*.cashfree.com; object-src 'none'
 
 # The embeddable widget is loaded BY other companies' websites, so it must stay
 # cross-origin readable. It is a static script with no credentials and no
