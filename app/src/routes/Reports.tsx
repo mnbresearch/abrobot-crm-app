@@ -8,6 +8,7 @@ import { Card, Empty, Spinner, useToast, LoadError, TruncationNotice } from "../
 import type { Lead, Profile } from "../lib/types";
 import { supabase } from "../lib/supabase";
 import { useEffect } from "react";
+import { csvCell } from "../lib/csvSafe";
 
 // Reports = analytics + the counsellor leaderboard + export, in one screen.
 // The legacy app split these across /analytics, /reports and /leaderboard;
@@ -226,12 +227,10 @@ export function Reports() {
         })),
       );
 
-      const esc = (v: unknown) => {
-        const s = v === null || v === undefined ? "" : String(v);
-        // \r matters as much as \n: Excel writes CRLF, and a bare CR inside an
-        // unquoted field splits the row on some readers and not others.
-        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      };
+      // csvCell also neutralises spreadsheet formulas. Names, notes and custom
+      // fields are typed by website visitors, and a cell starting "=" runs as
+      // a formula on the admin's machine the moment the export is opened.
+      const esc = (v: unknown) => csvCell(v);
 
       const rows = [cols.map((c) => c.header).join(",")].concat(
         allRows.map((l) => cols.map((c) => esc(c.get(l))).join(",")),

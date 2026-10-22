@@ -65,17 +65,46 @@ export interface TriageResult {
  * Front-desk triage banding. Deliberately conservative and NON-CLINICAL: it
  * routes attention, it does not assess a patient. Anything that looks like a
  * red flag escalates to "call emergency services" rather than being scored.
+ *
+ * Matched as WORDS and PHRASES, not substrings. `t.includes("burn")` fired on
+ * "heartburn" and `includes("bleeding")` on "bleeding gums", so a dental front
+ * desk was told to send routine callers to A&E — and a screen that cries wolf
+ * on every third enquiry teaches people to ignore it on the one that matters.
+ * Bleeding and burns are still red flags when they are described as serious;
+ * plain mentions drop to same-day attention, never to routine.
+ *
+ * No lookbehind in these patterns: the build targets es2017 and Safari before
+ * 16.4 throws a SyntaxError on (?<=…) at PARSE time — a blank page, not a
+ * missed match.
  */
-const RED_FLAGS = [
-  "chest pain", "breathless", "shortness of breath", "unconscious", "fainted",
-  "bleeding", "stroke", "seizure", "accident", "fracture", "burn",
-  "suicide", "overdose", "poison", "labour", "severe pain",
+const RED_FLAGS: RegExp[] = [
+  /\bchest pains?\b/,
+  /\bbreathless(ness)?\b/, /\bshort(ness)? of breath\b/,
+  /\b(can'?t|cannot|can not|unable to|difficulty|trouble|struggling to) breath(e|ing)\b/,
+  /\bunconscious\b/, /\bunresponsive\b/, /\bfaint(ed|ing)\b/, /\bpassed out\b/, /\bcollapsed?\b/,
+  /\b(heavy|heavily|severe|uncontrolled|profuse|lots of) bleed(ing)?\b/,
+  /\bbleeding (heavily|a lot|badly|profusely|non[- ]?stop)\b/,
+  /\b(won'?t|will not|doesn'?t|does not|not) stop(ped)? bleeding\b/, /\bbleeding (won'?t|will not|doesn'?t|does not|hasn'?t) stop/,
+  /\b(vomiting|coughing|coughing up|throwing up) blood\b/,
+  /\b(heat ?)?stroke\b/, /\bseizures?\b/, /\bconvuls/,
+  /\baccident\b/, /\bfractur(e|ed|es)\b/, /\bbroken bones?\b/,
+  /\b(severe|serious|bad|major|chemical|electrical|acid|third[- ]degree|second[- ]degree) burns?\b/,
+  /\bburn (injury|injuries|wound)\b/, /\b(has|have|with|got) burns\b/, /\bburns (on|to|from)\b/,
+  /\b(badly|severely) burn(ed|t)\b/, /\bscald(ed|ing)?\b/,
+  /\bsuicid(e|al)\b/, /\bself[- ]?harm\b/, /\boverdos(e|ed)\b/, /\bpoison(ed|ing)?\b/,
+  /\bin labou?r\b/, /\blabou?r pains?\b/, /\bwaters? (has |have )?(broke|broken)\b/,
+  /\bsevere(ly)? pain(ful)?\b/, /\bexcruciating\b/,
 ];
-const URGENT_HINTS = ["fever", "vomit", "infection", "swelling", "injury", "pain", "rash", "dizzy"];
+const URGENT_HINTS: RegExp[] = [
+  /\bfever/, /\bvomit/, /\binfect/, /\bswell/, /\binjur/, /\bpain(s|ful)?\b/, /\brash(es)?\b/, /\bdizz/,
+  // Below the red-flag threshold, but never routine: "bleeding gums", "a
+  // small burn", "it burns when…" all deserve a same-day look.
+  /\bbleed/, /\bburns?\b/, /\bburnt\b/,
+];
 
 export function triage(text: string): TriageResult {
-  const t = (text || "").toLowerCase();
-  if (RED_FLAGS.some((f) => t.includes(f))) {
+  const t = (text || "").toLowerCase().replace(/[\u2018\u2019]/g, "'");
+  if (RED_FLAGS.some((f) => f.test(t))) {
     return {
       band: "emergency",
       label: "Possible emergency",
@@ -83,7 +112,7 @@ export function triage(text: string): TriageResult {
       color: "#dc2626",
     };
   }
-  if (URGENT_HINTS.some((f) => t.includes(f))) {
+  if (URGENT_HINTS.some((f) => f.test(t))) {
     return {
       band: "urgent",
       label: "Same-day attention",

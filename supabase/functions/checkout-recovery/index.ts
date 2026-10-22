@@ -11,23 +11,38 @@
 //
 //   GET  ?unsub=<token>   -> "stop these reminders?" page (a GET changes nothing)
 //   POST ?unsub=<token>   -> adds the address to platform_email_suppressions
-//   POST {mode:"run"}     -> the hourly job (cron secret, or a super admin)
+//   POST {mode:"run"}     -> the hourly job (cron secret, or a super admin).
+//                            FIRST reconciles lost webhooks (below) — on every
+//                            run, even with reminders disabled — then sends.
 //   POST {mode:"dry_run"} -> who WOULD be emailed; sends nothing (super admin)
 //   POST {mode:"test"}    -> one sample email with made-up data to the
 //                            configured test recipient only (super admin)
 //
 // Eligibility is decided in SQL (checkout_recovery_candidates, 20261013110000)
-// from the payments table, whose status only billing-checkout and the
-// signature-verified webhook write. Nothing here trusts a browser redirect.
+// from the payments table, whose status only billing-checkout, the
+// signature-verified webhook, and the reconciliation below (on Cashfree's own
+// PAID answer from its API, never on a redirect) write. Nothing here trusts a
+// browser redirect.
 //
 // Never claims a send that did not happen: a row is 'sent' only after Resend
 // accepted it, and a missing key or sender is a 503, not a quiet success.
+//
+// ── Lost-webhook reconciliation ─────────────────────────────────────────────
+// billing-webhook is the only thing that grants a plan, and webhooks get lost
+// (CASHFREE-WEBHOOK-BUG.md). A customer whose PAYMENT_SUCCESS never arrived
+// stayed on 'created' forever — paid, ungranted, and (until the PAID check in
+// the send loop) reminded to pay again. Each run now asks Cashfree about
+// recent unpaid rows and, for a PAID order whose amount/currency reconcile
+// with the SAME check the webhook uses (_shared/cashfree.ts reconcile), marks
+// the row paid and grants it. A mismatch is reported to the operator and NOT
+// granted. Everything is reported via _shared/operator.ts.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { requireCronOrMember } from "../_shared/cron-auth.ts";
 import { fetchWithTimeout } from "../_shared/http.ts";
 import { buildRecoveryEmail } from "../_shared/recovery-email.ts";
-import { fetchOrder } from "../_shared/cashfree.ts";
+import { fetchOrder, reconcile } from "../_shared/cashfree.ts";
+import { notifyOperator } from "../_shared/operator.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const admin = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -86,6 +101,111 @@ async function send(to: string, subject: string, html: string, text: string, uns
   return (await r.json()) as { id?: string };
 }
 
+// ── Lost-webhook reconciliation ─────────────────────────────────────────────
+// Window: old enough that a webhook in flight has had its chance (Cashfree
+// retries for ~10 minutes), young enough to stay cheap. 50 rows per run.
+const RECONCILE_MIN_AGE_MS = 15 * 60_000;
+const RECONCILE_MAX_AGE_MS = 7 * 86400_000;
+const RECONCILE_LIMIT = 50;
+
+interface Reconciled { checked: number; recovered: number; mismatched: number; unconfirmed: number; errors: string[] }
+
+async function reconcileLostWebhooks(): Promise<Reconciled> {
+  const out: Reconciled = { checked: 0, recovered: 0, mismatched: 0, unconfirmed: 0, errors: [] };
+  const now = Date.now();
+  const { data: rows, error } = await admin.from("payments")
+    .select("id, org_id, order_id, plan, amount, currency, status, period_months, raw")
+    .in("status", ["created", "dropped", "failed"])
+    .is("revoked_at", null)
+    .lt("created_at", new Date(now - RECONCILE_MIN_AGE_MS).toISOString())
+    .gt("created_at", new Date(now - RECONCILE_MAX_AGE_MS).toISOString())
+    .order("created_at", { ascending: false })
+    .limit(RECONCILE_LIMIT);
+  if (error) {
+    out.errors.push(`payments lookup failed: ${error.message}`);
+    console.error("checkout-recovery: reconcile lookup failed:", error.message);
+    return out;
+  }
+
+  for (const row of (rows ?? []) as {
+    id: string; org_id: string; order_id: string; plan: string; amount: unknown; currency: unknown;
+    status: string; period_months: number; raw: Record<string, unknown> | null;
+  }[]) {
+    out.checked++;
+    const order = await fetchOrder(row.order_id);
+    if (!order) { out.unconfirmed++; continue; }   // fetchOrder logs why
+    if (String((order as { order_status?: string }).order_status ?? "") !== "PAID") continue;
+
+    const check = reconcile(order, null, row);
+    if (!check.ok || check.absent) {
+      out.mismatched++;
+      // Reported ONCE per payment, not hourly for a week: the marker is merged
+      // into raw (the last gateway payload) without discarding what is there.
+      const prior = (row.raw ?? {}) as Record<string, unknown>;
+      if (!prior.reconcile_mismatch_reported_at) {
+        await notifyOperator(admin,
+          `LOST WEBHOOK, AMOUNT DOES NOT RECONCILE — plan NOT granted\n` +
+          `Order ${row.order_id} (${row.plan}) · org ${row.org_id}\n` +
+          (check.ok
+            ? `Cashfree says PAID but reported no amount (recorded ${String(row.amount ?? "?")} ${String(row.currency ?? "")})`
+            : `Gateway ${check.gateway} vs recorded ${check.recorded}: ${check.reason}`) +
+          `\nReview in the Cashfree dashboard and grant or refund by hand.`);
+        const { error: markErr } = await admin.from("payments")
+          .update({ raw: { ...prior, reconcile_mismatch_reported_at: new Date().toISOString(), reconcile_order: order } })
+          .eq("id", row.id);
+        if (markErr) console.error("checkout-recovery: could not mark mismatch reported:", markErr.message);
+      }
+      continue;
+    }
+
+    // Compare-and-swap on the status we read: if the webhook lands at the same
+    // moment, exactly one of us moves the row to 'paid'. grant_plan_from_payment
+    // is itself a CAS on granted_at, so the grant cannot happen twice either.
+    const { data: claimed, error: updErr } = await admin.from("payments").update({
+      status: "paid",
+      paid_at: new Date().toISOString(),
+      raw: { source: "checkout-recovery reconciliation", order },
+      cf_order_id: (order as { cf_order_id?: unknown }).cf_order_id != null
+        ? String((order as { cf_order_id?: unknown }).cf_order_id)
+        : undefined,
+    }).eq("id", row.id).eq("status", row.status).is("revoked_at", null).select("id");
+    if (updErr) {
+      out.errors.push(`${row.order_id}: could not mark paid (${updErr.message})`);
+      await notifyOperator(admin,
+        `LOST WEBHOOK FOUND but could not mark paid — plan NOT granted\n` +
+        `Order ${row.order_id} (${row.plan}) · org ${row.org_id}\n${updErr.message}\nWill retry next run.`);
+      continue;
+    }
+    if (!claimed?.length) continue;   // the webhook (or another run) got there first
+
+    const { data: granted, error: grantErr } = await admin.rpc("grant_plan_from_payment", { p_payment_id: row.id });
+    if (grantErr) {
+      out.errors.push(`${row.order_id}: grant failed (${grantErr.message})`);
+      await notifyOperator(admin,
+        `PAYMENT TAKEN BUT PLAN NOT GRANTED (lost-webhook recovery)\n` +
+        `Order ${row.order_id} (${row.plan}) · org ${row.org_id}\n${grantErr.message}\n` +
+        `Row is now status=paid, granted_at=null: the next PAYMENT_SUCCESS retry will grant it, or grant by hand.`);
+      continue;
+    }
+    out.recovered++;
+    await notifyOperator(admin,
+      `Recovered lost webhook — plan granted\n` +
+      `Order ${row.order_id} (${row.plan}, ${row.period_months} month(s)) · org ${row.org_id}\n` +
+      `Amount ${String((order as { order_amount?: unknown }).order_amount ?? "?")} ` +
+      `${String((order as { order_currency?: unknown }).order_currency ?? "")} · ${JSON.stringify(granted).slice(0, 200)}`);
+  }
+
+  if (out.unconfirmed) {
+    console.warn(`checkout-recovery: ${out.unconfirmed} payment(s) could not be confirmed with Cashfree this run`);
+  }
+  return out;
+}
+
+const reconcileSummary = (r: Reconciled | null) => !r ? "" :
+  ` | reconcile: ${r.checked} checked, ${r.recovered} recovered, ${r.mismatched} mismatched` +
+  (r.unconfirmed ? `, ${r.unconfirmed} unconfirmed` : "") +
+  (r.errors.length ? `, ${r.errors.length} error(s): ${r.errors.slice(0, 2).join("; ")}` : "");
+
 interface Candidate {
   payment_id: string; order_id: string; org_id: string; org_name: string; plan: string; plan_label: string;
   amount: number | null; period_months: number; email: string; full_name: string | null;
@@ -142,11 +262,16 @@ Deno.serve(async (req) => {
   if (!["run", "dry_run", "test"].includes(requested)) return json({ error: "mode must be run, dry_run or test" }, 400);
   if (isCron && requested !== "run") return json({ error: "the scheduler may only run" }, 400);
 
+  // Before anything else, and regardless of whether reminders are enabled or
+  // the settings row is readable: granting a plan someone has paid for is not
+  // a marketing feature.
+  const rec: Reconciled | null = requested === "run" ? await reconcileLostWebhooks() : null;
+
   const { data: settings, error: setErr } = await admin.from("checkout_recovery_settings")
     .select("*").eq("id", true).maybeSingle();
   if (setErr || !settings) {
     console.error("checkout-recovery: settings unavailable:", setErr?.message);
-    await heartbeat("error", "settings unavailable — is 20261013110000 applied?");
+    await heartbeat("error", "settings unavailable — is 20261013110000 applied?" + reconcileSummary(rec));
     return json({ error: "settings unavailable" }, 503);
   }
 
@@ -154,8 +279,14 @@ Deno.serve(async (req) => {
   if (requested === "test") {
     if (!settings.test_recipient) return json({ error: "Set a test recipient first" }, 400);
     if (!RESEND_KEY || !FROM) return json({ error: "RESEND_API_KEY and RECOVERY_FROM (or NURTURE_FROM) must be set" }, 503);
+    // The real Growth price, not a hardcoded guess (it said 2999; the plan is
+    // ₹2,499 since 20260908090000). Read live so a future price change is
+    // reflected; the constant is only the fallback if the read fails.
+    const { data: growth } = await admin.from("plan_limits")
+      .select("label, price_inr").eq("plan", "growth").maybeSingle();
     const mail = buildRecoveryEmail({
-      firstName: "Sample", orgName: "Sample Workspace", planLabel: "Growth", amountInr: 2999, months: 1,
+      firstName: "Sample", orgName: "Sample Workspace", planLabel: growth?.label ?? "Growth",
+      amountInr: Number(growth?.price_inr) || 2499, months: 1,
       startedAt: new Date(Date.now() - 3 * 3600_000).toISOString(), attempt: 1,
       settingsUrl: `${SITE}/settings?tab=usage`, unsubUrl: `${FN_URL}?unsub=00000000-0000-0000-0000-000000000000`,
     });
@@ -180,18 +311,18 @@ Deno.serve(async (req) => {
 
   const dry = requested === "dry_run" || settings.dry_run;
   if (requested === "run" && !settings.enabled) {
-    await heartbeat("ok", "disabled — nothing sent");
-    return json({ ok: true, skipped: "disabled" });
+    await heartbeat(rec?.errors.length ? "error" : "ok", "disabled — nothing sent" + reconcileSummary(rec));
+    return json({ ok: true, skipped: "disabled", reconcile: rec });
   }
   if (!dry && (!RESEND_KEY || !FROM)) {
-    await heartbeat("error", "RESEND_API_KEY or RECOVERY_FROM/NURTURE_FROM missing — nothing sent");
+    await heartbeat("error", "RESEND_API_KEY or RECOVERY_FROM/NURTURE_FROM missing — nothing sent" + reconcileSummary(rec));
     return json({ error: "email is not configured — nothing was sent" }, 503);
   }
 
   const { data: cands, error: cErr } = await admin.rpc("checkout_recovery_candidates", { p_limit: 50 });
   if (cErr) {
     console.error("checkout-recovery: candidate query failed:", cErr.message);
-    await heartbeat("error", "candidate query failed");
+    await heartbeat("error", "candidate query failed" + reconcileSummary(rec));
     return json({ error: "could not read candidates" }, 503);
   }
   const list = (cands ?? []) as Candidate[];
@@ -211,7 +342,7 @@ Deno.serve(async (req) => {
       const { error } = await admin.from("checkout_followups").insert(rows);
       if (error) console.error("checkout-recovery: dry-run log failed:", error.message);
     }
-    await heartbeat("ok", `dry run — ${list.length} would be emailed`);
+    await heartbeat(rec?.errors.length ? "error" : "ok", `dry run — ${list.length} would be emailed` + reconcileSummary(rec));
     return json({
       ok: true, mode: "dry_run", would_send: list.length,
       candidates: list.map((c) => ({ org: c.org_name, plan: c.plan_label, email: c.email, started_at: c.started_at, attempt: c.attempt })),
@@ -268,6 +399,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  await heartbeat(failed && !sent ? "error" : "ok", `sent ${sent}, failed ${failed}, skipped ${skipped}`);
-  return json({ ok: true, mode: "live", eligible: list.length, sent, failed, skipped });
+  await heartbeat((failed && !sent) || rec?.errors.length ? "error" : "ok",
+    `sent ${sent}, failed ${failed}, skipped ${skipped}` + reconcileSummary(rec));
+  return json({ ok: true, mode: "live", eligible: list.length, sent, failed, skipped, reconcile: rec });
 });

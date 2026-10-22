@@ -22,8 +22,10 @@ select
   ) as result;
 
 -- ── 2. What is actually scheduled right now? ────────────────────────────────
--- Expect rows for the nurture / automation / health / rescore jobs as well as
--- the reconciler. An empty result means no scheduled work happens at all.
+-- Expect rows for the nurture / automation / health jobs as well as the
+-- reconciler. There is no scheduled rescore job: rescore-leads is run on demand
+-- from Settings by an admin, not by pg_cron. An empty result means no
+-- scheduled work happens at all.
 select jobid, jobname, schedule, active, command
   from cron.job
  order by jobname;

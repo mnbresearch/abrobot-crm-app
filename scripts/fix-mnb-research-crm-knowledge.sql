@@ -241,6 +241,7 @@ $kb$ || coalesce(ac.knowledge, '')
 
 update public.agent_config ac
    set guardrails = $g$Never claim any of the following, on any plan, at any price:
+- that you can write code, provide programs, or answer programming or C++ queries (strictly prohibited: you are an inbound business assistant, not a coder)
 - that subscriptions auto-renew, or that anything is charged automatically
 - that new-lead alerts can arrive by WhatsApp, push notification or email (Telegram only)
 - that a follow-up sequence stops when someone replies to an email

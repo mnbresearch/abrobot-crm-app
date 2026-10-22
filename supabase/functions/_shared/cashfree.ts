@@ -39,8 +39,13 @@ export function isConfigured(): boolean {
   return credentials() !== null && cashfreeEnv() !== null;
 }
 
-function baseUrl(): string {
-  return cashfreeEnv() === "production"
+// Explicit per environment. This used to be `production ? api : sandbox`, so
+// an unset or misspelt CASHFREE_ENV silently meant sandbox — and fetchOrder,
+// which (unlike createOrder) never checked the env, asked the SANDBOX about
+// PRODUCTION orders, got a 404, and reported "could not confirm". Callers now
+// pass an env they have already validated.
+function baseUrl(env: "production" | "sandbox"): string {
+  return env === "production"
     ? "https://api.cashfree.com/pg"
     : "https://sandbox.cashfree.com/pg";
 }
@@ -76,7 +81,7 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
   const phone = (input.customer.phone ?? "").replace(/[^\d]/g, "").slice(-10) || "9999999999";
 
   try {
-    const res = await fetchWithTimeout(`${baseUrl()}/orders`, {
+    const res = await fetchWithTimeout(`${baseUrl(env)}/orders`, {
       method: "POST",
       headers: {
         "x-api-version": API_VERSION,
@@ -128,12 +133,28 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
   }
 }
 
-/** Ask Cashfree the truth about an order. Used to confirm the return page. */
+/**
+ * Ask Cashfree the truth about an order. Returns null when it cannot answer.
+ *
+ * Fails CLOSED on a missing or unrecognised CASHFREE_ENV, with the reason
+ * logged, rather than querying the sandbox about production orders.
+ */
 export async function fetchOrder(orderId: string): Promise<Record<string, unknown> | null> {
   const creds = credentials();
-  if (!creds) return null;
+  const env = cashfreeEnv();
+  if (!creds) {
+    console.error("cashfree fetchOrder: CASHFREE_APP_ID / CASHFREE_SECRET_KEY not set — not queried:", orderId);
+    return null;
+  }
+  if (!env) {
+    console.error(
+      "cashfree fetchOrder: CASHFREE_ENV is not 'production' or 'sandbox' — refusing to guess which gateway holds",
+      orderId,
+    );
+    return null;
+  }
   try {
-    const res = await fetchWithTimeout(`${baseUrl()}/orders/${encodeURIComponent(orderId)}`, {
+    const res = await fetchWithTimeout(`${baseUrl(env)}/orders/${encodeURIComponent(orderId)}`, {
       headers: {
         "x-api-version": API_VERSION,
         "x-client-id": creds.appId,
@@ -145,6 +166,102 @@ export async function fetchOrder(orderId: string): Promise<Record<string, unknow
   } catch {
     return null;
   }
+}
+
+// ── Amount / currency reconciliation (pure) ─────────────────────────────────
+//
+// Moved here from billing-webhook so checkout-recovery's lost-webhook
+// reconciler asks exactly the same question before granting a plan.
+//
+// The HMAC proves the event came from Cashfree. It proves NOTHING about how
+// much was paid. order_amount and order_currency were stored in `raw` and never
+// looked at, so the only question that mattered — "did this person pay what
+// this order is for?" — was never asked.
+//
+// Two ways that bites, both reachable without forging anything:
+//   * a partially-paid order: payments.amount is ₹49,990 for annual Business,
+//     the gateway reports order_amount 4,999.00, and the old code granted the
+//     full twelve months anyway;
+//   * a reused order_id: an order row created for ₹49,990 collects a genuine
+//     signature-valid success event for a ₹999 Starter charge.
+//
+// Returns `absent` rather than throwing when the payload carries no amount at
+// all, because the call sites want different things from that case.
+
+// Money arrives as a JSON number from Cashfree and as numeric(12,2) from
+// Postgres (PostgREST may hand it back as a string). Everything that compares
+// two amounts goes through here so "49990" and 49990.00 cannot disagree.
+export const toAmount = (v: unknown): number | null => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+// One paisa. amount is numeric(12,2), and the gateway rounds to two decimals
+// too, so anything larger than this is a real difference, not float noise.
+export const AMOUNT_EPSILON = 0.01;
+
+export type Reconciliation =
+  | { ok: true; absent: boolean }
+  | { ok: false; absent: false; reason: string; gateway: string; recorded: string };
+
+// deno-lint-ignore no-explicit-any
+export function reconcile(order: any, payment: any, row: { amount: unknown; currency: unknown }): Reconciliation {
+  const recorded = toAmount(row.amount);
+
+  // ── Take the LOWEST amount the payload reports, not the first one ────────
+  //
+  // `order_amount ?? payment_amount` defeated both scenarios in the comment
+  // above, because in each of them `order_amount` is the amount the order was
+  // CREATED for — which equals `payments.amount` by construction — while
+  // `payment_amount` is what was actually captured. A partially-paid order
+  // reports order_amount 49,990 and payment_amount 4,999; preferring the
+  // former reconciles cleanly and grants the plan.
+  //
+  // `payment_amount` is the money that actually moved, so it is the one that
+  // must clear the bar. Taking the minimum of whatever is present is stricter
+  // than either alone and does not depend on getting the field precedence
+  // right, which is the part that was wrong.
+  const orderAmt = toAmount(order?.order_amount);
+  const paidAmt = toAmount(payment?.payment_amount);
+  const present = [orderAmt, paidAmt].filter((v): v is number => v !== null);
+  const gateway = present.length ? Math.min(...present) : null;
+
+  if (gateway === null) {
+    return { ok: true, absent: true };
+  }
+  if (recorded === null) {
+    // Our own row has no amount to compare against. Nothing to check, and
+    // refusing here would strand a customer over our own bad data.
+    return { ok: true, absent: true };
+  }
+
+  // "At least", not "equal": overpayment is the customer's loss to reclaim
+  // through support, and blocking it would hold up a plan they have paid for.
+  if (gateway + AMOUNT_EPSILON < recorded) {
+    return {
+      ok: false, absent: false, reason: "amount underpaid",
+      gateway: String(gateway), recorded: String(recorded),
+    };
+  }
+
+  // Currency is compared only when the payload states one. An amount check
+  // already catches the realistic attack (₹999 against a ₹49,990 order); a
+  // payload that omits the currency entirely is a shape change, not a swap,
+  // and hard-failing on it would block legitimate grants.
+  const gatewayCur = String(order?.order_currency ?? payment?.payment_currency ?? "").trim().toUpperCase();
+  const recordedCur = String(row.currency ?? "").trim().toUpperCase();
+  if (gatewayCur && recordedCur && gatewayCur !== recordedCur) {
+    return {
+      ok: false, absent: false, reason: "currency mismatch",
+      gateway: gatewayCur, recorded: recordedCur,
+    };
+  }
+  if (!gatewayCur) {
+    console.warn("cashfree reconcile: payload carried no currency; reconciled on amount only");
+  }
+
+  return { ok: true, absent: false };
 }
 
 // ── webhook verification ────────────────────────────────────────────────────

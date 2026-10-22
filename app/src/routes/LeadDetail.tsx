@@ -3,7 +3,31 @@ import { useApp } from "../lib/store";
 import { supabase, callFunction } from "../lib/supabase";
 import { Card, FieldInput, LoadError, Modal, ScoreChip, Spinner, StagePill, cellValue, humanize, timeAgo, useToast } from "../components/ui";
 import { IndustryTool } from "../components/IndustryTool";
+import { EditLeadDetails, type DetailChanges } from "../components/EditLeadDetails";
+import { applyTemplate as mergeTokens } from "../lib/template";
+import {
+  getConsentPreferences,
+  saveConsentPreferences,
+  exportLeadSAR,
+  eraseLeadPII,
+  recordDataRectification,
+  generateErasureCertificate,
+  downloadErasureCertificate,
+  type ConsentPreferences,
+} from "../lib/compliance";
 import type { Activity, Lead } from "../lib/types";
+
+// Activity types that mean someone actually reached the person. Only these
+// move "Last contacted", which drives the follow-up queue — a note or a stage
+// change is work done ON the record, not contact WITH the customer.
+const CONTACT_TYPES: ReadonlySet<Activity["type"]> = new Set(["call", "email", "whatsapp", "meeting"]);
+
+/** What the plan says about WhatsApp, read from usage_snapshot. */
+interface WaAllowance { included: boolean; used: number; limit: number | null }
+
+// One usage_snapshot read per org per minute, shared across record views:
+// opening ten records in a row should not cost ten counts of the org's leads.
+let waCache: { orgId: string; at: number; value: WaAllowance } | null = null;
 
 export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string) => void }) {
   const { org, ui, stages, fields, profile, isAdmin } = useApp();
@@ -23,6 +47,24 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [emSubject, setEmSubject] = useState("");
   const [emText, setEmText] = useState("");
   const [emSending, setEmSending] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [complianceOpen, setComplianceOpen] = useState(false);
+  const [complianceTab, setComplianceTab] = useState<"sar" | "consent" | "rectification" | "erasure">("consent");
+  const [consentDraft, setConsentDraft] = useState<ConsentPreferences | null>(null);
+  const [consentSaving, setConsentSaving] = useState(false);
+  const [rectName, setRectName] = useState("");
+  const [rectEmail, setRectEmail] = useState("");
+  const [rectPhone, setRectPhone] = useState("");
+  const [rectReason, setRectReason] = useState("");
+  const [rectSaving, setRectSaving] = useState(false);
+  const [erasureInput, setErasureInput] = useState("");
+  const [erasing, setErasing] = useState(false);
+  const [exportingSar, setExportingSar] = useState(false);
+  // null = not known (not read yet, or the read failed). Unknown leaves the
+  // button usable — whatsapp-send enforces the plan itself and says why — but
+  // a KNOWN "not included" stops someone writing a message that can only be
+  // refused.
+  const [wa, setWa] = useState<WaAllowance | null>(null);
   const toast = useToast();
 
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -76,17 +118,29 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
       });
   }, [org]);
 
-  // Preview-only substitution. The server does this again on send, from
-  // _shared/template.ts, and that copy is authoritative — this one exists so
-  // the person sees the real message before they commit to it.
+  useEffect(() => {
+    if (!org) return;
+    if (waCache && waCache.orgId === org.id && Date.now() - waCache.at < 60_000) { setWa(waCache.value); return; }
+    void supabase.rpc("usage_snapshot", { p_org_id: org.id }).then(({ data, error }) => {
+      if (error || !data) { console.warn("lead detail: plan state unavailable —", error?.message); return; }
+      const snap = data as { whatsapp?: boolean; whatsapp_messages?: { used?: number; limit?: number | null } };
+      const value: WaAllowance = {
+        included: !!snap.whatsapp,
+        used: snap.whatsapp_messages?.used ?? 0,
+        limit: snap.whatsapp_messages?.limit ?? null,
+      };
+      waCache = { orgId: org.id, at: Date.now(), value };
+      setWa(value);
+    });
+  }, [org]);
+
+  // The same substitution the server runs (lib/template.ts is a port of
+  // _shared/template.ts). For WhatsApp this IS the send — whatsapp-send does
+  // no substitution of its own — so a token this missed went to the customer
+  // literally. For email the server substitutes again, and the two now agree.
   const merge = (body: string) => {
     if (!lead) return body;
-    return body
-      .replace(/\{\{\s*name\s*\}\}/gi, lead.name ?? "")
-      .replace(/\{\{\s*first_name\s*\}\}/gi, (lead.name ?? "").split(" ")[0])
-      .replace(/\{\{\s*country\s*\}\}/gi, lead.target_country ?? "")
-      .replace(/\{\{\s*course\s*\}\}/gi, lead.course ?? lead.course_level ?? "")
-      .replace(/\{\{\s*brand\s*\}\}/gi, org?.name ?? "");
+    return mergeTokens(body, lead, org?.name ?? "");
   };
 
   const applyTemplate = (body: string) => setWaText(merge(body));
@@ -157,6 +211,10 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
       org_id: org.id, lead_id: lead.id, user_id: profile?.id ?? null, type, content,
     });
     if (error) { toast.error(error.message); return false; }
+    // Notes and stage changes are not contact. Stamping them made a record
+    // someone merely annotated drop out of the "not contacted" queue, so the
+    // customer who most needed a call was the one nobody was reminded about.
+    if (!CONTACT_TYPES.has(type)) { await load(); return true; }
     // "Last contacted" drives the follow-up queue, so a silent failure here
     // means someone gets chased twice or not at all.
     // `.select("id")` so a refusal is distinguishable from success: PostgREST
@@ -261,6 +319,21 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     navigate("/leads");
   };
 
+  // After EditLeadDetails has written. The record on screen takes the patch
+  // immediately; the history gets one line per kind of change, attributed to
+  // whoever made it — an owner change as an "assignment", so the Activity
+  // filter for reassignments finds it.
+  const detailsSaved = async (patch: Partial<Lead>, changes: DetailChanges) => {
+    if (!lead) return;
+    setLead({ ...lead, ...patch });
+    setDetailsOpen(false);
+    let ok = true;
+    if (changes.assignment) ok = (await log("assignment", changes.assignment)) && ok;
+    if (changes.lines.length) ok = (await log("note", `Details updated:\n${changes.lines.join("\n")}`)) && ok;
+    // log() has already toasted its own failure; don't paper over it.
+    if (ok) toast.show("Details saved");
+  };
+
   const addNote = async () => {
     if (!note.trim()) return;
     await log("note", note.trim());
@@ -280,6 +353,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   if (!lead) return <Card><p>Not found.</p></Card>;
 
   const stageKey = lead.stage_key ?? lead.stage;
+
+  // Why WhatsApp cannot be sent from here, if we know it cannot. The same two
+  // refusals whatsapp-send gives (402), said before anyone writes a message.
+  const waBlocked: string | null =
+    wa && !wa.included
+      ? "WhatsApp sending isn't included on your current plan — it comes with Growth and above. The ↗ link still opens WhatsApp on this device."
+      : wa && wa.limit !== null && wa.used >= wa.limit
+        ? `This month's WhatsApp allowance (${wa.limit} messages) is used up. It resets on the 1st; the ↗ link still opens WhatsApp on this device.`
+        : null;
 
   const waModal = waOpen && (
     <Modal title={`WhatsApp ${lead.name}`} onClose={() => setWaOpen(false)}>
@@ -406,10 +488,365 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     </Modal>
   );
 
+  const consentPrefs = getConsentPreferences(lead);
+
+  const complianceModal = complianceOpen && (
+    <Modal title={`🛡️ Compliance & Data Privacy — ${lead.name}`} onClose={() => setComplianceOpen(false)} wide>
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        <button
+          className={`tab${complianceTab === "consent" ? " active" : ""}`}
+          onClick={() => setComplianceTab("consent")}
+        >
+          Communication &amp; Consent
+        </button>
+        <button
+          className={`tab${complianceTab === "sar" ? " active" : ""}`}
+          onClick={() => setComplianceTab("sar")}
+        >
+          Data Subject Dossier (SAR)
+        </button>
+        <button
+          className={`tab${complianceTab === "rectification" ? " active" : ""}`}
+          onClick={() => setComplianceTab("rectification")}
+        >
+          ⚖️ Right to Rectification
+        </button>
+        {isAdmin && (
+          <button
+            className={`tab${complianceTab === "erasure" ? " active" : ""}`}
+            onClick={() => setComplianceTab("erasure")}
+            style={{ color: complianceTab === "erasure" ? "#b91c1c" : undefined }}
+          >
+            Right to Erasure
+          </button>
+        )}
+      </div>
+
+      {complianceTab === "consent" && (
+        <div className="stack">
+          <p className="sub" style={{ marginTop: -4, marginBottom: 10 }}>
+            Manage statutory communication consent and Do-Not-Contact (DNC) preferences under India's DPDP Act 2023 and GDPR.
+          </p>
+
+          <div className="field">
+            <label className="label">Statutory Consent Basis</label>
+            <select
+              className="input"
+              value={consentDraft?.consent_status ?? "inbound_inquiry"}
+              onChange={(e) =>
+                setConsentDraft((prev) =>
+                  prev ? { ...prev, consent_status: e.target.value as any } : null
+                )
+              }
+            >
+              <option value="inbound_inquiry">Inbound Commercial Enquiry (Legitimate Interest / Implied Consent)</option>
+              <option value="explicit_consent">Explicit Consent Granted (Verifiable Opt-In)</option>
+              <option value="consent_withdrawn">Consent Withdrawn / Revoked (Do Not Outreach)</option>
+            </select>
+          </div>
+
+          <div className="field">
+            <label className="label">Channel Opt-Out Restrictions (Do Not Contact)</label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              <label className="row" style={{ cursor: "pointer", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={consentDraft?.opt_out_whatsapp ?? false}
+                  onChange={(e) =>
+                    setConsentDraft((prev) =>
+                      prev ? { ...prev, opt_out_whatsapp: e.target.checked } : null
+                    )
+                  }
+                />
+                <span><b>WhatsApp Opt-Out:</b> Do not send WhatsApp outreach or template alerts</span>
+              </label>
+              <label className="row" style={{ cursor: "pointer", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={consentDraft?.opt_out_email ?? false}
+                  onChange={(e) =>
+                    setConsentDraft((prev) =>
+                      prev ? { ...prev, opt_out_email: e.target.checked } : null
+                    )
+                  }
+                />
+                <span><b>Email Opt-Out:</b> Do not send email campaigns or automated nurture</span>
+              </label>
+              <label className="row" style={{ cursor: "pointer", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={consentDraft?.opt_out_calls ?? false}
+                  onChange={(e) =>
+                    setConsentDraft((prev) =>
+                      prev ? { ...prev, opt_out_calls: e.target.checked } : null
+                    )
+                  }
+                />
+                <span><b>Do Not Call (DNC):</b> Do not place outbound calls</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="label">Consent Documentation &amp; Audit Notes</label>
+            <textarea
+              className="textarea"
+              rows={3}
+              value={consentDraft?.consent_notes ?? ""}
+              onChange={(e) =>
+                setConsentDraft((prev) =>
+                  prev ? { ...prev, consent_notes: e.target.value } : null
+                )
+              }
+              placeholder="e.g. Verbal request during call on 21 Oct, or web form opt-in timestamp"
+            />
+          </div>
+
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 10 }}>
+            <button className="btn" onClick={() => setComplianceOpen(false)}>Cancel</button>
+            <button
+              className="btn btn-primary"
+              disabled={consentSaving}
+              onClick={async () => {
+                if (!consentDraft || !lead) return;
+                setConsentSaving(true);
+                const res = await saveConsentPreferences(supabase, lead, consentDraft, profile);
+                setConsentSaving(false);
+                if (!res.success) {
+                  toast.error(res.error || "Could not save consent preferences");
+                  return;
+                }
+                toast.show("Consent preferences updated and logged");
+                setComplianceOpen(false);
+                await load();
+              }}
+            >
+              {consentSaving ? "Saving…" : "Save Preferences"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {complianceTab === "sar" && (
+        <div className="stack">
+          <p className="sub" style={{ marginTop: -4, marginBottom: 12 }}>
+            Under Section 11 of India's DPDP Act 2023 and Articles 15 &amp; 20 of GDPR, any Data Principal has the right to access and obtain a portable copy of all personal data, activity timelines, and chat transcripts held by your organisation.
+          </p>
+
+          <div style={{ background: "var(--track, #f1f5f9)", borderRadius: 10, padding: 14, fontSize: 13, lineHeight: 1.6 }}>
+            <div><b>Data Subject:</b> {lead.name} ({lead.email || "no email"} · {lead.phone || "no phone"})</div>
+            <div><b>Data Fiduciary:</b> {org?.name ?? "Your Organization"}</div>
+            <div><b>Timeline Entries:</b> {acts.length} recorded events</div>
+            <div><b>Format:</b> Machine-readable portable JSON with statutory compliance headers</div>
+          </div>
+
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+            <button className="btn" onClick={() => setComplianceOpen(false)}>Close</button>
+            <button
+              className="btn btn-primary"
+              disabled={exportingSar}
+              onClick={async () => {
+                setExportingSar(true);
+                try {
+                  const { data: convs } = await supabase
+                    .from("conversations")
+                    .select("id, created_at")
+                    .eq("lead_id", lead.id);
+
+                  let transcripts: any[] = [];
+                  if (convs?.length) {
+                    const convIds = convs.map((c) => c.id);
+                    const { data: msgs } = await supabase
+                      .from("chat_messages")
+                      .select("conversation_id, role, content, created_at")
+                      .in("conversation_id", convIds)
+                      .order("created_at");
+
+                    transcripts = convs.map((c) => ({
+                      conversation_id: c.id,
+                      started_at: c.created_at,
+                      messages: (msgs || [])
+                        .filter((m) => m.conversation_id === c.id)
+                        .map((m) => ({
+                          role: m.role,
+                          content: m.content,
+                          timestamp: m.created_at,
+                        })),
+                    }));
+                  }
+
+                  exportLeadSAR(lead, acts, transcripts, org?.name || "AbroBot Customer");
+                  toast.show("Data Subject Access Request (SAR) package downloaded");
+                  setComplianceOpen(false);
+                } catch (err) {
+                  toast.error(`SAR export failed: ${(err as Error).message}`);
+                } finally {
+                  setExportingSar(false);
+                }
+              }}
+            >
+              {exportingSar ? "Packaging Dossier…" : "📁 Download Official SAR Dossier (JSON)"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {complianceTab === "rectification" && (
+        <div className="stack">
+          <p className="sub" style={{ marginTop: -4, marginBottom: 12 }}>
+            Under Section 12(1) of India's DPDP Act 2023 and Article 16 of GDPR, a Data Principal has the right to correction, completion, and updating of inaccurate personal data.
+          </p>
+
+          <div className="field">
+            <label className="label">Full Name</label>
+            <input
+              className="input"
+              value={rectName}
+              onChange={(e) => setRectName(e.target.value)}
+              placeholder="Full Name"
+            />
+          </div>
+
+          <div className="grid grid-2" style={{ gap: 12 }}>
+            <div className="field">
+              <label className="label">Email Address</label>
+              <input
+                className="input"
+                type="email"
+                value={rectEmail}
+                onChange={(e) => setRectEmail(e.target.value)}
+                placeholder="name@example.com"
+              />
+            </div>
+            <div className="field">
+              <label className="label">Phone Number</label>
+              <input
+                className="input"
+                type="tel"
+                value={rectPhone}
+                onChange={(e) => setRectPhone(e.target.value)}
+                placeholder="+91 98765 43210"
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="label">Statutory Request Basis / Justification (Mandatory Audit Requirement)</label>
+            <textarea
+              className="textarea"
+              rows={3}
+              value={rectReason}
+              onChange={(e) => setRectReason(e.target.value)}
+              placeholder="e.g. Data Principal submitted correction request via support email on 22 Oct 2026 citing updated phone number."
+            />
+          </div>
+
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+            <button className="btn" onClick={() => setComplianceOpen(false)}>Cancel</button>
+            <button
+              className="btn btn-primary"
+              disabled={rectSaving || !rectReason.trim() || !rectName.trim()}
+              onClick={async () => {
+                if (!lead || !rectReason.trim() || !rectName.trim()) return;
+                setRectSaving(true);
+                const res = await recordDataRectification(
+                  supabase,
+                  lead,
+                  {
+                    name: rectName.trim(),
+                    email: rectEmail.trim() || null,
+                    phone: rectPhone.trim() || null,
+                  },
+                  rectReason.trim(),
+                  profile,
+                );
+                setRectSaving(false);
+                if (!res.success) {
+                  toast.error(res.error || "Could not record rectification");
+                  return;
+                }
+                toast.show("Data rectification logged and updated under DPDP / GDPR");
+                setComplianceOpen(false);
+                await load();
+              }}
+            >
+              {rectSaving ? "Saving Rectification…" : "Record Statutory Rectification"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {complianceTab === "erasure" && isAdmin && (
+        <div className="stack">
+          <div style={{ background: "rgba(239, 68, 68, 0.08)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 700, color: "#b91c1c", fontSize: 14, marginBottom: 4 }}>
+              ⚠️ Right to Erasure / Right to be Forgotten (DPDP Sec. 12 / GDPR Art. 17)
+            </div>
+            <p className="sub" style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6 }}>
+              Executing this request permanently redacts this person's personal data (name, email, phone, custom fields, and conversation identifiers).
+              The record will be anonymized, an official compliance audit entry will be logged, and the record will be archived.
+              <b> This action cannot be reversed.</b>
+            </p>
+          </div>
+
+          <div className="field" style={{ marginTop: 12 }}>
+            <label className="label">Type <code>ERASE</code> to confirm statutory erasure:</label>
+            <input
+              className="input"
+              value={erasureInput}
+              onChange={(e) => setErasureInput(e.target.value)}
+              placeholder="Type ERASE"
+            />
+          </div>
+
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+            <button className="btn" onClick={() => setComplianceOpen(false)}>Cancel</button>
+            <button
+              className="btn btn-danger"
+              disabled={erasureInput.trim() !== "ERASE" || erasing}
+              onClick={async () => {
+                if (erasureInput.trim() !== "ERASE" || !lead) return;
+                setErasing(true);
+                const cert = generateErasureCertificate(
+                  lead.id,
+                  org?.name || "AbroBot Customer",
+                  org?.id || "",
+                  profile?.full_name || profile?.email || "Compliance Officer",
+                );
+                const res = await eraseLeadPII(supabase, lead, profile);
+                setErasing(false);
+                if (!res.success) {
+                  toast.error(res.error || "Erasure failed");
+                  return;
+                }
+                downloadErasureCertificate(cert);
+                toast.show("Personal data permanently erased & Certificate of Erasure downloaded");
+                setComplianceOpen(false);
+                navigate("/leads");
+              }}
+            >
+              {erasing ? "Redacting PII…" : "Permanently Erase & Download Certificate"}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+
   return (
     <div className="stack">
       {waModal}
       {emailModal}
+      {complianceModal}
+      {detailsOpen && (
+        <EditLeadDetails
+          lead={lead}
+          stages={stages}
+          onClose={() => setDetailsOpen(false)}
+          onSaved={detailsSaved}
+          navigate={navigate}
+        />
+      )}
       <div className="row">
         <button className="btn btn-ghost btn-sm" onClick={() => navigate("/leads")}>← {ui.leadNounPlural}</button>
       </div>
@@ -422,6 +859,31 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
             <ScoreChip score={lead.score} />
             <span className="pill pill-muted">via {lead.source}</span>
             {lead.nurture_opted_out && <span className="pill pill-red">Unsubscribed</span>}
+            {consentPrefs.opt_out_whatsapp && (
+              <span className="pill pill-red" title="Visitor has requested not to be messaged on WhatsApp">
+                🚫 WhatsApp Opt-out
+              </span>
+            )}
+            {consentPrefs.opt_out_email && (
+              <span className="pill pill-red" title="Visitor has opted out of marketing & email">
+                🚫 Email Opt-out
+              </span>
+            )}
+            {consentPrefs.opt_out_calls && (
+              <span className="pill pill-amber" title="Visitor requested Do Not Call (DNC)">
+                🚫 Do Not Call
+              </span>
+            )}
+            {consentPrefs.consent_status === "consent_withdrawn" && (
+              <span className="pill pill-red" title="Statutory consent withdrawn under DPDP Act / GDPR">
+                ⚠️ Consent Withdrawn
+              </span>
+            )}
+            {consentPrefs.consent_status === "explicit_consent" && (
+              <span className="pill pill-green" title="Explicit verifiable consent recorded">
+                ✓ Explicit Consent
+              </span>
+            )}
 
             {(Array.isArray(lead.tags) ? lead.tags : []).map((t) => (
               <button
@@ -454,15 +916,54 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
         <div className="spacer" />
         <div className="row row-wrap" style={{ justifyContent: "flex-end" }}>
           {lead.phone && <a className="btn btn-sm" href={`tel:${lead.phone}`}>📞 Call</a>}
-          {lead.email && (
-            <button className="btn btn-sm btn-primary" onClick={() => setEmOpen(true)}>
-              ✉️ Email
+          {/* Admins only: send-campaign refuses everyone else with a 403, so
+              showing it to a counsellor meant writing an email that could
+              only bounce back as an error. They keep the mail-app link. */}
+          {lead.email && isAdmin && (
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={() => {
+                if (consentPrefs.opt_out_email || lead.nurture_opted_out) {
+                  if (!confirm("⚠️ This contact has opted out of email communication. Do you want to proceed?")) {
+                    return;
+                  }
+                }
+                setEmOpen(true);
+              }}
+              title="Send from your business address and log it here"
+            >
+              ✉️ Send email
             </button>
           )}
           {lead.phone && (
-            <button className="btn btn-sm btn-primary" onClick={() => setWaOpen(true)}>
-              💬 WhatsApp
-            </button>
+            waBlocked ? (
+              // Not `disabled`: a disabled button swallows the tap, and on a
+              // phone there is no hover to show a tooltip — the explanation
+              // would be unreachable exactly where WhatsApp matters most.
+              <button
+                className="btn btn-sm"
+                aria-disabled="true"
+                style={{ opacity: 0.6 }}
+                title={waBlocked}
+                onClick={() => toast.error(waBlocked)}
+              >
+                💬 WhatsApp
+              </button>
+            ) : (
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={() => {
+                  if (consentPrefs.opt_out_whatsapp) {
+                    if (!confirm("⚠️ This contact has opted out of WhatsApp messages under DPDP / GDPR communication preferences. Do you want to override and message them anyway?")) {
+                      return;
+                    }
+                  }
+                  setWaOpen(true);
+                }}
+              >
+                💬 WhatsApp
+              </button>
+            )
           )}
           {/* The deep link stays, as a second option. It opens WhatsApp on the
               user's own phone and logs nothing — useful when they want a real
@@ -473,7 +974,26 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
               ↗
             </a>
           )}
-          {lead.email && <a className="btn btn-sm" href={`mailto:${lead.email}`}>✉️ Email</a>}
+          {lead.email && (
+            <a className="btn btn-sm" href={`mailto:${lead.email}`} title="Opens your own mail app — not sent or logged by the CRM">
+              ✉️ Open in mail app
+            </a>
+          )}
+          <button
+            className="btn btn-sm"
+            onClick={() => {
+              setConsentDraft(getConsentPreferences(lead));
+              setRectName(lead.name || "");
+              setRectEmail(lead.email || "");
+              setRectPhone(lead.phone || "");
+              setRectReason("");
+              setErasureInput("");
+              setComplianceOpen(true);
+            }}
+            title="DPDP Act 2023 & GDPR: Export SAR dossier, manage consent, or erase personal data"
+          >
+            🛡️ Compliance
+          </button>
           {isAdmin && (
             <button
               className="btn btn-sm btn-danger"
@@ -529,9 +1049,16 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
         <Card
           title="Details"
           action={
-            <button className="btn btn-sm" onClick={() => setEditing(!editing)}>
-              {editing ? "Done" : "Edit"}
-            </button>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn btn-sm" onClick={() => setDetailsOpen(true)}>
+                Edit details
+              </button>
+              {fields.length > 0 && (
+                <button className="btn btn-sm" onClick={() => setEditing(!editing)}>
+                  {editing ? "Done" : "Edit fields"}
+                </button>
+              )}
+            </div>
           }
         >
           <Detail k="Phone" v={lead.phone ?? "—"} />
@@ -539,6 +1066,7 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
           <Detail k="Created" v={timeAgo(lead.created_at)} />
           <Detail k="Last contacted" v={timeAgo(lead.last_contacted_at)} />
           <Detail k="Follow-up" v={lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toLocaleString("en-IN") : "—"} />
+          {lead.lost_reason && <Detail k="Lost reason" v={lead.lost_reason} />}
 
           {fields.length > 0 && <div style={{ height: 1, background: "var(--border)", margin: "13px 0" }} />}
 
@@ -572,7 +1100,7 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
           )}
         </Card>
 
-        <IndustryTool kind={ui.tool} label={ui.toolLabel} lead={lead} />
+        <IndustryTool kind={ui.tool} label={ui.toolLabel} lead={lead} onLeadChange={setLead} />
       </div>
 
       <Card title="Activity">

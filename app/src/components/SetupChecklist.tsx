@@ -17,13 +17,37 @@ interface Step {
   action?: { label: string; path: string };
 }
 
+// "Hide" lived in component state, so it lasted until the next navigation:
+// every return to the Dashboard brought the card back, and an admin who had
+// deliberately dismissed it was nagged on every visit. Remembered per org in
+// localStorage — per org because one person can admin more than one workspace,
+// and dismissing it in one says nothing about the other.
+const hideKey = (orgId: string) => `abrobot.setupChecklist.hidden.${orgId}`;
+
+function readHidden(orgId: string | undefined): boolean {
+  if (!orgId) return false;
+  // Storage can throw (Safari private mode, storage disabled by policy). A
+  // checklist that cannot remember being hidden is better than a crash.
+  try { return localStorage.getItem(hideKey(orgId)) === "1"; } catch { return false; }
+}
+
 export function SetupChecklist({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, isAdmin, plan } = useApp();
   const [steps, setSteps] = useState<Step[] | null>(null);
   // Steps this plan cannot support, named so they can be explained rather than
   // just vanishing. See the gating note below.
   const [gated, setGated] = useState<string[]>([]);
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useState(() => readHidden(org?.id));
+
+  // Re-read when the org changes (sign-out and into another workspace without
+  // a reload), since the initial state was computed for the previous one.
+  useEffect(() => { setHidden(readHidden(org?.id)); }, [org?.id]);
+
+  const hide = () => {
+    setHidden(true);
+    if (!org) return;
+    try { localStorage.setItem(hideKey(org.id), "1"); } catch { /* see readHidden */ }
+  };
 
   // `free` is max_seats = 1 and max_automations = 0. "Invite your team" needs a
   // second active profile and "Switch on one automation" needs an enabled
@@ -192,11 +216,19 @@ export function SetupChecklist({ navigate }: { navigate: (to: string) => void })
             <h2>Finish setting up</h2>
             <span className="pill">{done}/{steps.length}</span>
           </div>
-          <div style={{ height: 7, background: "#f0efed", borderRadius: 999, marginTop: 9, overflow: "hidden" }}>
+          {/* var(--track), not a hex: #f0efed was a light-grey bar on the
+              dark theme's near-black card, visible as a glaring stripe. */}
+          <div style={{ height: 7, background: "var(--track)", borderRadius: 999, marginTop: 9, overflow: "hidden" }}>
             <div style={{ width: `${pct}%`, height: "100%", background: "var(--industry)", borderRadius: 999, transition: "width .3s var(--ease)" }} />
           </div>
         </div>
-        <button className="btn btn-sm btn-ghost" onClick={() => setHidden(true)}>Hide</button>
+        <button
+          className="btn btn-sm btn-ghost"
+          onClick={hide}
+          title="Hide this checklist for this workspace. Each step can still be done from Settings, Team, Templates and Automations."
+        >
+          Hide
+        </button>
       </div>
 
       <div style={{ marginTop: 15 }}>

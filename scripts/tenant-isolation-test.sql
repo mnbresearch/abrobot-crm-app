@@ -27,10 +27,16 @@
 --
 -- Run the whole file. The last statement is the report.
 
-create table if not exists public._isolation_results (
+-- Results go in a TEMP table, visible only to this session and dropped when
+-- it ends. Earlier runs created public._isolation_results — a permanent table
+-- in the API-exposed schema with no RLS, so any signed-in user (or the anon
+-- key) could read the isolation report through PostgREST. The first statement
+-- removes any copy an earlier run left behind.
+drop table if exists public._isolation_results;
+drop table if exists pg_temp._isolation_results;
+create temp table _isolation_results (
   ord int, area text, expected text, actual text, verdict text
 );
-truncate public._isolation_results;
 
 do $$
 declare
@@ -56,7 +62,7 @@ begin
    order by created_at limit 1;
 
   if v_other_org is null then
-    insert into public._isolation_results
+    insert into _isolation_results
       values (0, 'setup', '-', 'no other organisation exists',
               'SKIPPED — nothing to be isolated from. Create a second org first.');
     return;
@@ -173,7 +179,7 @@ begin
   delete from auth.users where id = v_uid;
 
   -- ── report ───────────────────────────────────────────────────────────────
-  insert into public._isolation_results
+  insert into _isolation_results
   select row_number() over (order by k), 'can read: ' || k, '0',
          v,
          case when v = '0' then 'PASS'
@@ -181,9 +187,9 @@ begin
               else 'FAIL — leaked ' || v || ' row(s)' end
     from jsonb_each_text(v_found) as e(k, v);
 
-  select coalesce(max(ord), 0) into v_ord from public._isolation_results;
+  select coalesce(max(ord), 0) into v_ord from _isolation_results;
 
-  insert into public._isolation_results
+  insert into _isolation_results
   select v_ord + row_number() over (order by k), k,
          case when k like 'integration%' then 'answered for own org' else 'refused / 0 rows' end,
          v,
@@ -200,7 +206,7 @@ exception when others then
   begin execute 'reset role'; exception when others then null; end;
   delete from public.organizations where slug = 'zz-isolation-probe';
   delete from auth.users where email = 'isolation-probe@example.invalid';
-  insert into public._isolation_results
+  insert into _isolation_results
     values (99, 'the test itself', 'runs', sqlstate || ': ' || sqlerrm,
             'ERROR — the test could not complete, which is not a pass');
 end $$;
@@ -211,7 +217,7 @@ delete from public.organizations where slug = 'zz-isolation-probe';
 delete from auth.users where email = 'isolation-probe@example.invalid';
 
 select ord, area, expected, actual, verdict
-  from public._isolation_results
+  from _isolation_results
  order by verdict like 'FAIL%' desc, verdict like 'ERROR%' desc, ord;
 
--- When you are done:  drop table public._isolation_results;
+-- _isolation_results is a temp table: it disappears when this session ends.

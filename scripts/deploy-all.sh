@@ -1,58 +1,84 @@
 #!/usr/bin/env bash
 #
-# Deploys everything outstanding: 4 edge functions, the widget fix, and the
-# frontend.
+# Deploys everything: checks first, then every edge function, then the
+# frontend (site/), then commits and pushes so Cloudflare Pages picks it up.
 #
 # RUN IT, DO NOT PASTE IT:
-#     bash scripts/deploy-all.sh
+#     bash scripts/deploy-all.sh "Short description of this release"
 #
 # Pasting a multi-line block into a terminal is how we ended up with a stray
 # directory called "#" earlier in this project. Running the file avoids that.
 #
+# Order, and why:
+#   1. Pre-flight — function list drift, frontend typecheck + build, node
+#      tests, deno check, and the site/ allowlist build + test. Nothing is
+#      deployed until ALL of these pass, so a type error or a failing test
+#      can no longer ship half a release (functions live, frontend not).
+#   2. Edge functions — every one, from the FUNCTIONS list below.
+#   3. Verify the same list is live.
+#   4. Commit and push — Cloudflare Pages deploys site/ from the push.
+#
 # Safe to re-run. Stops at the first failure rather than half-deploying.
+#
+# ── Cloudflare Pages publishes site/, not the repo root ─────────────────────
+# Until 14 October 2026 Pages served the repository root, which published every
+# doc, migration, edge-function source and script (/FEATURES.md,
+# /supabase/migrations/*.sql, /app/src/**, /.env.example ... all answered 200).
+# site/ is now an allowlist rebuilt on every deploy by scripts/build-site.sh,
+# and wrangler.toml sets pages_build_output_dir = "site".
+#
+# IF CLOUDFLARE IGNORES wrangler.toml (check after the first deploy: the
+# commands printed at the end of this script must show text/html, not
+# markdown, for /FEATURES.md), set the
+# output directory in the dashboard:
+#   Workers & Pages → abrobot-crm-app → Settings → Builds & deployments →
+#   Build configuration → Build output directory: site
+# then retry the deployment.
 
 set -euo pipefail
 
 PROJECT_REF="pomsltnrxvbcafwtbtlc"
 SUPA="npx -y supabase@latest"
+SITE_URL="https://crm.mnbresearch.com"
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 echo "Repo: $ROOT"
 echo
 
-# ── 1. Link ─────────────────────────────────────────────────────────────────
-echo "==> Linking Supabase project"
-$SUPA link --project-ref "$PROJECT_REF"
-echo
-
-# ── 2. Edge functions ───────────────────────────────────────────────────────
+# ── The function list: the single source of truth ───────────────────────────
 #
-# The --no-verify-jwt flags are load-bearing. chat-agent, lead-webhook and
-# app-signup are called by outside parties that have no Supabase JWT: a browser
-# widget, third-party webhooks, and app.abrobot.ai. Deploying them WITHOUT the
-# flag turns on JWT verification and silently kills lead intake.
+# name:flag. The deploy loop AND the live verification both read this list, so
+# it cannot be updated in one place and forgotten in the other. Twice a
+# function existed in supabase/functions/ and was absent from a hand-written
+# deploy sequence (6 September: `api` and `save-integration` never shipped;
+# 17 September: system-health and billing-webhook fixes sat undeployed five
+# days). The drift check below refuses to run if the list and the directory
+# disagree in either direction.
 #
-# whatsapp-send deliberately KEEPS verification on. It is called by a signed-in
-# counsellor from the CRM, and that check is what stops another org sending
-# WhatsApp messages billed to your account.
-
-# This list used to hold four functions, and the other six were left to a long
-# one-off command pasted from a document. On 6 September that is exactly what
-# went wrong: the migrations were applied, but `api` and `save-integration` were
-# never deployed at all, and `nurture` was still serving the old single-tenant
-# build — while everything looked done.
+# The --no-verify-jwt flags are load-bearing. Turning JWT verification ON for a
+# function that outside parties call silently kills it:
+#   chat-agent, lead-webhook   browser widget, forms, third-party webhooks
+#   app-signup                 app.abrobot.ai, no Supabase session
+#   api                        customer REST API — the AbroBot API key is the auth
+#   nurture, run-automations,
+#   system-health,
+#   checkout-recovery          pg_cron (no JWT) — the shared secret in
+#                              _shared/cron-auth.ts is the boundary, and it fails
+#                              CLOSED when CRON_SECRET is unset, so set the
+#                              secret BEFORE deploying these
+#   summarize-chats            called by a signed-in member from Conversations;
+#                              requireCronOrMember inside is the boundary (it is
+#                              NOT scheduled by pg_cron)
+#   billing-webhook            Cashfree — HMAC signature verified, fails closed
+#   resend-events              Resend — Svix signature verified, fails closed
+#   checkout-recovery          also serves the unsubscribe link, opened with no
+#                              session (the unsubscribe token is the boundary)
 #
-# So every function is listed here now. One script, no memory required.
-
-# ── 2a. Refuse to run if this list has drifted ──────────────────────────────
-# Twice now a function has existed in supabase/functions/ and been absent from
-# this script, and both times the result was the same: the deploy reported
-# success and the function was never shipped. A comment saying "keep this list
-# updated" did not prevent the second occurrence, so this checks instead.
-#
-# FUNCTIONS is the single source of truth below — the deploy calls read from
-# it, so the list cannot be updated in one place and forgotten in the other.
+# JWT ON (empty flag), deliberately: each acts as a specific signed-in member,
+# and that check is what stops one organisation spending another's money or
+# reading another's records:
+#   whatsapp-send, send-campaign, save-integration, billing-checkout, rescore-leads
 FUNCTIONS=(
   "chat-agent:--no-verify-jwt"
   "app-signup:--no-verify-jwt"
@@ -63,15 +89,20 @@ FUNCTIONS=(
   "summarize-chats:--no-verify-jwt"
   "system-health:--no-verify-jwt"
   "billing-webhook:--no-verify-jwt"
+  "checkout-recovery:--no-verify-jwt"
+  "resend-events:--no-verify-jwt"
   "whatsapp-send:"
   "send-campaign:"
   "save-integration:"
   "billing-checkout:"
   "rescore-leads:"
-  "checkout-recovery:--no-verify-jwt"
 )
 
-echo "==> Checking the deploy list against supabase/functions/"
+# ════════════════════════════════════════════════════════════════════════════
+# 1. PRE-FLIGHT — nothing below this block deploys anything
+# ════════════════════════════════════════════════════════════════════════════
+
+echo "==> [1/6] Checking the deploy list against supabase/functions/"
 DRIFT=0
 for dir in "$ROOT"/supabase/functions/*/; do
   name="$(basename "$dir")"
@@ -87,107 +118,120 @@ for dir in "$ROOT"/supabase/functions/*/; do
     DRIFT=1
   fi
 done
+for entry in "${FUNCTIONS[@]}"; do
+  name="${entry%%:*}"
+  if [ ! -f "$ROOT/supabase/functions/$name/index.ts" ]; then
+    echo "    LISTED BUT NO SOURCE: $name (supabase/functions/$name/index.ts)" >&2
+    DRIFT=1
+  fi
+done
 if [ "$DRIFT" -ne 0 ]; then
   echo >&2
-  echo "A function exists but would not be deployed. Add it to FUNCTIONS above" >&2
-  echo "with the right JWT flag, then re-run. Refusing to deploy a partial set." >&2
+  echo "The FUNCTIONS list and supabase/functions/ disagree. Fix the list (with the" >&2
+  echo "right JWT flag), then re-run. Refusing to deploy a partial set." >&2
   exit 1
 fi
 echo "    all ${#FUNCTIONS[@]} functions accounted for"
 echo
 
-echo "==> chat-agent  (strips <think> chain-of-thought; JWT off)"
-$SUPA functions deploy chat-agent --no-verify-jwt
-
-echo "==> app-signup  (fixes the enum bug discarding every signup; JWT off)"
-$SUPA functions deploy app-signup --no-verify-jwt
-
-echo "==> lead-webhook  (WhatsApp autoreply plan gate; JWT off)"
-$SUPA functions deploy lead-webhook --no-verify-jwt
-
-echo "==> api  (customer REST API; JWT off — the AbroBot key IS the auth)"
-$SUPA functions deploy api --no-verify-jwt
-
-# These three are called by pg_cron, which carries no Supabase JWT, so the
-# platform gate has to be off and the shared secret in _shared/cron-auth.ts is
-# the real boundary. That code fails CLOSED when CRON_SECRET is unset — so if
-# you have not set the secret yet, set it BEFORE deploying these, or the
-# scheduled jobs will start refusing themselves.
-echo "==> nurture  (per-tenant follow-up; JWT off, cron secret enforced)"
-$SUPA functions deploy nurture --no-verify-jwt
-
-echo "==> run-automations  (JWT off, cron secret or member)"
-$SUPA functions deploy run-automations --no-verify-jwt
-
-echo "==> summarize-chats  (JWT off, cron secret or member)"
-$SUPA functions deploy summarize-chats --no-verify-jwt
-
-# JWT ON, deliberately: each of these acts as a specific signed-in member, and
-# that check is what stops one organisation spending another's money or reading
-# another's records.
-echo "==> whatsapp-send  (plan gate; JWT ON)"
-$SUPA functions deploy whatsapp-send
-
-echo "==> send-campaign  (email; JWT ON)"
-$SUPA functions deploy send-campaign
-
-echo "==> save-integration  (write-only credentials; JWT ON)"
-$SUPA functions deploy save-integration
-
-# Added 22 September. These four existed and were deployed by hand, which is
-# the same gap the comment above describes: on 6 September `api` and
-# `save-integration` were missing from this list and simply never shipped,
-# while everything looked done. It happened again — the 17 September fixes to
-# system-health and billing-webhook sat undeployed for five days because
-# neither was named here.
-#
-# If a function exists in supabase/functions/, it belongs in this list.
-
-# JWT OFF: pg_cron calls this one and carries no Supabase JWT. The shared
-# secret in _shared/cron-auth.ts is the real boundary.
-echo "==> system-health  (JWT off, cron secret or member)"
-$SUPA functions deploy system-health --no-verify-jwt
-
-# JWT OFF: Cashfree posts here and has no Supabase JWT. The HMAC signature
-# check inside the function is the boundary, and it fails closed on an unset
-# secret.
-echo "==> billing-webhook  (JWT off, HMAC-signature verified)"
-$SUPA functions deploy billing-webhook --no-verify-jwt
-
-# JWT ON: both act as a specific signed-in member.
-echo "==> billing-checkout  (JWT ON)"
-$SUPA functions deploy billing-checkout
-
-echo "==> rescore-leads  (JWT ON)"
-$SUPA functions deploy rescore-leads
-
-# JWT OFF: pg_cron calls it with the cron secret, and recipients open its
-# unsubscribe link with no session. requireCronOrMember + a super-admin role
-# check, and the unsubscribe token, are the boundaries.
-echo "==> checkout-recovery  (JWT off, cron secret or super admin)"
-$SUPA functions deploy checkout-recovery --no-verify-jwt
+echo "==> [2/6] Frontend: install, typecheck, build"
+cd "$ROOT/app"
+npm ci --silent || npm install --silent
+npm run typecheck
+npm run build
+cd "$ROOT"
+if grep -l "sourceMappingURL" app/dist/assets/*.js >/dev/null 2>&1; then
+  echo "A bundle references a source map. Set sourcemap:\"hidden\" in app/vite.config.ts." >&2
+  exit 1
+fi
 echo
 
-# ── 2b. Prove they are actually there ───────────────────────────────────────
+echo "==> [3/6] Unit tests (node)"
+# The .test.cjs suites transpile TypeScript with esbuild and use jsdom for the
+# widget XSS suite. Without them they print SKIP and pass — CI installs both
+# and treats a SKIP as a failure; locally it is a warning.
+node --test tests/*.test.cjs supabase/functions/_shared/*.test.cjs
+echo
+
+echo "==> [4/6] Edge functions: deno check"
+if command -v deno >/dev/null 2>&1; then
+  DENO_FAIL=0
+  for entry in "${FUNCTIONS[@]}"; do
+    name="${entry%%:*}"
+    if deno check --no-lock "supabase/functions/$name/index.ts" >/dev/null 2>&1; then
+      echo "    ok    $name"
+    else
+      echo "    FAIL  $name" >&2
+      deno check --no-lock "supabase/functions/$name/index.ts" 2>&1 | tail -20 >&2
+      DENO_FAIL=1
+    fi
+  done
+  [ "$DENO_FAIL" -eq 0 ] || { echo "deno check failed — nothing has been deployed." >&2; exit 1; }
+elif [ "${SKIP_DENO_CHECK:-}" = "1" ]; then
+  echo "    deno not installed; SKIP_DENO_CHECK=1 set — relying on CI's deno check."
+else
+  echo "    deno is not installed, so the edge functions cannot be typechecked here." >&2
+  echo "    Install it (brew install deno), or re-run with SKIP_DENO_CHECK=1 if CI" >&2
+  echo "    is green for this commit. Nothing has been deployed." >&2
+  exit 1
+fi
+echo
+
+echo "==> [5/6] Building site/ (the publish allowlist)"
+# The root index.html is kept as a copy of the build because tests compare it
+# with app/index.html (tests/seo-shell.test.cjs) and with site/index.html.
+# Non-map assets are also still copied to the root assets/ directory: if
+# Cloudflare were ever to fall back to serving the repo root, the shell would
+# at least load rather than white-screen. Source maps never leave app/dist.
+cp app/dist/index.html index.html
+find app/dist/assets -type f ! -name '*.map' -exec cp {} assets/ \;
+rm -f assets/*.map
+bash scripts/build-site.sh --from-dist
+node --test tests/publish-allowlist.test.cjs
+echo
+
+# ════════════════════════════════════════════════════════════════════════════
+# 2. DEPLOY
+# ════════════════════════════════════════════════════════════════════════════
+
+echo "==> [6/6] Deploying"
+echo "--> Linking Supabase project"
+$SUPA link --project-ref "$PROJECT_REF"
+echo
+
+for entry in "${FUNCTIONS[@]}"; do
+  name="${entry%%:*}"
+  flag="${entry#*:}"
+  if [ -n "$flag" ]; then
+    echo "--> $name  (JWT off)"
+    $SUPA functions deploy "$name" "$flag"
+  else
+    echo "--> $name  (JWT ON)"
+    $SUPA functions deploy "$name"
+  fi
+done
+echo
+
+# ── Prove they are actually there ───────────────────────────────────────────
 # `functions deploy` can succeed for some and fail for others in a long chain,
 # and the failure scrolls past. This asks the platform what it is really
-# serving. A missing function answers NOT_FOUND; a deployed one answers
-# something else, whatever that something is.
-echo "==> Verifying what is live"
+# serving, for the SAME list. A missing function answers NOT_FOUND; a deployed
+# one answers something else, whatever that something is.
+echo "--> Verifying what is live"
 BASE="https://${PROJECT_REF}.supabase.co/functions/v1"
+CHECK_FILE="$(mktemp)"
 MISSING=0
-for f in chat-agent app-signup lead-webhook api nurture run-automations \
-         summarize-chats whatsapp-send send-campaign save-integration \
-         system-health billing-webhook billing-checkout rescore-leads checkout-recovery; do
-  code=$(curl -sS --max-time 20 -o /tmp/abx-deploy-check -w '%{http_code}' \
+for entry in "${FUNCTIONS[@]}"; do
+  f="${entry%%:*}"
+  code=$(curl -sS --max-time 20 -o "$CHECK_FILE" -w '%{http_code}' \
          -X OPTIONS "$BASE/$f" 2>/dev/null || echo 000)
-  if grep -q NOT_FOUND /tmp/abx-deploy-check 2>/dev/null; then
+  if grep -q NOT_FOUND "$CHECK_FILE" 2>/dev/null; then
     echo "    MISSING  $f"; MISSING=1
   else
     echo "    live     $f  (HTTP $code)"
   fi
 done
-rm -f /tmp/abx-deploy-check
+rm -f "$CHECK_FILE"
 if [ "$MISSING" -ne 0 ]; then
   echo
   echo "One or more functions are not deployed. Scroll up for the error." >&2
@@ -195,61 +239,35 @@ if [ "$MISSING" -ne 0 ]; then
 fi
 echo
 
-# ── 3. Frontend ─────────────────────────────────────────────────────────────
-# Cloudflare Pages serves this repo's root, so the built app has to be copied
-# out of app/dist and committed. Building first means a type error stops the
-# deploy here rather than shipping a broken bundle.
-
-echo "==> Building the frontend"
-cd "$ROOT/app"
-npm ci --silent || npm install --silent
-npm run build
-cd "$ROOT"
-
-echo "==> Copying the build to the repo root"
-
-# Source maps are deliberately NOT copied.
-#
-# vite.config.ts sets sourcemap: "hidden", which strips the
-# //# sourceMappingURL comment so a browser will not fetch a map on its own.
-# That is not the same as not publishing them: the files were still copied
-# here, committed, and served by Cloudflare at a completely guessable URL
-# (foo.js -> foo.js.map). 8.4 MB of fully commented TypeScript — including
-# every incident post-mortem written in these comments — was one request away.
-#
-# The maps stay in app/dist/ where they are useful for symbolicating a stack
-# trace locally. They just do not go to the CDN.
-find app/dist/assets -type f ! -name '*.map' -exec cp {} assets/ \;
-cp app/dist/index.html index.html
-
-# Old builds are never removed by this script (deliberately — widget.js and the
-# policy pages live at the root and must survive). But maps that earlier
-# deploys copied here are still being served, so clear those out.
-rm -f assets/*.map
-echo
-
-# ── 4. Ship ─────────────────────────────────────────────────────────────────
-echo "==> Committing"
+# ── Ship the frontend ───────────────────────────────────────────────────────
+echo "--> Committing"
 git add -A
-# The message was hardcoded to one release's description, so every deploy since
-# has been committed as "Strip model reasoning from replies…" regardless of what
-# actually changed. Pass one as the first argument:
-#
+# Pass a message as the first argument:
 #   bash scripts/deploy-all.sh "SEO foundation: robots, sitemap, meta, schema"
-#
 # Falls back to a dated message rather than a misleading one.
 MSG="${1:-Deploy $(date +%Y-%m-%d)}"
 git commit -m "$MSG" || echo "    (nothing to commit)"
 
-echo "==> Pushing"
+echo "--> Pushing"
 git push
 
 echo
 echo "Done. Cloudflare Pages will pick up the push within a minute or two."
 echo
-echo "Then verify:"
-echo "  1. Open abrobot.ai, ask 'which universities suit a 7.0 IELTS?' a few"
-echo "     times. No <think> block should ever appear, and bold should render"
-echo "     as bold rather than **asterisks**."
-echo "  2. Swap the Chatbase script on mnbresearch.com for the line in"
-echo "     MNB-RESEARCH-SETUP.md."
+echo "Then verify. Repo files must NOT be served: each of these must print"
+echo "text/html (the app shell from the /* catch-all), never text/markdown,"
+echo "application/sql, video/mp2t (.ts) or text/plain:"
+echo
+echo "  for p in /FEATURES.md /supabase/functions/api/index.ts /scripts/deploy-all.sh \\"
+echo "           /.env.example /legacy.html /assets/index-BW4JtkZt.js.map; do"
+echo "    printf '%-40s ' \"\$p\"; curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' $SITE_URL\$p"
+echo "  done"
+echo
+echo "And these must still work:"
+echo "  curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' $SITE_URL/widget.js   # 200 javascript"
+echo "  curl -s -o /dev/null -w '%{http_code} %{redirect_url}\\n' $SITE_URL/get         # 301 .../login"
+echo "  curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' $SITE_URL/favicon.svg # 200 image/svg+xml"
+echo
+echo "If /FEATURES.md comes back as markdown, Cloudflare is serving the repo root:"
+echo "set Build output directory = site in the dashboard (see the top of this"
+echo "script) and retry the deployment."

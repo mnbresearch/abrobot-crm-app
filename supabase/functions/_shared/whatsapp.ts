@@ -45,8 +45,13 @@ export type WhatsAppConfig = {
   whatsapp_autoreply?: boolean | null;
 };
 
+// `via` says WHOSE number the message actually left from. The platform fallback
+// is deliberate — an org with no Meta app of its own can still message from the
+// platform's number — but it was invisible: the CRM reported "sent" either way,
+// so an admin who thought they had connected their own number had no way to
+// learn their customers were hearing from someone else's.
 export type SendResult =
-  | { sent: true; message_id?: string }
+  | { sent: true; message_id?: string; via: "own" | "platform" }
   | { sent: false; reason: "not_configured" | "refused" | "error"; detail?: string };
 
 /**
@@ -100,6 +105,26 @@ export function resolveWhatsAppCredentials(
   return { token: platform.token, phoneId: platform.phoneId };
 }
 
+/**
+ * Which credentials a send for this org WOULD use, as a word the status screen
+ * can show. Same rule as resolveWhatsAppCredentials — it is called, not
+ * re-implemented, so the two cannot drift apart.
+ *
+ *   own       the org's own token and phone id
+ *   platform  the platform's token AND the platform's own number
+ *   refused   a phone id is set with no token of its own (see above)
+ *   none      nothing usable is configured anywhere
+ */
+export function whatsAppCredentialSource(
+  cfg: WhatsAppConfig,
+  platform?: { token: string; phoneId: string },
+): "own" | "platform" | "refused" | "none" {
+  const creds = platform ? resolveWhatsAppCredentials(cfg, platform) : resolveWhatsAppCredentials(cfg);
+  if (creds === null) return "none";
+  if ("refused" in creds) return "refused";
+  return (cfg.whatsapp_token ?? "").toString().trim() ? "own" : "platform";
+}
+
 /** E.164 without the leading "+" — what the Graph API expects. */
 export function waNumber(phone: string): string {
   return phone.replace(/[^\d]/g, "");
@@ -121,6 +146,7 @@ export async function sendWhatsAppText(
     return { sent: false, reason: "refused", detail: creds.refused };
   }
   const { token, phoneId } = creds;
+  const via: "own" | "platform" = (cfg.whatsapp_token ?? "").toString().trim() ? "own" : "platform";
 
   try {
     const r = await fetchWithTimeout(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneId}/messages`, {
@@ -144,7 +170,7 @@ export async function sendWhatsAppText(
         : `graph ${r.status}`;
       return { sent: false, reason: "error", detail };
     }
-    return { sent: true, message_id: data?.messages?.[0]?.id };
+    return { sent: true, message_id: data?.messages?.[0]?.id, via };
   } catch (e) {
     return { sent: false, reason: "error", detail: (e as Error).message };
   }

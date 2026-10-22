@@ -21,6 +21,13 @@ export function CreateOrg({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [checkingInvite, setCheckingInvite] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  // Why an invite could not be claimed, when there WAS one. accept_invite
+  // answers { ok: false, reason } for "no pending invite" (the normal case for
+  // someone starting fresh) but also for a full plan, an invalid invite or a
+  // read failure — and all of those used to fall silently through to this
+  // form, so an invited teammate was walked into creating a second, empty
+  // workspace instead of being told why they could not join their own.
+  const [inviteProblem, setInviteProblem] = useState<string | null>(null);
   const toast = useToast();
 
   // An invited teammate should never see the "create an organisation" form —
@@ -32,6 +39,13 @@ export function CreateOrg({ onDone }: { onDone: () => void }) {
         await refresh();
         onDone();
         return;
+      }
+      if (error) {
+        setInviteProblem(`We couldn't check whether you've been invited to a team (${error.message}).`);
+      } else if (data && data.ok === false && data.reason !== "no pending invite") {
+        setInviteProblem(String(data.reason ?? "Your invite could not be accepted."));
+      } else {
+        setInviteProblem(null);
       }
       setCheckingInvite(false);
     })();
@@ -76,6 +90,20 @@ export function CreateOrg({ onDone }: { onDone: () => void }) {
           Two questions, then your CRM is ready — pipeline, fields and AI assistant included.
         </p>
       </div>
+
+      {inviteProblem && (
+        <div className="card" style={{ maxWidth: 520, margin: "0 auto 22px", borderColor: "var(--red)" }}>
+          <div style={{ fontWeight: 700 }}>You have an invite we couldn't accept</div>
+          <p className="sub" style={{ marginTop: 6 }}>{inviteProblem}</p>
+          <p className="sub" style={{ marginTop: 6, fontSize: 12.5 }}>
+            If you meant to join your team's workspace, ask the admin who invited you to sort this
+            out before creating a new one — a workspace created here is separate from theirs.
+          </p>
+          <div className="row" style={{ marginTop: 10, gap: 8 }}>
+            <button className="btn btn-sm" onClick={() => window.location.reload()}>Check again</button>
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ maxWidth: 520, margin: "0 auto 22px" }}>
         <label className="label">What's your business called?</label>
@@ -157,7 +185,8 @@ export function CreateOrg({ onDone }: { onDone: () => void }) {
         {/* There is no trial any more. Saying so here, before they invest any
             setup effort, is the honest place for it — better than letting them
             configure a pipeline and discover the paywall afterwards. */}
-        Free to set up — no card needed. Pick a plan when you're ready to start capturing.{" "}
+        Free to set up — no card needed. The free plan captures your first 50 enquiries so you
+        can see it working; pick a plan when you need more.{" "}
         <button className="btn btn-ghost btn-sm" onClick={signOut}>Sign out</button>
       </p>
       {toast.node}

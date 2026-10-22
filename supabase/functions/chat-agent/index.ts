@@ -24,6 +24,16 @@ import { fetchWithTimeout } from "../_shared/http.ts";
 // which meant the same person normalised differently depending on which door
 // they came through — and therefore did not dedupe against themselves.
 import { EMAIL_RE, PHONE_RE, normPhone, grabName, displayName } from "../_shared/capture.ts";
+// URL, colour and client-address checks — see the file for the incidents behind
+// each one. Shared so widget-facing output and stored rows obey the same rule.
+import { safeHttpUrl, safePageUrl, safeHexColor, clientIp } from "../_shared/url-safety.ts";
+// Multi-layer prompt guardrail and cybersecurity engine — protects against
+// prompt injection, code/C++ generation abuse, system prompt extraction, and off-topic leaks.
+import {
+  classifyInboundMessage,
+  sanitizeModelOutput,
+  buildBulletproofSystemPrompt,
+} from "../_shared/guardrails.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -166,104 +176,31 @@ function publicConfig(org: any, cfg: any) {
     // Null rather than a fallback, on both of these. widget.js hides the button
     // when there is no URL, which is the correct behaviour for a business that
     // has not set one.
-    booking_url: cfg?.booking_url || null,
-    contact_url: cfg?.contact_url || null,
+    //
+    // And null for anything that is not http(s). These land in href= on the
+    // CUSTOMER's website, and agent_config is tenant-writable: a value of
+    // `javascript:…` was handed out verbatim by this public endpoint and became
+    // a link that runs script on their origin when a visitor clicks "Book".
+    booking_url: safeHttpUrl(cfg?.booking_url),
+    contact_url: safeHttpUrl(cfg?.contact_url),
     whatsapp: cfg?.whatsapp || null,
     // A neutral slate rather than AbroBot orange. apply_industry_pack does not
     // set a colour, so this is what most tenants will actually render until
     // they pick one in Settings.
-    widget_color: cfg?.widget_color || "#2f3a4a",
+    //
+    // Strictly #rrggbb. widget.js concatenates this into a <style> block, so a
+    // value containing "}" closed the rule and started a stylesheet of the
+    // tenant's choosing on every page the widget is embedded in.
+    widget_color: safeHexColor(cfg?.widget_color) || "#2f3a4a",
     widget_position: cfg?.widget_position === "left" ? "left" : "right",
-    logo_url: cfg?.logo_url || null,
+    logo_url: safeHttpUrl(cfg?.logo_url),
     brand: named,
     away_message: cfg?.away_message || null,
   };
 }
 
 function buildSystemPrompt(cfg: any, brand: string, bookingUrl: string): string {
-  const parts: string[] = [];
-  // `knowledge` is seeded as '' by create_organisation, and '' is falsy — so
-  // this fallback was reached by EVERY new tenant, and it told all of them they
-  // were study-abroad counsellors. The industry packs now seed real knowledge
-  // (20260911090000); this is what is left if even that is missing, and it has
-  // to be true of any business at all.
-  parts.push(
-    cfg?.knowledge ||
-      `You are the assistant on ${brand}'s website. You help visitors with what ${brand} offers ` +
-      `and take their enquiry. You have NOT been told the specifics of this business, so do not ` +
-      `invent any: no prices, services, timings, availability, locations or credentials. When you ` +
-      `do not know something, say so plainly and offer to take their details so a colleague can ` +
-      `answer properly.`,
-  );
-  if (cfg?.persona) parts.push(`Persona: ${cfg.persona}`);
-  parts.push(`You are "${cfg?.agent_name || brand + " Assistant"}", chatting with a visitor on the ${brand} website.`);
-  parts.push(
-    `STYLE — BE VERY BRIEF. This is a chat, not an essay. Reply in AT MOST 2–3 short sentences or 3–4 one-line bullets. ` +
-    `Never write long paragraphs or repeat yourself. Get to the point in the first line; easy to scan on a phone.`,
-  );
-  if (cfg?.tone) parts.push(`Tone: ${cfg.tone}.`);
-  if (cfg?.languages) parts.push(`You may reply in these languages if the visitor uses them: ${cfg.languages}. Default to the visitor's language.`);
-
-  const fields = (cfg?.capture_fields || "name,phone,email").split(",").map((s: string) => s.trim()).filter(Boolean);
-  if (fields.length) {
-    // ── Ask for ONE field, not the whole set ────────────────────────────────
-    //
-    // This used to say "collect the visitor's name, phone, email in one
-    // friendly message", and the model did exactly that: it rendered a form.
-    // Real transcripts show replies like
-    //
-    //     "To match you with the best scholarships, I'll need a few quick
-    //      details: • Full Name *** • Phone Number with +91 *** • Email ***"
-    //
-    // — three required fields, with asterisks, to a stranger who had asked one
-    // question. Across 139 conversations the bot asked in 110 of them and
-    // **93 of those visitors left without answering**.
-    //
-    // The counter-evidence is in the same data: a visitor who sends three or
-    // more messages converts 14 times out of 20. The bot is good at this once
-    // a conversation exists. The three-field form is what stops one existing —
-    // 97 of 139 conversations are a single message.
-    //
-    // So: still ask early, but ask for one thing, in one sentence, attached to
-    // an answer rather than in place of one. `fields[0]` is the org's own
-    // first choice in capture_fields, so a tenant reorders that column to
-    // change what gets asked for first.
-    const first = fields[0];
-    const rest = fields.slice(1);
-    parts.push(
-      `LEAD CAPTURE: ask for the visitor's ${first} — and ONLY their ${first} — as a single short ` +
-      `sentence at the end of your reply. Never present a form, a bulleted list of fields, ` +
-      `asterisks, or the word "required", and never ask for more than one detail in a message. ` +
-      (rest.length
-        ? `Once they have given their ${first} and you have helped them further, you may ask for their ` +
-          `${rest.join(" or ")} later in the same natural way — one at a time, never together. `
-        : "") +
-      `If they ignore or decline it, drop it completely and keep helping; ask again at most once, ` +
-      `and only after two more useful exchanges. A visitor who keeps talking is worth far more ` +
-      `than a contact detail extracted early, so never withhold an answer to get one.`,
-    );
-  }
-  // This block used to be unconditional and entirely study-abroad: it told a
-  // dental clinic's model to establish the patient's "target country and study
-  // level", assess "visa/admission competitiveness", suggest "university/course
-  // directions" and offer AbroBot's Calendly. The industry persona was appended
-  // AFTER it, producing a genuinely self-contradictory prompt.
-  //
-  // What is actually generic about a good closer is: give a useful answer, then
-  // offer the concrete next step this business has configured.
-  parts.push(
-    `CLOSER BEHAVIOUR: (1) BE USEFUL FIRST — answer the question properly before steering anywhere. ` +
-    `Once you understand what the visitor needs, give the single most useful next step. ` +
-    (bookingUrl
-      ? `(2) OFFER THE NEXT STEP — when they are engaged, warmly offer to book a call here: ${bookingUrl} . Frame it as help, not a sale. Offer once, don't nag.`
-      : `(2) OFFER THE NEXT STEP — when they are engaged, offer to have someone from ${brand} follow up, and take their contact details.`),
-  );
-  parts.push(
-    `Never guarantee an outcome, a result, an approval or a price. If you are unsure, say details vary ` +
-    `and recommend speaking to the ${brand} team rather than guessing.`,
-  );
-  if (cfg?.guardrails) parts.push(`STRICT RULES — never break these: ${cfg.guardrails}`);
-  return parts.join("\n\n");
+  return buildBulletproofSystemPrompt(cfg, brand, bookingUrl);
 }
 
 Deno.serve(async (req) => {
@@ -335,7 +272,9 @@ Deno.serve(async (req) => {
   };
 
   const brand = cfg?.brand_name || cfg?.agent_name || org.name || "our team";
-  const bookingUrl = cfg?.booking_url || "";
+  // Same check as publicConfig: this URL is written into the system prompt and
+  // echoed back by the model as a link, so it must be one we would hand out.
+  const bookingUrl = safeHttpUrl(cfg?.booking_url) || "";
   const waLine = cfg?.whatsapp ? ` or WhatsApp us at ${cfg.whatsapp}` : "";
 
   if (cfg && cfg.enabled === false) {
@@ -367,8 +306,13 @@ Deno.serve(async (req) => {
   //
   // Per org+IP+minute. Not a defence against a distributed attacker, but it
   // turns "one script, one afternoon" into something requiring real effort.
+  //
+  // The IP used to be the FIRST X-Forwarded-For entry, which is whatever the
+  // client chose to send — a script that rotated a fake address per request
+  // was never limited at all. clientIp() prefers headers our infrastructure
+  // overwrites; see _shared/url-safety.ts.
   {
-    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+    const ip = clientIp(req.headers);
     const { data: rl, error: rlErr } = await supabase.rpc("hit_rate_limit", {
       p_key: `chat:${org.id}:${ip}`, p_limit: 20, p_window_seconds: 60,
     });
@@ -393,6 +337,36 @@ Deno.serve(async (req) => {
         rate_limited: true,
       }, 429);
     }
+
+    // ── And a ceiling for the whole org ──────────────────────────────────
+    //
+    // The per-IP bucket above is what a single visitor meets. It is not what a
+    // botnet meets: a thousand addresses at 19 messages a minute each pass it
+    // comfortably, and each of those messages is a Groq call and a row in this
+    // tenant's database. 120/min across every visitor is far above any real
+    // website's chat traffic — a busy site sees a handful of conversations at
+    // once — and turns "drain this competitor's allowance in an hour" back
+    // into a job that takes days and shows up in the logs while it happens.
+    //
+    // Checked only after the visitor's own bucket allowed the request, so a
+    // single noisy visitor being refused does not also spend the org's budget.
+    const { data: orl, error: orlErr } = await supabase.rpc("hit_rate_limit", {
+      p_key: `chat-org:${org.id}`, p_limit: 120, p_window_seconds: 60,
+    });
+    if (orlErr) {
+      console.error("chat-agent: org rate limit check failed, refusing:", orlErr.message);
+      return json({
+        reply: "We're having a busy moment — please try again in a few seconds.",
+        rate_limited: true,
+      }, 503);
+    }
+    if (orl && orl.allowed === false) {
+      console.warn(`chat-agent: org-wide chat limit reached for org ${org.id} (${org.name})`);
+      return json({
+        reply: `We're very busy right now — please try again in a minute${waLine ? `,${waLine}` : ""}.`,
+        rate_limited: true,
+      }, 429);
+    }
   }
 
   // Get or create conversation
@@ -413,8 +387,15 @@ Deno.serve(async (req) => {
     else convLeadId = data.lead_id ?? null;
   }
   if (!convId) {
+    // page_url is whatever the POST body says — the widget sends location.href,
+    // but anyone can call this endpoint with anything. It is rendered as a
+    // link in the CRM's Conversations screen, so an unchecked value was stored
+    // XSS aimed at the tenant's own admins. Only http(s) (or the literal
+    // 'whatsapp' the column's CHECK also allows) survives; anything else is
+    // stored as null rather than refused, because losing the page a visitor
+    // was on must never cost us the conversation.
     const { data, error } = await supabase.from("conversations")
-      .insert({ org_id: org.id, page_url: body.page_url ?? null }).select("id").single();
+      .insert({ org_id: org.id, page_url: safePageUrl(body.page_url) }).select("id").single();
     // Was `data!.id`. A non-null assertion on an insert that can fail turns a
     // recoverable database hiccup into an unhandled TypeError, a 500, and
     // "Connection issue" in the visitor's chat window — for a conversation we
@@ -571,7 +552,7 @@ Deno.serve(async (req) => {
       captureFailed = `could not check for an existing record: ${existingErr.message}`;
     } else if (!leadId) {
       // displayName, not `|| phone`. The widget is the path that produced the live
-      // record reading "👤 +918745821142" — lead-webhook was fixed first and this,
+      // record reading "👤 +919876543210" — lead-webhook was fixed first and this,
       // the one that actually caused it, was left on the old fallback.
       const leadName = displayName(name, email, phone);
       // a chat lead has already engaged — count the turns so far
@@ -612,6 +593,10 @@ Deno.serve(async (req) => {
             console.warn(`chat-agent: concurrent capture for org ${org.id}, adopted ${raced[0].id}`);
             leadId = raced[0].id;
           } else {
+            console.error(
+              `chat-agent: LEAD CAPTURE FAILED for org ${org.id} — unique violation but no live ` +
+              `record matched (likely a historical row with different email casing): ${leadErr.message}`,
+            );
             captureFailed = leadErr.message;
           }
         } else {
@@ -679,6 +664,50 @@ Deno.serve(async (req) => {
     if (leadId) await supabase.from("conversations").update({ lead_id: leadId }).eq("id", convId);
   }
 
+  // --- multi-layer guardrail pre-classification ---
+  // Fast, deterministic check: intercepts C++ queries, code generation requests,
+  // prompt injections, and system prompt extraction BEFORE calling the LLM.
+  // Saves tokens, prevents latency, and guarantees zero leakage of code or system directives.
+  const guardrail = classifyInboundMessage(message, brand);
+  let securityFlag: string | null = guardrail.flag ?? null;
+  let securityDetails: string | null = guardrail.matchedPattern || guardrail.reason || null;
+
+  if (guardrail.action === "refuse") {
+    const refuseReply = guardrail.refusalMessage!;
+    const { error: replyInsertErr } = await supabase.from("chat_messages").insert({
+      conversation_id: convId, org_id: org.id, role: "assistant", content: refuseReply,
+    });
+    if (replyInsertErr) {
+      console.error(`chat-agent: could not store guardrail refusal for conv ${convId}:`, replyInsertErr.message);
+    }
+
+    const { count: msgCount } = await supabase
+      .from("chat_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", convId);
+
+    const updatePatch: Record<string, unknown> = {
+      last_message_at: new Date().toISOString(),
+      ...(msgCount !== null ? { message_count: msgCount } : {}),
+      security_flag: securityFlag,
+      security_details: securityDetails,
+    };
+
+    const { error: updErr } = await supabase.from("conversations").update(updatePatch).eq("id", convId);
+    if (updErr && updErr.message.includes("security_flag")) {
+      delete updatePatch.security_flag;
+      delete updatePatch.security_details;
+      await supabase.from("conversations").update(updatePatch).eq("id", convId);
+    }
+
+    return json({
+      reply: refuseReply,
+      conversation_id: convId,
+      security_flag: securityFlag,
+      ...(captureFailed ? { capture_failed: true } : {}),
+    });
+  }
+
   // --- plan limit enforcement ---
   //
   // Until now nothing checked credits outside the browser, which meant the
@@ -688,6 +717,15 @@ Deno.serve(async (req) => {
   //
   // consume_usage() increments and checks atomically, so two concurrent chats
   // cannot both slip past the last credit.
+  //
+  // WHY THIS RUNS AFTER THE WRITES ABOVE, unlike the rate limit. The writes
+  // that precede it — the conversation, the visitor's message and the lead
+  // capture — are exactly what must still happen when the allowance is spent:
+  // the refusal below asks the visitor to "leave your phone or email", and a
+  // visitor who does so must be captured, or the out-of-credits message
+  // becomes a polite way of discarding enquiries. Volume is bounded before any
+  // of it by the per-visitor and per-org rate limits; what is gated here is
+  // the Groq call, which is the thing the allowance actually pays for.
   try {
     // Reading plan_limits by org.plan here was subtly wrong: organizations.plan
     // records what was PURCHASED, not whether it is still live. An org whose
@@ -873,6 +911,18 @@ Deno.serve(async (req) => {
     console.error(`ALL MODELS FAILED for org ${org.id}; chain: ${chain.join(", ")}`);
   }
 
+  // Post-generation defense: sanitize model output against code snippets,
+  // C++ syntax, and leaked system tags.
+  if (got && reply) {
+    const sanitized = sanitizeModelOutput(reply, brand, cfg?.knowledge);
+    reply = sanitized.cleanText;
+    if (sanitized.sanitized) {
+      securityFlag = "sanitized_code_leak";
+      securityDetails = sanitized.reason || "code_block_removed";
+      console.warn(`chat-agent: model response for org ${org.id} was sanitized (${sanitized.reason})`);
+    }
+  }
+
   // Both message inserts were unchecked. A refused insert leaves a hole in the
   // transcript that the CRM and `GET /api/v1/conversations/:id` both display,
   // and — because the next turn's history is read back from this table — the
@@ -893,28 +943,25 @@ Deno.serve(async (req) => {
     console.error(`chat-agent: could not count messages for conversation ${convId}:`, countErr.message);
   }
 
-  await supabase.from("conversations").update({
+  const convPatch: Record<string, unknown> = {
     last_message_at: new Date().toISOString(),
     // Counted at the source, not derived from the window.
-    //
-    // This was `history.length + 2`, an OVERWRITE computed from a read capped
-    // at 20 — so the number saturated at 22 no matter how long the
-    // conversation ran, and that is exactly where engagement starts to matter.
-    // `api/index.ts` hands this figure to customer integrations and the CRM
-    // shows it as conversation depth, so the metric a team would use to spot
-    // an engaged visitor was pinned at its ceiling.
-    //
-    // A `count: "exact", head: true` query asks the database how many rows
-    // there actually are; it cannot saturate and cannot be reset by a short
-    // read. If the count fails, the column is left alone rather than being
-    // stamped with a wrong number.
     ...(totalMessages !== null ? { message_count: totalMessages } : {}),
-  }).eq("id", convId);
+  };
+  if (securityFlag) {
+    convPatch.security_flag = securityFlag;
+    if (securityDetails) convPatch.security_details = securityDetails;
+  }
 
-  // capture_failed is surfaced deliberately. The widget ignores it, so the
-  // visitor's experience is unchanged — but it turns a silent loss into
-  // something system-health and the function logs can both see.
-  return json(captureFailed
-    ? { reply, conversation_id: convId, capture_failed: captureFailed }
-    : { reply, conversation_id: convId });
+  const { error: convUpdErr } = await supabase.from("conversations").update(convPatch).eq("id", convId);
+  if (convUpdErr && convUpdErr.message.includes("security_flag")) {
+    delete convPatch.security_flag;
+    delete convPatch.security_details;
+    await supabase.from("conversations").update(convPatch).eq("id", convId);
+  }
+
+  const resPayload: Record<string, unknown> = { reply, conversation_id: convId };
+  if (securityFlag) resPayload.security_flag = securityFlag;
+  if (captureFailed) resPayload.capture_failed = true;
+  return json(resPayload);
 });

@@ -31,12 +31,17 @@ export function Archived({ navigate }: { navigate: (to: string) => void }) {
   const toast = useToast();
 
   const load = useCallback(async () => {
+    // archived_leads filters to is_org_admin() inside the function, so for a
+    // counsellor it answers with zero rows and no error — which this screen
+    // rendered as "Nothing archived". That is a false statement about the
+    // org's records, not an empty list. Don't ask; say who can see it.
+    if (!isAdmin) { setLoading(false); return; }
     setLoading(true);
     const { data, error: err } = await supabase.rpc("archived_leads");
     if (err) setError(err.message);
     else { setError(null); setRows((data as ArchivedRow[]) ?? []); }
     setLoading(false);
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -54,6 +59,27 @@ export function Archived({ navigate }: { navigate: (to: string) => void }) {
   };
 
   if (loading) return <Spinner />;
+  if (!isAdmin) {
+    return (
+      <div className="stack">
+        <div>
+          <h1>Archived</h1>
+        </div>
+        <Card>
+          <Empty
+            icon="🔒"
+            title="Admins only"
+            hint={`Archived ${ui.leadNounPlural.toLowerCase()} are visible to your organisation's admins, who can restore them within 30 days. Ask an admin if you need a record back.`}
+          />
+        </Card>
+        <div className="row">
+          <button className="btn btn-ghost btn-sm" onClick={() => navigate("/leads")}>
+            ← Back to {ui.leadNounPlural.toLowerCase()}
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (error) return <LoadError message={error} onRetry={() => void load()} />;
 
   return (

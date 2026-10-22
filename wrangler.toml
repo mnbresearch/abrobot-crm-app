@@ -1,0 +1,16 @@
+# Cloudflare Pages configuration for crm.mnbresearch.com.
+#
+# Publish ONLY site/ — never the repository root. site/ is an allowlist built by
+# scripts/build-site.sh (called from scripts/deploy-all.sh). Serving the repo
+# root published every doc, migration, edge-function source and script in this
+# repository (fixed 14 October 2026).
+#
+# `name` is the Pages project (abrobot-crm-app.pages.dev).
+#
+# If a deploy ever serves the repo root again (e.g. /FEATURES.md answers 200),
+# Cloudflare is not reading this file: set it in the dashboard instead —
+# Workers & Pages → abrobot-crm-app → Settings → Builds & deployments →
+# Build output directory: site
+name = "abrobot-crm-app"
+pages_build_output_dir = "site"
+compatibility_date = "2026-10-14"

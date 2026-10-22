@@ -208,6 +208,13 @@ export function CheckoutRecoveryCard() {
         the verified Cashfree webhook), never from a browser redirect. Skips anyone who has since paid, is already on that
         plan or higher, unsubscribed, or got any reminder in the last 20 hours. Each email carries a one-click opt-out.
       </p>
+      {/* Reconciliation runs in the same hourly job. Said here because without
+          it a reminder's absence (or a plan appearing with no webhook in the
+          log) looks like a bug rather than the job doing its work. */}
+      <p className="sub" style={{ fontSize: 12.5, marginTop: 6 }}>
+        The hourly run also <b>checks unpaid orders with Cashfree and grants any that were actually paid</b> —
+        orders whose payment webhook never reached us — so those customers get their plan instead of a reminder.
+      </p>
 
       <div className="row row-wrap" style={{ gap: 14, marginTop: 12 }}>
         <label className="row" style={{ gap: 6 }}>
@@ -261,6 +268,11 @@ export function CheckoutRecoveryCard() {
           {busy === "dry_run" ? "Checking…" : "Dry run now"}
         </button>
       </div>
+      <p className="sub" style={{ fontSize: 12, marginTop: 6 }}>
+        <b>Send test</b> emails sample data to the test address only. <b>Dry run now</b> lists who would be
+        reminded and sends no email. Separately, the hourly job checks unpaid orders with Cashfree and grants
+        any that were actually paid.
+      </p>
 
       {dry && (
         <div style={{ marginTop: 12 }}>

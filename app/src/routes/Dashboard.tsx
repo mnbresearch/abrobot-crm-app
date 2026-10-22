@@ -50,7 +50,7 @@ function exactKpi(def: KpiDef, counts: Record<string, number>, stages: { key: st
 }
 
 export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
-  const { org, ui, stages } = useApp();
+  const { org, ui, stages, isAdmin } = useApp();
   const { leads, loading, error: leadsError, reload, truncated, totalLeads } = useLeads(org?.id);
 
   const stageMeta = useMemo(
@@ -153,8 +153,14 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
           <Empty
             icon={ui.icon}
             title={`No ${ui.leadNounPlural.toLowerCase()} yet`}
-            hint="Install the website chat widget or connect a webhook, and they'll start arriving here automatically."
-            action={<button className="btn btn-primary" onClick={() => navigate("/settings")}>Set up lead capture →</button>}
+            // Settings is admins-only, so this button sent a counsellor to a
+            // screen that refuses them. They get the honest next step instead.
+            hint={isAdmin
+              ? "Install the website chat widget or connect a webhook, and they'll start arriving here automatically."
+              : "They'll arrive here automatically once an admin installs the website chat widget or connects a webhook — ask your admin to set up lead capture."}
+            action={isAdmin
+              ? <button className="btn btn-primary" onClick={() => navigate("/settings")}>Set up lead capture →</button>
+              : undefined}
           />
         </Card>
       ) : (

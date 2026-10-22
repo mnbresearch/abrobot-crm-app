@@ -1,26 +1,33 @@
 import { useState } from "react";
 import type { ToolKind } from "../lib/industries";
+import { useApp } from "../lib/store";
+import { supabase } from "../lib/supabase";
 import { calcAffordability, calcCtc, calcEmi, calcRoi, calcTripCost, inr, quoteTotal, triage } from "../lib/tools";
-import type { Lead } from "../lib/types";
+import type { FieldDef, Lead } from "../lib/types";
 
 // The industry-specific tool shown on the lead page. One component switching on
 // tool kind, so adding an industry means adding a case here plus a registry
 // entry — not a new screen.
 
-export function IndustryTool({ kind, label, lead }: { kind: ToolKind; label?: string; lead: Lead }) {
+export function IndustryTool({ kind, label, lead, onLeadChange }: {
+  kind: ToolKind; label?: string; lead: Lead;
+  /** Told when a tool writes to the record, so the page shows the new value. */
+  onLeadChange?: (lead: Lead) => void;
+}) {
+  const { fields } = useApp();
   if (kind === "none") return null;
   return (
     <div className="card">
       <div className="card-title">
         <h2>🧰 {label ?? "Tool"}</h2>
       </div>
-      {kind === "emi" && <EmiTool lead={lead} />}
+      {kind === "emi" && <EmiTool lead={lead} fields={fields} />}
       {kind === "budget_match" && <AffordabilityTool />}
       {kind === "triage" && <TriageTool lead={lead} />}
       {kind === "ctc_compare" && <CtcTool lead={lead} />}
       {kind === "trip_cost" && <TripTool lead={lead} />}
       {kind === "roi" && <RoiTool lead={lead} />}
-      {kind === "quote" && <QuoteTool />}
+      {kind === "quote" && <QuoteTool lead={lead} fields={fields} onLeadChange={onLeadChange} />}
     </div>
   );
 }
@@ -44,8 +51,22 @@ const Caveat = ({ text }: { text: string }) => (
 );
 
 // ── finance / automotive ────────────────────────────────────────────────────
-function EmiTool({ lead }: { lead: Lead }) {
-  const [amount, setAmount] = useState(String(numOf(lead.custom?.amount, 0) || ""));
+// The loan amount was pre-filled from custom.amount, which only the finance
+// pack has. The automotive pack (model, variant, fuel, exchange, finance
+// required) carries no price at all, so its EMI box was always blank while the
+// code implied it was reading something. Now: the pack's own amount field if
+// it has one — `amount`, else its first currency field — and an honest empty
+// box with a hint when it has none.
+function emiSourceField(fields: FieldDef[]): FieldDef | null {
+  return fields.find((f) => f.key === "amount")
+    ?? fields.find((f) => f.type === "currency")
+    ?? null;
+}
+
+function EmiTool({ lead, fields }: { lead: Lead; fields: FieldDef[] }) {
+  const source = emiSourceField(fields);
+  const prefill = source ? numOf(lead.custom?.[source.key], 0) : 0;
+  const [amount, setAmount] = useState(String(prefill || ""));
   const [rate, setRate] = useState("9");
   const [months, setMonths] = useState("60");
   const r = calcEmi(Number(amount), Number(rate), Number(months));
@@ -56,6 +77,11 @@ function EmiTool({ lead }: { lead: Lead }) {
         <div style={{ flex: 2 }}>
           <label className="label">Loan amount</label>
           <input className="input" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1000000" />
+          <p className="sub" style={{ fontSize: 11.5, marginTop: 3 }}>
+            {prefill
+              ? `From this record's ${source!.label}.`
+              : "Price less down payment (and any exchange value)."}
+          </p>
         </div>
         <div style={{ flex: 1 }}>
           <label className="label">Rate %</label>
@@ -252,11 +278,43 @@ function RoiTool({ lead }: { lead: Lead }) {
 }
 
 // ── generic quote builder ───────────────────────────────────────────────────
-function QuoteTool() {
+// The pack field a quote total belongs in. Clinic and home-services packs have
+// quote_amount; education calls the same thing fee_quoted. Packs with neither
+// (fitness) get no save button rather than a write to a field nobody shows.
+const QUOTE_FIELD_KEYS = ["quote_amount", "fee_quoted"];
+
+function QuoteTool({ lead, fields, onLeadChange }: {
+  lead: Lead; fields: FieldDef[]; onLeadChange?: (lead: Lead) => void;
+}) {
   const [lines, setLines] = useState([{ label: "", amount: 0 }]);
   const [discount, setDiscount] = useState("0");
   const [tax, setTax] = useState("18");
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<{ msg: string; err?: boolean } | null>(null);
   const t = quoteTotal(lines, Number(discount), Number(tax));
+  const target = QUOTE_FIELD_KEYS.map((k) => fields.find((f) => f.key === k)).find(Boolean) ?? null;
+
+  // The total was computed and then thrown away — the number a customer was
+  // just quoted lived only on this screen until someone retyped it into the
+  // record. This writes it to the pack's quote field.
+  const saveToRecord = async () => {
+    if (!target || !(t.total > 0)) return;
+    setSaving(true);
+    setStatus(null);
+    const before = lead.custom ?? {};
+    const next = { ...before, [target.key]: t.total };
+    // `.select("id")` so a refusal is distinguishable from success: an UPDATE
+    // matching no visible row is a 204 with error: null.
+    const { data, error } = await supabase.from("leads").update({ custom: next }).eq("id", lead.id).select("id");
+    setSaving(false);
+    if (error) { setStatus({ msg: error.message, err: true }); return; }
+    if (!data?.length) {
+      setStatus({ msg: "Not saved — this record is no longer visible to you, or you no longer have permission to change it.", err: true });
+      return;
+    }
+    onLeadChange?.({ ...lead, custom: next });
+    setStatus({ msg: `Saved ${inr(t.total)} as this record's ${target.label}.` });
+  };
 
   return (
     <>
@@ -304,6 +362,22 @@ function QuoteTool() {
         <Row k={`Tax (${tax}%)`} v={inr(t.tax)} />
         <Row k="Total" v={inr(t.total)} strong />
       </div>
+      {target && (
+        <div className="row" style={{ marginTop: 10, gap: 9, alignItems: "center" }}>
+          <button
+            className={`btn btn-sm${saving ? " btn-busy" : ""}`}
+            onClick={() => void saveToRecord()}
+            disabled={saving || !(t.total > 0)}
+          >
+            {saving ? "Saving…" : `Save to record (${target.label})`}
+          </button>
+          {status && (
+            <span className="sub" style={{ fontSize: 12, color: status.err ? "var(--red)" : undefined }}>
+              {status.msg}
+            </span>
+          )}
+        </div>
+      )}
     </>
   );
 }

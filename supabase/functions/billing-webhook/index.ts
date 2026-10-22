@@ -6,7 +6,15 @@
 // Register in Cashfree → Developers → Webhooks:
 //   https://<project>.supabase.co/functions/v1/billing-webhook
 //   Events: PAYMENT_SUCCESS_WEBHOOK, PAYMENT_FAILED_WEBHOOK,
-//           PAYMENT_USER_DROPPED_WEBHOOK
+//           PAYMENT_USER_DROPPED_WEBHOOK, REFUND_STATUS_WEBHOOK,
+//           and the dispute webhooks (DISPUTE_CREATED / DISPUTE_UPDATED /
+//           DISPUTE_CLOSED) — without the last two, refunds and chargebacks
+//           never revoke anything.
+//
+// Operator alerts (payment received, paid-but-not-granted, amount mismatch,
+// partial refund, revocation, unrecognised dispute) go to the PLATFORM
+// operator via _shared/operator.ts — never into the customer's own Telegram,
+// which is where notifyNewLead() used to post them.
 //
 // ── Why the return page grants nothing ──────────────────────────────────────
 // The page a customer lands on after paying is attacker-controllable — anyone
@@ -24,8 +32,8 @@
 //     when the request is genuinely not from Cashfree
 
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { verifyWebhook } from "../_shared/cashfree.ts";
-import { notifyNewLead } from "../_shared/notify.ts";
+import { AMOUNT_EPSILON, reconcile, toAmount, verifyWebhook } from "../_shared/cashfree.ts";
+import { notifyOperator } from "../_shared/operator.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -35,28 +43,27 @@ const admin = createClient(
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { "Content-Type": "application/json" } });
 
-// Money arrives as a JSON number from Cashfree and as numeric(12,2) from
-// Postgres (PostgREST may hand it back as a string). Everything that compares
-// two amounts goes through here so "49990" and 49990.00 cannot disagree.
-const toAmount = (v: unknown): number | null => {
-  if (v === null || v === undefined || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
-
-// One paisa. amount is numeric(12,2), and the gateway rounds to two decimals
-// too, so anything larger than this is a real difference, not float noise.
-const AMOUNT_EPSILON = 0.01;
+// toAmount, AMOUNT_EPSILON and reconcile() live in _shared/cashfree.ts, so
+// checkout-recovery's lost-webhook reconciler applies the identical check.
 
 // ── Dispute outcomes ────────────────────────────────────────────────────────
 //
 // Cashfree emits a dispute webhook at creation AND at every transition, so the
 // event type alone says nothing about who won. Only these statuses mean the
 // money is gone and the plan must go with it.
+//
+// DISPUTE_MERCHANT_ACCEPTED (we accepted the chargeback) and
+// DISPUTE_INSUFFICIENT_EVIDENCE (we did not contest it in time / lost on
+// evidence) both end with the money returned. They arrive as the dispute
+// status, often on a DISPUTE_CLOSED event — the type token "DISPUTE_CLOSED"
+// is in the open-or-won set, but `lost` is decided by ANY token being in this
+// set, so a closed event carrying one of these statuses revokes.
 const DISPUTE_LOST = new Set([
   "DISPUTE_LOST", "DISPUTE_MERCHANT_LOST", "MERCHANT_LOST", "LOST",
   "CHARGEBACK_LOST", "DISPUTE_ACCEPTED", "CHARGEBACK_ACCEPTED", "ACCEPTED",
-  "MERCHANT_ACCEPTED", "DISPUTE_CLOSED_CUSTOMER_FAVOUR",
+  "MERCHANT_ACCEPTED", "DISPUTE_MERCHANT_ACCEPTED",
+  "DISPUTE_INSUFFICIENT_EVIDENCE", "INSUFFICIENT_EVIDENCE",
+  "DISPUTE_CLOSED_CUSTOMER_FAVOUR",
   "DISPUTE_CLOSED_CUSTOMER_FAVOR", "CUSTOMER_FAVOUR", "CUSTOMER_FAVOR",
 ]);
 
@@ -70,86 +77,6 @@ const DISPUTE_OPEN_OR_WON = new Set([
   "DISPUTE_CLOSED_MERCHANT_FAVOUR", "DISPUTE_CLOSED_MERCHANT_FAVOR",
   "DISPUTE_CANCELLED", "CANCELLED", "DISPUTE_CLOSED", "CLOSED",
 ]);
-
-// ── Amount / currency reconciliation ────────────────────────────────────────
-//
-// The HMAC proves the event came from Cashfree. It proves NOTHING about how
-// much was paid. order_amount and order_currency were stored in `raw` and never
-// looked at, so the only question that mattered — "did this person pay what
-// this order is for?" — was never asked.
-//
-// Two ways that bites, both reachable without forging anything:
-//   * a partially-paid order: payments.amount is ₹49,990 for annual Business,
-//     the gateway reports order_amount 4,999.00, and the old code granted the
-//     full twelve months anyway;
-//   * a reused order_id: an order row created for ₹49,990 collects a genuine
-//     signature-valid success event for a ₹999 Starter charge.
-//
-// Returns `absent` rather than throwing when the payload carries no amount at
-// all, because the two call sites want different things from that case.
-type Reconciliation =
-  | { ok: true; absent: boolean }
-  | { ok: false; absent: false; reason: string; gateway: string; recorded: string };
-
-// deno-lint-ignore no-explicit-any
-function reconcile(order: any, payment: any, row: { amount: unknown; currency: unknown }): Reconciliation {
-  const recorded = toAmount(row.amount);
-
-  // ── Take the LOWEST amount the payload reports, not the first one ────────
-  //
-  // `order_amount ?? payment_amount` defeated both scenarios in the comment
-  // above, because in each of them `order_amount` is the amount the order was
-  // CREATED for — which equals `payments.amount` by construction — while
-  // `payment_amount` is what was actually captured. A partially-paid order
-  // reports order_amount 49,990 and payment_amount 4,999; preferring the
-  // former reconciles cleanly and grants the plan. The check passed its own
-  // worked example.
-  //
-  // `payment_amount` is the money that actually moved, so it is the one that
-  // must clear the bar. Taking the minimum of whatever is present is stricter
-  // than either alone and does not depend on getting the field precedence
-  // right, which is the part that was wrong.
-  const orderAmt = toAmount(order?.order_amount);
-  const paidAmt = toAmount(payment?.payment_amount);
-  const present = [orderAmt, paidAmt].filter((v): v is number => v !== null);
-  const gateway = present.length ? Math.min(...present) : null;
-
-  if (gateway === null) {
-    return { ok: true, absent: true };
-  }
-  if (recorded === null) {
-    // Our own row has no amount to compare against. Nothing to check, and
-    // refusing here would strand a customer over our own bad data.
-    return { ok: true, absent: true };
-  }
-
-  // "At least", not "equal": overpayment is the customer's loss to reclaim
-  // through support, and blocking it would hold up a plan they have paid for.
-  if (gateway + AMOUNT_EPSILON < recorded) {
-    return {
-      ok: false, absent: false, reason: "amount underpaid",
-      gateway: String(gateway), recorded: String(recorded),
-    };
-  }
-
-  // Currency is compared only when the payload states one. An amount check
-  // already catches the realistic attack (₹999 against a ₹49,990 order); a
-  // payload that omits the currency entirely is a shape change, not a swap,
-  // and hard-failing on it would block legitimate grants.
-  const gatewayCur = String(order?.order_currency ?? payment?.payment_currency ?? "").trim().toUpperCase();
-  const recordedCur = String(row.currency ?? "").trim().toUpperCase();
-  if (gatewayCur && recordedCur && gatewayCur !== recordedCur) {
-    return {
-      ok: false, absent: false, reason: "currency mismatch",
-      gateway: gatewayCur, recorded: recordedCur,
-    };
-  }
-  if (!gatewayCur) {
-    console.warn("billing-webhook: payload carried no currency; reconciled on amount only");
-  }
-
-  return { ok: true, absent: false };
-}
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -204,6 +131,8 @@ Deno.serve(async (req) => {
     ?? event?.data?.refund?.order_id
     ?? event?.data?.dispute?.order_id
     ?? event?.data?.dispute?.order_details?.order_id
+    // Some dispute payloads put order_details beside `dispute`, not inside it.
+    ?? event?.data?.order_details?.order_id
     ?? payment?.order_id;
 
   if (!orderId) {
@@ -282,6 +211,7 @@ Deno.serve(async (req) => {
     if (isDispute && !isRefund) {
       const disputeTokens = [
         String(event?.data?.dispute?.dispute_status ?? ""),
+        String(event?.data?.dispute?.dispute_type_status ?? ""),
         String(event?.data?.dispute?.status ?? ""),
         String(event?.data?.dispute_status ?? ""),
         String(event?.dispute_status ?? ""),
@@ -308,6 +238,12 @@ Deno.serve(async (req) => {
           "| status tokens:", JSON.stringify(disputeTokens),
           recognised ? "| open or won" : "| UNRECOGNISED STATUS — review this payload by hand",
         );
+        if (!recognised) {
+          await notifyOperator(admin,
+            `UNRECOGNISED DISPUTE STATUS — not revoked, review by hand\n` +
+            `Order ${orderId} (${row.plan}, ${String(row.amount ?? "?")} ${String(row.currency ?? "")})\n` +
+            `Type ${type || "?"} · status tokens ${JSON.stringify(disputeTokens)}`);
+        }
         return json({
           received: true,
           ignored: recognised ? "dispute not lost" : "dispute status unrecognised",
@@ -361,6 +297,11 @@ Deno.serve(async (req) => {
           "| refunded:", refunded, "of", paid, String(row.currency ?? ""),
           "| shorten the period by hand if that is the intent",
         );
+        await notifyOperator(admin,
+          `PARTIAL REFUND — plan NOT revoked, review manually\n` +
+          `Order ${orderId} (${row.plan}, ${row.period_months} month(s))\n` +
+          `Refunded ${refunded} of ${paid} ${String(row.currency ?? "")}\n` +
+          `Shorten the period by hand if that is the intent.`);
         return json({
           received: true,
           ignored: "partial refund",
@@ -398,6 +339,7 @@ Deno.serve(async (req) => {
     // is the same trade the SQL function makes. revoked_at is what the guard
     // further down actually reads.
     const revokedJson = revoked as { nothing_to_revoke?: boolean; until?: string } | null;
+    let markedTerminal = false;
     if (revokedJson?.nothing_to_revoke === true && !row.granted_at && !row.revoked_at) {
       const { error: termErr } = await admin.from("payments").update({
         status: "refunded",
@@ -418,17 +360,21 @@ Deno.serve(async (req) => {
         "billing-webhook:", reason, "arrived before the grant for", orderId,
         "— payment marked terminal so it can never be granted",
       );
+      markedTerminal = true;
     }
 
-    try {
-      await notifyNewLead(admin, row.org_id, {
-        id: "billing",
-        name: `↩️ ${reason === "chargeback" ? "Chargeback" : "Refund"} — ${row.plan}`,
-        message: `Order ${orderId}\nAccess now ends ${
-          (revoked as { until?: string } | null)?.until ?? "immediately"
-        }`,
-      });
-    } catch (_e) { /* an alert must never fail the webhook */ }
+    // Operator alert, not the customer's Telegram. notifyOperator never throws.
+    // Only when this delivery actually changed something: a redelivered
+    // refund for an already-reversed payment returns nothing_to_revoke and
+    // must not page anyone a second time.
+    if (!revokedJson?.nothing_to_revoke || markedTerminal) {
+      await notifyOperator(admin,
+        `${reason === "chargeback" ? "CHARGEBACK" : "REFUND"} — plan revoked\n` +
+        `Order ${orderId} (${row.plan}) · org ${row.org_id}\n` +
+        (markedTerminal
+          ? "Arrived before the grant: nothing was granted; payment marked terminal."
+          : `Access now ends ${revokedJson?.until ?? "immediately"}`));
+    }
 
     console.log("plan revoked:", orderId, reason, JSON.stringify(revoked));
     return json({ received: true, status: reason, revoked });
@@ -478,6 +424,10 @@ Deno.serve(async (req) => {
         "AMOUNT MISMATCH ON RECOVERY — NOT GRANTING", orderId,
         "| gateway:", recheck.gateway, "| recorded:", recheck.recorded, "|", recheck.reason,
       );
+      await notifyOperator(admin,
+        `AMOUNT MISMATCH — plan NOT granted (recovery retry)\n` +
+        `Order ${orderId} (${row.plan}) · org ${row.org_id}\n` +
+        `Gateway ${recheck.gateway} vs recorded ${recheck.recorded}: ${recheck.reason}`);
       return json({ error: `not granted: ${recheck.reason}`, gateway: recheck.gateway, recorded: recheck.recorded }, 409);
     }
     if (recheck.absent) {
@@ -488,6 +438,9 @@ Deno.serve(async (req) => {
       .rpc("grant_plan_from_payment", { p_payment_id: row.id });
     if (retryErr) {
       console.error("PAYMENT TAKEN BUT PLAN NOT GRANTED", orderId, retryErr.message);
+      await notifyOperator(admin,
+        `PAYMENT TAKEN BUT PLAN NOT GRANTED (retry)\nOrder ${orderId} (${row.plan}) · org ${row.org_id}\n` +
+        `${retryErr.message}\nCashfree will retry; grant by hand if this repeats.`);
       return json({ error: "grant failed" }, 500);   // 500 → Cashfree retries → we get here again
     }
     return json({ received: true, recovered: true });
@@ -525,6 +478,10 @@ Deno.serve(async (req) => {
         "| gateway:", check.gateway, "| recorded:", check.recorded, "|", check.reason,
         "| payload:", JSON.stringify(order).slice(0, 300),
       );
+      await notifyOperator(admin,
+        `AMOUNT MISMATCH — plan NOT granted\n` +
+        `Order ${orderId} (${row.plan}) · org ${row.org_id}\n` +
+        `Gateway ${check.gateway} vs recorded ${check.recorded}: ${check.reason}`);
       // Non-2xx: Cashfree keeps retrying and the failure stays visible in the
       // dashboard instead of being acknowledged away.
       return json({ error: `not granted: ${check.reason}`, gateway: check.gateway, recorded: check.recorded }, 409);
@@ -535,6 +492,9 @@ Deno.serve(async (req) => {
         "| expected", String(row.amount ?? "?"), String(row.currency ?? ""),
         "| payload:", JSON.stringify(order).slice(0, 300),
       );
+      await notifyOperator(admin,
+        `PAYMENT SUCCESS WITH NO AMOUNT — plan NOT granted\n` +
+        `Order ${orderId} (${row.plan}) · expected ${String(row.amount ?? "?")} ${String(row.currency ?? "")}`);
       return json({ error: "not granted: gateway amount missing", recorded: String(row.amount ?? "") }, 409);
     }
   }
@@ -563,19 +523,19 @@ Deno.serve(async (req) => {
 
   if (grantErr) {
     console.error("PAYMENT TAKEN BUT PLAN NOT GRANTED", orderId, grantErr.message);
+    await notifyOperator(admin,
+      `PAYMENT TAKEN BUT PLAN NOT GRANTED\nOrder ${orderId} (${row.plan}) · org ${row.org_id}\n` +
+      `${grantErr.message}\nCashfree will retry; grant by hand if this repeats.`);
     // 500 → Cashfree retries → the grant is attempted again. The payment row
     // is already 'paid', and grant_plan_from_payment is safe to repeat.
     return json({ error: "granted failed" }, 500);
   }
 
-  // Best-effort operator alert. Never let this fail the webhook.
-  try {
-    await notifyNewLead(admin, row.org_id, {
-      id: "billing",
-      name: `💰 Payment received — ${row.plan}`,
-      message: `Order ${orderId}\nAmount ${order?.order_amount ?? "?"} ${order?.order_currency ?? "INR"}`,
-    });
-  } catch (_e) { /* ignore */ }
+  // Operator alert. This was posted into the CUSTOMER's Telegram through
+  // notifyNewLead; it is our revenue event, not theirs. Never throws.
+  await notifyOperator(admin,
+    `Payment received — ${row.plan}\nOrder ${orderId} · org ${row.org_id}\n` +
+    `Amount ${order?.order_amount ?? "?"} ${order?.order_currency ?? "INR"}`);
 
   console.log("plan granted:", orderId, JSON.stringify(granted));
   return json({ received: true, status: "paid", granted });

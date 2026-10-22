@@ -18,6 +18,8 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { fetchWithTimeout } from "../_shared/http.ts";
+import { whatsAppCredentialSource } from "../_shared/whatsapp.ts";
+import { loadSuppressed } from "../_shared/suppression.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -41,6 +43,34 @@ function scrubToken(msg: string): string {
 }
 
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: CORS });
+
+// The platform's own Telegram bot. notify.ts falls back to it when an org has
+// not saved a token of its own, so "no token saved" has never meant "alerts
+// cannot send" — the status below says which of the two is actually in use.
+const PLATFORM_TELEGRAM_TOKEN = (Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "").trim();
+
+/**
+ * Per-org limit on the test actions, failing CLOSED like every other limiter.
+ *
+ * Each test is a real message from a real sender: test_email goes out from our
+ * verified domain (on the platform key) to an address the caller types, and
+ * test_telegram posts through a bot. Unlimited, an admin account — which any
+ * signup is — could drive either as a free relay, and the abuse reports would
+ * land on the reputation every tenant's mail depends on.
+ */
+async function testAllowed(kind: string, orgId: string, limit: number): Promise<Response | null> {
+  const { data, error } = await admin.rpc("hit_rate_limit", {
+    p_key: `${kind}:${orgId}`, p_limit: limit, p_window_seconds: 3600,
+  });
+  if (error) {
+    console.error(`save-integration: rate limit check for ${kind} failed, refusing:`, error.message);
+    return json({ ok: false, error: "Could not check the test limit just now. Nothing was sent — please try again." }, 503);
+  }
+  if (data && (data as { allowed?: boolean }).allowed === false) {
+    return json({ ok: false, error: `Test limit reached (${limit} per hour). Please try again later.` }, 429);
+  }
+  return null;
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -81,6 +111,20 @@ Deno.serve(async (req) => {
           .select("whatsapp_token, whatsapp_phone_id, whatsapp_autoreply, telegram_bot_token, telegram_chat_id, notify_new_leads, whatsapp, resend_api_key, resend_from, resend_reply_to, nurture_enabled")
           .eq("org_id", orgId).maybeSingle();
 
+        // A separate read, so the main status above still works on a database
+        // where the column's migration has not run yet. Missing column or a
+        // failed read → null, which the screen shows as "using the default".
+        let autoreplyText: string | null = null;
+        {
+          const { data: t, error: tErr } = await admin.from("agent_config")
+            .select("whatsapp_autoreply_text").eq("org_id", orgId).maybeSingle();
+          if (tErr) console.warn("save-integration: could not read whatsapp_autoreply_text:", tErr.message);
+          else autoreplyText = ((t as { whatsapp_autoreply_text?: string | null } | null)?.whatsapp_autoreply_text ?? "") || null;
+        }
+        const waSource = whatsAppCredentialSource({
+          whatsapp_token: data?.whatsapp_token, whatsapp_phone_id: data?.whatsapp_phone_id,
+        });
+
         return json({
           email: {
             // Own key vs. shared platform key. Worth showing, because on the
@@ -102,11 +146,27 @@ Deno.serve(async (req) => {
             phone_id_set: !!data?.whatsapp_phone_id,
             display_number: data?.whatsapp ?? null,
             autoreply: !!data?.whatsapp_autoreply,
+            // Copy, not a credential, so it is echoed — the admin needs to
+            // see what their customers receive.
+            autoreply_text: autoreplyText,
+            // The platform-number fallback is deliberate, but it was silent:
+            // an org with no token of its own sends from OUR number, under
+            // our verified business name, and the screen said "not
+            // configured" while messages were going out. Same resolver as the
+            // sender, so this cannot disagree with what actually happens.
+            using_platform_default: waSource === "platform",
+            // A phone id saved without a token: every send is refused rather
+            // than borrowing the platform's credentials for that number.
+            ...(waSource === "refused" ? { blocked: "phone_id_without_token" } : {}),
           },
           telegram: {
             configured: !!(data?.telegram_bot_token && data?.telegram_chat_id),
             chat_id_set: !!data?.telegram_chat_id,
             alerts_on: !!data?.notify_new_leads,
+            // No token of its own but a platform bot exists: alerts go out
+            // through ours once a chat id is set. Not the same as "not
+            // configured", which is what this screen used to say.
+            using_platform_default: !(data?.telegram_bot_token || "").trim() && !!PLATFORM_TELEGRAM_TOKEN,
           },
         });
       }
@@ -121,9 +181,25 @@ Deno.serve(async (req) => {
         if (tok === "-") patch.whatsapp_token = null;
         else if (tok) patch.whatsapp_token = tok;
 
-        if (typeof body.phone_id === "string") patch.whatsapp_phone_id = str(body.phone_id, 60) || null;
+        // Same convention as the token: "" keeps what is stored, "-" clears.
+        //
+        // An empty phone id used to CLEAR the saved one. The form leaves the
+        // field blank unless it is being changed, so changing only the display
+        // number wiped the Phone Number ID and switched WhatsApp off — with
+        // "WhatsApp settings saved" on screen.
+        if (typeof body.phone_id === "string") {
+          const pid = str(body.phone_id, 60);
+          if (pid === "-") patch.whatsapp_phone_id = null;
+          else if (pid) patch.whatsapp_phone_id = pid;
+        }
         if (typeof body.display_number === "string") patch.whatsapp = str(body.display_number, 30) || null;
         if (typeof body.autoreply === "boolean") patch.whatsapp_autoreply = body.autoreply;
+        // What the autoreply says. Absent = leave alone; "" = back to the
+        // neutral default (stored as null, which is what lead-webhook reads
+        // as "use the default").
+        if (typeof body.autoreply_text === "string") {
+          patch.whatsapp_autoreply_text = str(body.autoreply_text, 500) || null;
+        }
 
         const { error } = await admin.from("agent_config")
           .upsert(patch, { onConflict: "org_id" });
@@ -178,7 +254,16 @@ Deno.serve(async (req) => {
         if (tok === "-") patch.telegram_bot_token = null;
         else if (tok) patch.telegram_bot_token = tok;
 
-        if (typeof body.chat_id === "string") patch.telegram_chat_id = str(body.chat_id, 60) || null;
+        // "" keeps, "-" clears — the same rule as the bot token above. A blank
+        // chat id used to clear the saved one, so re-saving the form to change
+        // only the token silently stopped every alert.
+        if (typeof body.chat_id === "string") {
+          const cid = str(body.chat_id, 60);
+          if (cid === "-") patch.telegram_chat_id = null;
+          else if (cid) patch.telegram_chat_id = cid;
+        }
+        // Absent leaves the current setting alone. Only an explicit boolean
+        // changes whether alerts are on.
         if (typeof body.notify === "boolean") patch.notify_new_leads = body.notify;
 
         const { error } = await admin.from("agent_config")
@@ -188,6 +273,9 @@ Deno.serve(async (req) => {
       }
 
       case "test_telegram": {
+        const limited = await testAllowed("testtelegram", orgId, 10);
+        if (limited) return limited;
+
         const { data: cfg } = await admin.from("agent_config")
           .select("telegram_bot_token, telegram_chat_id").eq("org_id", orgId).maybeSingle();
 
@@ -285,7 +373,9 @@ Deno.serve(async (req) => {
 
       case "test_email": {
         const to = str(body.to, 200);
-        if (!to || !to.includes("@")) return json({ error: "Enter an address to send the test to" }, 400);
+        if (!to || !/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(to)) {
+          return json({ error: "Enter an address to send the test to" }, 400);
+        }
 
         // Must use the SAME sender resolution as nurture and send-campaign.
         // It did not: this paired a tenant's own key with the platform address
@@ -297,6 +387,47 @@ Deno.serve(async (req) => {
 
         const key = (cfg?.resend_api_key || "").trim() || Deno.env.get("RESEND_API_KEY") || "";
         if (!key) return json({ ok: false, error: "No Resend key saved, and no platform key is configured" }, 400);
+
+        // ── On OUR key, only to the caller's own inbox ────────────────────
+        //
+        // This was an open relay: any admin — and every signup is an admin of
+        // their own org — could make our verified domain send to any address
+        // they typed, as often as they liked. On the tenant's own key that is
+        // their reputation and their business; on the platform key it is
+        // every tenant's. The one thing a connection test needs to prove is
+        // that mail arrives, and the admin's own address proves that.
+        const usingPlatformKey = !(cfg?.resend_api_key || "").trim();
+        if (usingPlatformKey) {
+          const { data: me, error: meErr } = await admin.from("profiles")
+            .select("email").eq("id", userData.user.id).maybeSingle();
+          const mine = ((me?.email || userData.user.email || "") as string).trim().toLowerCase();
+          if (meErr && !mine) {
+            console.error("save-integration: could not read the caller's email:", meErr.message);
+            return json({ ok: false, error: "Could not confirm your address just now. Nothing was sent." }, 503);
+          }
+          if (!mine || to.toLowerCase() !== mine) {
+            return json({
+              ok: false,
+              error: `On the shared sending key, test emails can only go to your own address (${mine || "your login email"}). ` +
+                "Add your own Resend key to test other addresses.",
+            }, 400);
+          }
+        }
+
+        const limited = await testAllowed("testmail", orgId, 5);
+        if (limited) return limited;
+
+        // The platform suppression list applies to tests as well: someone who
+        // unsubscribed from our mail does not become reachable because the
+        // sender called it a test.
+        const sup = await loadSuppressed(admin, [to]);
+        if (sup.error !== null) {
+          console.error("save-integration: suppression check failed, refusing:", sup.error);
+          return json({ ok: false, error: "Could not check the address just now. Nothing was sent." }, 503);
+        }
+        if (sup.suppressed.has(to.toLowerCase())) {
+          return json({ ok: false, error: "That address has unsubscribed from our email, so nothing was sent." }, 400);
+        }
 
         const { data: org } = await admin.from("organizations").select("name").eq("id", orgId).single();
         const brand = (cfg?.brand_name || org?.name || "Your team").replace(/["<>\\]/g, "");

@@ -17,6 +17,18 @@
 //
 // Design: probe the real dependency, not a proxy for it. Reading a config row
 // proves nothing about whether the model still exists.
+//
+// Cost and noise, 14 Oct 2026: this used to make one live Groq completion per
+// org per hour (unmetered spend that grows with the tenant count, mostly
+// probing the same platform key and model over and over) and to re-send the
+// tenant's "system check failed" Telegram every hour for as long as a check
+// stayed red. Now:
+//   * each distinct (key, model) pair is probed ONCE per run and the verdict
+//     shared by every org using it;
+//   * orgs are read in pages, not one unbounded select;
+//   * a tenant is alerted only on the transition into `fail` (ok/warn → fail),
+//     tracked in app_settings 'system_health_alert_state'. Staying red is not
+//     news; recovering re-arms the alert.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { notifyNewLead } from "../_shared/notify.ts";
@@ -59,8 +71,20 @@ interface Check { key: string; label: string; level: Level; detail: string; advi
 
 const FALLBACK_PREFIX = "Sorry, I'm having trouble";
 
+// One live probe per distinct (key, model) per RUN. The map is created per
+// request and passed in — a module-level map would survive in a warm isolate
+// and serve an hours-old verdict. Keyed by a SHA-256 of key+model, not the
+// key itself, so the map never holds a credential as a string that could end
+// up in a log line.
+type ProbeCache = Map<string, Promise<Check>>;
+
+async function probeKey(key: string, model: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${key}\u0000${model}`));
+  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** Live probe of the AI provider using the org's own key and model chain. */
-async function checkAi(orgId: string): Promise<Check> {
+async function checkAi(orgId: string, aiProbes: ProbeCache): Promise<Check> {
   // .single() errors with PGRST116 when there is no row, which is a legitimate
   // state here (an org that has never opened Settings). Any other error means
   // we could not read the config at all, and falling through would probe the
@@ -81,6 +105,16 @@ async function checkAi(orgId: string): Promise<Check> {
   }
 
   const model = cfg?.model || "openai/gpt-oss-120b";
+  const pk = await probeKey(key, model);
+  let probe = aiProbes.get(pk);
+  if (!probe) {
+    probe = probeAi(key, model);
+    aiProbes.set(pk, probe);
+  }
+  return await probe;
+}
+
+async function probeAi(key: string, model: string): Promise<Check> {
   try {
     const r = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -242,6 +276,36 @@ async function checkSecurity(orgId: string): Promise<Check> {
 }
 
 
+// ── Tenant alert de-duplication ─────────────────────────────────────────────
+// One app_settings row (deny-all to browsers; the service role reads it):
+//   key 'system_health_alert_state', value = JSON { "<org_id>": "<iso since>" }
+// listing orgs currently in `fail`. An org is alerted when it enters the map,
+// and removed when it is checked and no longer failing. Orgs not checked this
+// run (a narrowed ?org= call) are left as they were.
+const ALERT_STATE_KEY = "system_health_alert_state";
+
+async function readAlertState(): Promise<{ ok: true; state: Record<string, string> } | { ok: false; error: string }> {
+  const { data, error } = await supabase.from("app_settings").select("value").eq("key", ALERT_STATE_KEY).maybeSingle();
+  if (error) return { ok: false, error: error.message };
+  if (!data?.value) return { ok: true, state: {} };
+  try {
+    const parsed = JSON.parse(data.value);
+    return { ok: true, state: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {} };
+  } catch {
+    // A corrupt value is replaced on write; treat as empty (at worst one
+    // duplicate alert per failing org, once).
+    return { ok: true, state: {} };
+  }
+}
+
+async function writeAlertState(state: Record<string, string>): Promise<string | null> {
+  const { error } = await supabase.from("app_settings").upsert(
+    { key: ALERT_STATE_KEY, value: JSON.stringify(state), updated_at: new Date().toISOString() },
+    { onConflict: "key" },
+  );
+  return error ? error.message : null;
+}
+
 // The cron-death detector only works if something actually reports in.
 // record_heartbeat() shipped with zero callers, so job_heartbeats stayed at
 // "never reported" and stale_jobs() flagged every job stale forever — the
@@ -310,10 +374,21 @@ Deno.serve(async (req) => {
   const pinnedOrgId = isOperator ? null : cronAuth.orgId;
   const slug = isOperator ? url.searchParams.get("org") : null;
 
-  let q = supabase.from("organizations").select("id, slug, name").eq("active", true);
-  if (pinnedOrgId) q = q.eq("id", pinnedOrgId);
-  else if (slug) q = q.eq("slug", slug);
-  const { data: orgs, error: orgsError } = await q;
+  // Paged by keyset on id. One unbounded select stops silently at
+  // PostgREST's max-rows, and the orgs past it would never be checked.
+  const orgs: { id: string; slug: string; name: string }[] = [];
+  let orgsError: { message: string } | null = null;
+  for (let cursor: string | null = null;;) {
+    let q = supabase.from("organizations").select("id, slug, name").eq("active", true);
+    if (pinnedOrgId) q = q.eq("id", pinnedOrgId);
+    else if (slug) q = q.eq("slug", slug);
+    if (cursor) q = q.gt("id", cursor);
+    const { data, error } = await q.order("id", { ascending: true }).limit(200);
+    if (error) { orgsError = error; break; }
+    if (!data?.length) break;
+    orgs.push(...data);
+    cursor = data[data.length - 1].id;
+  }
 
   // An unchecked read here is the worst possible silent failure in this file:
   // zero orgs means zero checks means `overall = ok`. The monitor would report
@@ -324,13 +399,27 @@ Deno.serve(async (req) => {
   }
 
   const results: unknown[] = [];
+  const aiProbes: ProbeCache = new Map();
   // Collected for the heartbeat, which is the only one of these outputs an
   // operator ever actually reads.
   const alarms: string[] = [];
+  // Problems with the alerting itself. Kept apart from `alarms` (per-org
+  // check verdicts) but they also turn the heartbeat to warn.
+  const stateProblems: string[] = [];
+
+  // Alert de-duplication state, read once. If it cannot be read, tenant
+  // alerts are NOT sent this run (re-sending to every failing org every hour
+  // is the bug being fixed) and the heartbeat goes to warn so the watchdog
+  // tells the operator instead.
+  const alertState = alert ? await readAlertState() : null;
+  if (alertState && !alertState.ok) {
+    stateProblems.push(`alert state unreadable, tenant alerts suppressed: ${alertState.error}`);
+  }
+  const failingNow: Record<string, string> = alertState?.ok ? { ...alertState.state } : {};
 
   for (const org of orgs ?? []) {
     const checks = await Promise.all([
-      checkAi(org.id),
+      checkAi(org.id, aiProbes),
       checkRecentReplies(org.id),
       checkIntake(org.id),
       checkAutomations(org.id),
@@ -360,13 +449,31 @@ Deno.serve(async (req) => {
       checks,
     });
 
-    if (alert && worst === "fail") {
-      const failing = checks.filter((c) => c.level === "fail");
-      await notifyNewLead(supabase, org.id, {
-        id: "health",
-        name: `⚠️ ${org.name} — system check failed`,
-        message: failing.map((c) => `${c.label}: ${c.detail}`).join("\n"),
-      });
+    if (alertState?.ok) {
+      if (worst === "fail") {
+        // Only on the transition into fail. An org already in the map was
+        // alerted when it went red and is not told again every hour.
+        if (!failingNow[org.id]) {
+          failingNow[org.id] = new Date().toISOString();
+          const failing = checks.filter((c) => c.level === "fail");
+          await notifyNewLead(supabase, org.id, {
+            id: "health",
+            name: `⚠️ ${org.name} — system check failed`,
+            message: failing.map((c) => `${c.label}: ${c.detail}`).join("\n"),
+          });
+        }
+      } else {
+        delete failingNow[org.id];   // recovered (or never failed): re-arm
+      }
+    }
+  }
+
+  if (alertState?.ok) {
+    const writeErr = await writeAlertState(failingNow);
+    if (writeErr) {
+      // Not fatal to the check, but the next run may re-alert; say so.
+      console.error("system-health: alert state not saved:", writeErr);
+      stateProblems.push(`alert state not saved (${writeErr}) — tenants may be re-alerted next run`);
     }
   }
 
@@ -411,7 +518,10 @@ Deno.serve(async (req) => {
   // run-automations already guards this ("a member clicking Test run is not
   // evidence that cron is alive"); this is the same rule.
   if (!cronAuth.orgId) {
-    await heartbeat(alarmOverall === "ok" ? "ok" : "warn", detail.slice(0, 500));
+    await heartbeat(
+      alarmOverall === "ok" && !stateProblems.length ? "ok" : "warn",
+      ((stateProblems.length ? stateProblems.join("; ") + " | " : "") + detail).slice(0, 500),
+    );
   }
   return json({
     ok: true,

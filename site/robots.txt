@@ -1,0 +1,93 @@
+# AbroBot CRM — crm.mnbresearch.com
+#
+# Until this file existed, a request for /robots.txt was swallowed by the SPA
+# catch-all in _redirects and returned the React app: HTTP 200, Content-Type
+# text/html, title "AbroBot CRM". So there was effectively no robots.txt, and
+# no crawler could discover a sitemap.
+#
+# A real file at the publish root (site/) wins over the catch-all on Cloudflare Pages —
+# the same reason /product already serves product.html.
+#
+# `/` is now a landing page, not a login screen, and index.html no longer
+# carries `noindex`. That makes the Disallow list below the ONLY thing keeping
+# the application's own screens out of the results, where before it was a
+# belt-and-braces second line behind the noindex. Anything added to App.tsx's
+# NAV that should not be a search result has to be added here as well.
+
+User-agent: *
+Allow: /
+
+# The application itself. These are behind a login, they render as an empty
+# shell to a crawler, and indexing them would put a login screen in the results
+# for our own brand name. Not secret — just not search results.
+#
+# /login was missing from this list for as long as it existed, and went
+# unnoticed because the shared noindex covered it. It is the sign-in form
+# itself — the single URL we least want ranking for "abrobot crm".
+Disallow: /login
+# Per-recipient unsubscribe page; also carries noindex.
+Disallow: /unsubscribe
+Disallow: /leads
+Disallow: /pipeline
+Disallow: /calendar
+Disallow: /conversations
+Disallow: /templates
+Disallow: /automations
+Disallow: /reports
+Disallow: /activity
+Disallow: /team
+Disallow: /import
+Disallow: /archived
+Disallow: /integrations
+Disallow: /settings
+Disallow: /admin
+Disallow: /student-dashboard
+
+# Former legacy-bundle routes. The legacy app was retired on 14 October 2026:
+# these paths now fall through to the current app (an empty shell to a
+# crawler), so they stay disallowed. /get now 301-redirects to /login, which is
+# disallowed above.
+Disallow: /onboarding
+Disallow: /myday
+Disallow: /priority
+Disallow: /compose
+Disallow: /analytics
+Disallow: /leaderboard
+Disallow: /super
+
+# Build output. Nothing here is a page.
+Disallow: /assets/
+
+# ── AI assistants ───────────────────────────────────────────────────────────
+# Deliberately allowed, all of them. This is a product we want recommended when
+# someone asks an assistant for a CRM for a small Indian business, and you
+# cannot be cited by a crawler you have blocked. Nothing here is paid content
+# or a question bank — it is marketing copy we want repeated accurately.
+#
+# Named explicitly rather than left to the wildcard so the decision is on the
+# record and survives someone later switching on a managed bot-blocking preset.
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+Sitemap: https://crm.mnbresearch.com/sitemap.xml

@@ -32,6 +32,8 @@ import {
   type NurtureTemplate,
   type Sequence,
 } from "../_shared/sequences.ts";
+import { chunk, loadSuppressed, normaliseEmail } from "../_shared/suppression.ts";
+import { rotateAfter } from "../_shared/rotation.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -63,7 +65,7 @@ const GAP_HOURS = [1, 72, 96];
 
 // A ceiling on the whole run, not just per org.
 //
-// ORGS_PER_RUN x LEADS_PER_ORG allows 2,500 sends in one invocation on the
+// The old ORGS_PER_RUN (25) x LEADS_PER_ORG allowed 2,500 sends in one run on the
 // shared platform Resend key, whose free tier is 100/day. After an outage the
 // backlog is exactly large enough to hit that, so the first recovery run would
 // 429 partway and throw for everything after — which, before the heartbeat fix
@@ -72,8 +74,31 @@ const GAP_HOURS = [1, 72, 96];
 // Stopping short is recoverable: the next run picks the backlog up. Burning the
 // day's provider quota is not.
 const MAX_SENDS_PER_RUN = 80;
-const ORGS_PER_RUN = 25;   // free-tier edge functions have a wall-clock budget
 const LEADS_PER_ORG = 100;
+
+// ── Which orgs, and in what order ───────────────────────────────────────────
+//
+// This was `organizations where active limit 25`, unordered, every run. Three
+// things wrong with it, and they compound:
+//
+//   * Opt-in was checked INSIDE runOrg, after the org had taken a slot. Every
+//     active tenant counts against the 25, including the large majority that
+//     never switched follow-up on — so the 26th org by whatever order Postgres
+//     chose was never reached, enabled or not.
+//   * No ORDER BY, so "the first 25" was whatever the planner returned. Not
+//     random enough to be fair, not stable enough to reason about.
+//   * When MAX_SENDS_PER_RUN stopped a run, the next run began at the same
+//     place. The orgs behind the cap starved permanently while the heartbeat
+//     reported a healthy job.
+//
+// Now: only orgs with nurture_enabled = true, keyset-paged so none is lost to
+// a max-rows cap, sorted by id, and rotated to start just after the last org
+// that got a turn. Where to resume is kept in app_settings (service-role only)
+// under RESUME_KEY. The wall-clock limit that ORGS_PER_RUN stood in for is now
+// an explicit time budget, checked between orgs.
+const ORG_PAGE = 500;
+const MAX_RUN_MS = 45_000;
+const RESUME_KEY = "nurture_resume_after";
 
 type Tpl = NurtureTemplate;
 
@@ -131,7 +156,7 @@ async function sendEmail(
 }
 
 // ── one organisation ────────────────────────────────────────────────────────
-async function runOrg(org: { id: string; name: string; slug: string }) {
+async function runOrg(org: { id: string; name: string; slug: string }, runLeft = MAX_SENDS_PER_RUN) {
   const { data: cfg, error: cfgErr } = await supabase
     .from("agent_config")
     .select("nurture_enabled, resend_api_key, resend_from, resend_reply_to, brand_name, contact_url, booking_url")
@@ -354,12 +379,19 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
   const now = Date.now();
   let sent = 0;
   let considered = 0;
-  let quota = LEADS_PER_ORG;   // shared across passes: the per-org work budget
+  let suppressedSkipped = 0;
+  // What is left of the RUN's send cap when this org's turn starts. It used to
+  // be checked only between orgs, so the org that crossed it could still send
+  // its full LEADS_PER_ORG — 80 became 179 on exactly the post-outage run the
+  // cap exists for.
+  let sendsLeft = runLeft;
+  let quota = Math.min(LEADS_PER_ORG, Math.max(0, runLeft));   // shared across passes: the per-org work budget
   const errors: string[] = [];
   const perSequence: Record<string, number> = {};
 
   for (const pass of passes) {
     if (quota <= 0) break;
+    if (sendsLeft <= 0) break;
     if (budget !== null && budget <= 0) break;
 
     // ── Only fetch leads that are actually DUE ──────────────────────────
@@ -446,9 +478,32 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     const leads = dueLeads.slice(0, quota);
     considered += leads.length;
 
+    // The platform suppression list, once per pass. nurture_opted_out is this
+    // tenant's own list; platform_email_suppressions is everyone who
+    // unsubscribed from, bounced on or complained about mail from our domain —
+    // which is the domain this mail goes out from on the platform key.
+    //
+    // FAIL CLOSED, like the terminal-stage read above: an unreadable list is
+    // not an empty one, and mailing someone who asked us to stop is the
+    // mistake with legal weight. The pass is skipped and retried next run.
+    const sup = await loadSuppressed(supabase, leads.map((l: Lead) => l.email));
+    if (sup.error !== null) {
+      errors.push(`${pass.label}: suppression list unreadable, nothing sent (${sup.error})`);
+      continue;
+    }
+
     for (const l of leads) {
       if (budget !== null && budget <= 0) break;
       if (quota <= 0) break;
+      if (sendsLeft <= 0) break;
+
+      // Skipped without advancing the step: if the address is ever removed
+      // from the list, follow-up resumes where it stopped rather than having
+      // silently "sent" the emails in between.
+      if (sup.suppressed.has(normaliseEmail(l.email))) {
+        suppressedSkipped++;
+        continue;
+      }
 
       // NOTE: quota is spent on WORK DONE, not on rows looked at.
       //
@@ -520,6 +575,7 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
         });
         sent++;
         quota--;   // a send happened — this is what the per-org budget is for
+        sendsLeft--;
         perSequence[pass.label] = (perSequence[pass.label] ?? 0) + 1;
         if (budget !== null) budget--;
       } catch (e) {
@@ -529,7 +585,7 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
   }
 
   if (sent > 0) {
-    await supabase.rpc("consume_usage", { p_org_id: org.id, p_metric: "emails", p_amount: sent });
+    await supabase.rpc("record_usage", { p_org_id: org.id, p_metric: "emails", p_amount: sent });
   }
 
   // `unaddressed` counts records this org has written nobody's copy for. It is
@@ -558,6 +614,10 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
     sequences: sequenceNames(seqs),
     ...(Object.keys(perSequence).length ? { by_sequence: perSequence } : {}),
     ...(unaddressed ? { unaddressed } : {}),
+    ...(suppressedSkipped ? { suppressed: suppressedSkipped } : {}),
+    // Stopped by the RUN's cap, not by running out of due records. The rest
+    // of this org's backlog goes out on a later run.
+    ...(sendsLeft <= 0 ? { run_cap_reached: true } : {}),
     // Reported, not enforced. No won/lost stage means nothing ever removes a
     // record from follow-up, so a customer who buys keeps receiving the
     // sequence to its end. That is a tenant misconfiguration rather than a
@@ -585,9 +645,14 @@ async function runOrg(org: { id: string; name: string; slug: string }) {
 // monitoring was itself the thing that was broken.
 async function heartbeat(status: string, detail?: string) {
   try {
-    await supabase.rpc("record_heartbeat", {
+    // Checked, not just wrapped — the same fix as run-automations. postgrest
+    // resolves with { error } rather than throwing, so a refused
+    // record_heartbeat never reached the catch below, the job's health record
+    // went stale, and the watchdog blamed the job instead of the report.
+    const { error } = await supabase.rpc("record_heartbeat", {
       p_job: "nurture", p_status: status, p_detail: detail ?? null,
     });
+    if (error) console.warn("heartbeat not recorded:", error.message);
   } catch (e) {
     // Never let reporting health break the work whose health is reported.
     console.warn("heartbeat failed:", (e as Error).message);
@@ -686,21 +751,67 @@ Deno.serve(async (req) => {
   // which silently made a multi-tenant cron job a single-tenant one: every
   // other customer's follow-up simply never ran.
   let orgs: { id: string; name: string; slug: string }[];
+  // Only the scheduled sweep reads or moves the resume point. A one-org run
+  // triggered by hand must not shift where the next scheduled run begins.
+  const sweep = !slug;
+  let resumeWarning: string | null = null;
   if (slug) {
     const { data } = await supabase.from("organizations")
       .select("id, name, slug").eq("slug", slug).maybeSingle();
     if (!data) return json({ error: "org not found" }, 404);
     orgs = [data];
   } else {
-    const { data, error } = await supabase.from("organizations")
-      .select("id, name, slug").eq("active", true).limit(ORGS_PER_RUN);
-    if (error) return json({ error: error.message }, 500);
-    orgs = data ?? [];
+    // Opted-in orgs, keyset-paged on org_id. Terminates on an EMPTY page,
+    // never a short one: a short page can mean "max-rows is lower than I
+    // asked for", and treating it as the end is how org 1,001 goes missing.
+    const enabledIds: string[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      let q = supabase.from("agent_config").select("org_id").eq("nurture_enabled", true);
+      if (cursor) q = q.gt("org_id", cursor);
+      const { data, error } = await q.order("org_id", { ascending: true }).limit(ORG_PAGE);
+      if (error) {
+        console.error("nurture: could not list opted-in organisations:", error.message);
+        await heartbeat("error", `organisation lookup failed: ${error.message}`);
+        return json({ error: error.message }, 500);
+      }
+      if (!data?.length) break;
+      enabledIds.push(...data.map((r: { org_id: string }) => r.org_id));
+      cursor = data[data.length - 1].org_id;
+    }
+
+    // Of those, the ones still active. In groups, because .in() puts every
+    // id in the query string.
+    const active: { id: string; name: string; slug: string }[] = [];
+    for (const group of chunk(enabledIds, 100)) {
+      const { data, error } = await supabase.from("organizations")
+        .select("id, name, slug").in("id", group).eq("active", true);
+      if (error) {
+        console.error("nurture: could not read organisations:", error.message);
+        await heartbeat("error", `organisation lookup failed: ${error.message}`);
+        return json({ error: error.message }, 500);
+      }
+      active.push(...(data ?? []));
+    }
+
+    // Where the last run stopped. A failed read starts from the beginning —
+    // that only re-orders this one run, so it is reported rather than fatal.
+    const { data: mark, error: markErr } = await supabase.from("app_settings")
+      .select("value").eq("key", RESUME_KEY).maybeSingle();
+    if (markErr) {
+      resumeWarning = `resume point unreadable (${markErr.message}), started from the beginning`;
+      console.warn(`nurture: ${resumeWarning}`);
+    }
+    orgs = rotateAfter(active, markErr ? null : (mark?.value ?? null));
   }
 
   const results = [];
   let runSent = 0;
   let cappedAt: string | null = null;
+  // The last org that got a turn this run — the next scheduled run starts
+  // just after it. Null until one has.
+  let lastTurn: string | null = null;
+  const startedAt = Date.now();
 
   for (const org of orgs) {
     // Stop before the provider does. See MAX_SENDS_PER_RUN.
@@ -709,14 +820,42 @@ Deno.serve(async (req) => {
       console.warn(`nurture: run cap of ${MAX_SENDS_PER_RUN} reached before ${org.slug}; the rest resume next run`);
       break;
     }
+    // And before the platform's wall clock does: a function killed mid-run
+    // records no heartbeat and no resume point, so the next run would start
+    // from the same place and stop in the same place.
+    if (Date.now() - startedAt > MAX_RUN_MS) {
+      cappedAt = org.slug;
+      console.warn(`nurture: time budget reached before ${org.slug}; the rest resume next run`);
+      break;
+    }
     try {
-      const r = await runOrg(org);
+      const r = await runOrg(org, MAX_SENDS_PER_RUN - runSent);
       runSent += r.sent ?? 0;
       results.push(r);
     } catch (e) {
       // One tenant's misconfiguration must not stop the others' follow-up.
       console.error(`nurture: org ${org.slug} threw:`, e);
       results.push({ org: org.slug, error: (e as Error).message, sent: 0 });
+    }
+    lastTurn = org.id;
+  }
+
+  // ── Remember where to resume ──────────────────────────────────────────────
+  //
+  // Stopped early → resume after the last org that had a turn, so the orgs
+  // behind the cap go first next time. Got through everyone → clear it, so
+  // the next run starts at the beginning. An org whose turn was cut short by
+  // the cap still counts as having had one: resuming AT it would let a single
+  // tenant with a large backlog take every run's budget until it drained.
+  if (sweep) {
+    const value = cappedAt && lastTurn ? lastTurn : "";
+    const { error: saveErr } = await supabase.from("app_settings")
+      .upsert({ key: RESUME_KEY, value, updated_at: new Date().toISOString() }, { onConflict: "key" });
+    if (saveErr) {
+      // Not fatal to this run, but it means the next one starts from the same
+      // place — the starvation this exists to prevent — so it is reported.
+      resumeWarning = `resume point not saved (${saveErr.message})`;
+      console.error(`nurture: ${resumeWarning}`);
     }
   }
 
@@ -750,14 +889,15 @@ Deno.serve(async (req) => {
   // stage never stops following anyone up.
   const unbounded = results.filter((r) => (r as { warning?: string }).warning).length;
 
-  const degraded = threw > 0 || refused > 0 || failures > 0;
+  const degraded = threw > 0 || refused > 0 || failures > 0 || !!resumeWarning;
 
   const detail = `${results.length} org(s), ${sent} sent` +
     (threw ? `, ${threw} org(s) failed` : "") +
     (refused ? `, ${refused} org(s) refused (read error — nothing sent)` : "") +
     (failures ? `, ${failures} lead-level failure(s)` : "") +
     (unbounded ? `, ${unbounded} org(s) have no won/lost stage` : "") +
-    (cappedAt ? `, run cap reached before ${cappedAt}` : "");
+    (cappedAt ? `, run cap reached before ${cappedAt}` : "") +
+    (resumeWarning ? `, ${resumeWarning}` : "");
 
   await heartbeat(degraded ? "warn" : "ok", detail);
 

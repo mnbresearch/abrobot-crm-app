@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
 #
-# Deploy the new frontend to the repo root, where Cloudflare Pages serves from.
+# Frontend-only build: rebuilds the app and site/ (the publish directory)
+# WITHOUT deploying any edge function. For a full release use:
 #
-# What this does NOT touch, on purpose:
-#   widget.js                  the embeddable chat widget, live on other sites
-#   *.html policy pages        pricing, contact, terms, refunds, product
-#   index-*.js / *.css         the legacy bundle, still serving /get and friends
-#   _redirects                 hand-written; routes legacy paths to legacy.html
+#     bash scripts/deploy-all.sh "message"
 #
-# The old index.html is preserved as legacy.html so the marketing, pricing,
-# trial and credit flows keep working on the same domain.
+# Cloudflare Pages publishes site/ (wrangler.toml: pages_build_output_dir),
+# NOT the repo root. site/ is an allowlist built by scripts/build-site.sh —
+# the same builder deploy-all.sh uses, so the two can never publish different
+# things. Source maps are never copied anywhere outside app/dist.
 #
-# Rollback:  git checkout HEAD~1 -- index.html && git commit && git push
+# History: this script used to preserve the old bundle as legacy.html and
+# `cp -R app/dist/assets .`, which copied the .map files to the repo root where
+# Cloudflare served them. The legacy app was retired on 14 October 2026;
+# legacy.html stays in git as history but is no longer published.
+#
+# Rollback: git revert the deploy commit and push (site/ is committed, so the
+# previous site/ comes back with it).
 #
 set -euo pipefail
 
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
-echo "▶ Building the new app…"
+echo "▶ Typecheck and build…"
 cd "$ROOT/app"
 npm run build
 
@@ -26,45 +31,34 @@ if [ ! -f "$ROOT/app/dist/index.html" ]; then
   echo "✗ Build produced no dist/index.html — stopping before anything is changed."
   exit 1
 fi
-
 cd "$ROOT"
 
-# ── preserve the legacy entry point ──────────────────────────────────────────
-# Only on the first run: after that, index.html is already the new app and
-# copying it would overwrite the legacy one with a copy of the new app.
-if [ ! -f legacy.html ]; then
-  if grep -q 'index-Bw0EU57x.js\|index-[A-Za-z0-9_-]*\.js' index.html 2>/dev/null; then
-    cp index.html legacy.html
-    echo "✔ Saved the legacy bundle entry as legacy.html"
-  else
-    echo "⚠ index.html does not look like the legacy bundle — not creating legacy.html."
-    echo "  Check it by hand before continuing."
-    exit 1
-  fi
-else
-  echo "• legacy.html already exists — leaving it alone"
+if grep -l "sourceMappingURL" app/dist/assets/*.js >/dev/null 2>&1; then
+  echo "✗ A bundle references a source map. Set sourcemap:\"hidden\" in app/vite.config.ts." >&2
+  exit 1
 fi
 
-# ── copy the new build in ────────────────────────────────────────────────────
-# cp, never rm: nothing existing is deleted, so the widget and policy pages
-# survive regardless of what the build produced.
-echo "▶ Copying app/dist → repo root…"
-cp -R app/dist/assets . 2>/dev/null || true
-cp app/dist/index.html .
-# Vite emits its own _redirects from app/public; ours is hand-written and
-# routes the legacy paths, so keep the repo-root one.
-rm -f assets/.gitkeep 2>/dev/null || true
+# Root copies: index.html is compared against app/index.html and site/index.html
+# by the tests; the root assets/ copy (never .map) is a fallback only.
+cp app/dist/index.html index.html
+find app/dist/assets -type f ! -name '*.map' -exec cp {} assets/ \;
+rm -f assets/*.map
+
+echo "▶ Building site/…"
+bash scripts/build-site.sh --from-dist
+node --test tests/publish-allowlist.test.cjs tests/seo-shell.test.cjs tests/csp.test.cjs
 
 echo
 echo "✔ Ready. Review before pushing:"
 echo
-git status --short | head -20
+git --no-optional-locks status --short | head -30
 echo
 echo "Then:"
-echo "  git add -A && git commit -m \"Deploy new frontend; legacy routes via legacy.html\" && git push"
+echo "  git add -A && git commit -m \"Frontend: <what changed>\" && git push"
 echo
-echo "After Cloudflare redeploys, check ALL of these:"
-echo "  https://crm.mnbresearch.com/          → new app"
-echo "  https://crm.mnbresearch.com/get       → legacy landing + pricing"
-echo "  https://crm.mnbresearch.com/pricing   → pricing page"
-echo "  https://crm.mnbresearch.com/widget.js → the chat widget still loads"
+echo "After Cloudflare redeploys, check:"
+echo "  https://crm.mnbresearch.com/            → the app (landing when signed out)"
+echo "  https://crm.mnbresearch.com/get         → 301 to /login"
+echo "  https://crm.mnbresearch.com/pricing     → pricing page"
+echo "  https://crm.mnbresearch.com/widget.js   → the chat widget still loads"
+echo "  https://crm.mnbresearch.com/FEATURES.md → the app shell (text/html), NOT markdown"

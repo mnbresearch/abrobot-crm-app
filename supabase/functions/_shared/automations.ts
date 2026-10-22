@@ -215,7 +215,9 @@ export function describeAction(a: ActionSpec): string {
     case "add_tag": return `add tag "${a.value}"`;
     case "set_follow_up": return `schedule a follow-up in ${a.value} hours`;
     case "notify_telegram": return `send a Telegram alert`;
-    case "send_email_template": return `send the "${a.value}" email template`;
+    // Not offered by the Automations builder and not executed: run-actions
+    // refuses it explicitly. Said so here so a legacy rule reads honestly.
+    case "send_email_template": return `send the "${a.value}" email template (not supported — skipped)`;
     case "add_note": return `add a note`;
   }
 }
@@ -225,4 +227,32 @@ export function describeAutomation(a: Automation): string {
   if (a.conditions?.length) parts.push(`and ${a.conditions.map(describeCondition).join(", and ")}`);
   parts.push(`→ ${(a.actions ?? []).map(describeAction).join(", then ")}`);
   return parts.join(" ");
+}
+
+// ── Plan entitlement ────────────────────────────────────────────────────────
+//
+// plan_limits.max_automations was enforced only when a rule was ENABLED
+// (trg on automations, 20260821080000). Nothing re-checked it afterwards, so
+// an org that expired or downgraded kept every rule it had switched on while
+// paying — the trigger's own error message says "automations are paused",
+// and they were not.
+//
+// The runner now executes only the oldest N enabled rules, N being the
+// CURRENT plan's max_automations: null = unlimited, 0 (free/expired) = none.
+// Oldest-first because those are the rules the customer was entitled to when
+// they were created; ties broken by id so the choice is stable across runs.
+export function entitledRuleIds(
+  rules: { id: string; created_at?: string | null }[],
+  limit: number | null | undefined,
+): Set<string> {
+  if (limit === null || limit === undefined) return new Set(rules.map((r) => r.id));
+  const n = Math.floor(Number(limit));
+  if (!Number.isFinite(n) || n <= 0) return new Set();
+  const sorted = [...rules].sort((a, b) => {
+    const x = a.created_at ?? "", y = b.created_at ?? "";
+    // Plain comparison of ISO strings from the same source; id breaks ties.
+    if (x !== y) return x < y ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  return new Set(sorted.slice(0, n).map((r) => r.id));
 }

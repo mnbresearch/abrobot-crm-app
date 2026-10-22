@@ -169,6 +169,11 @@ export interface AgentConfig {
   // now, but shown so an admin can see whether any are set.
   guardrails: string | null;
 
+  // Multi-layer prompt security & guardrail shields
+  guardrail_strict_no_code?: boolean;
+  guardrail_anti_injection?: boolean;
+  guardrail_confidentiality?: boolean;
+
   // Deliberately NOT in this interface: groq_api_key, resend_api_key,
   // whatsapp_token, telegram_bot_token, app_secret. They are columns on the
   // same table, and the type omitting them is one of the things stopping them

@@ -250,7 +250,7 @@ export function grabName(t: string): string | null {
  *
  * `name = email?.split("@")[0] ?? phone ?? "Unknown lead"` put the PHONE NUMBER
  * in the name column — which is how a live Toppers Hub record ended up reading
- * `👤 +918745821142` with the same digits repeated on the phone line, in the
+ * `👤 +919876543210` with the same digits repeated on the phone line, in the
  * CRM and in every Telegram alert.
  *
  * The phone and the email already have their own columns and the alert prints
@@ -282,7 +282,7 @@ export function displayName(rawName: unknown, email: unknown, phone: unknown): s
   if (e && stem(e)) return stem(e);
 
   // Deliberately NOT the phone number. Putting it here is what produced the
-  // live record reading "👤 +918745821142" with the same digits on the phone
+  // live record reading "👤 +919876543210" with the same digits on the phone
   // line directly below — the number already has its own column.
   return "New enquiry";
 }

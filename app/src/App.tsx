@@ -25,6 +25,7 @@ import { Integrations } from "./routes/Integrations";
 import { CommandPalette } from "./components/CommandPalette";
 import { CreateOrg } from "./routes/CreateOrg";
 import { ShortcutsHelp } from "./components/ShortcutsHelp";
+import { CookieBanner } from "./components/CookieBanner";
 import { useTheme } from "./lib/theme";
 
 // Routes mirror the legacy app's URLs so both frontends can serve the same
@@ -204,7 +205,12 @@ export default function App() {
   // This sits inside the existing `!session` branch, so a signed-in user's
   // path through the app is byte-for-byte what it was.
   if (!session) {
-    return path === "/" ? <Landing navigate={go} /> : <Login />;
+    return (
+      <>
+        {path === "/" ? <Landing navigate={go} /> : <Login />}
+        <CookieBanner />
+      </>
+    );
   }
 
   // The shell's own load failed. Previously this state did not exist: a failed
@@ -248,6 +254,7 @@ export default function App() {
     <div className="shell">
       <CommandPalette navigate={go} />
       <ShortcutsHelp navigate={go} cycleTheme={cycle} />
+      <CookieBanner />
 
       {/* Rendered only while open, so it costs nothing on desktop where the
           drawer never opens.
@@ -370,7 +377,8 @@ export default function App() {
               <div className="empty-icon">🧭</div>
               <div style={{ fontWeight: 700 }}>Page not found</div>
               <p className="sub" style={{ marginTop: 6 }}>
-                This route may still be served by the previous version of the app.
+                There's nothing at this address. It may have been mistyped, or the link that
+                brought you here is out of date.
               </p>
               <button className="btn" style={{ marginTop: 14 }} onClick={() => go("/")}>Go to dashboard</button>
             </div>

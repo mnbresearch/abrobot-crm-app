@@ -35,7 +35,7 @@
 //    swallow this file exists to prevent, reintroduced by an operator choice.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { conditionsPass, triggerFires, type Automation } from "./automations.ts";
+import { conditionsPass, entitledRuleIds, triggerFires, type Automation } from "./automations.ts";
 import { notifyNewLead } from "./notify.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -266,15 +266,24 @@ async function runStep(
     }
 
     case "send_email_template":
-      // Deliberately not implemented. Unattended sending needs the unsubscribe
-      // and rate handling the nurture function already owns; duplicating it
-      // risks mailing a lead who opted out.
+      // An explicit refusal, not a stub. The Automations builder does not
+      // offer this action (app/src/routes/Automations.tsx ACTIONS has no
+      // entry for it), so it can only exist on a rule written before the
+      // builder dropped it, or one POSTed by hand. Unattended sending needs
+      // the suppression, unsubscribe and metering that send-campaign and
+      // nurture own; a second, partial mail path here is how a lead who opted
+      // out gets mailed.
       //
       // Explicitly NON-FATAL. A customer whose rule is [send_email_template,
       // set_stage, notify_telegram] has been getting steps 2 and 3 for months.
-      // Treating a permanently-unimplemented action as fatal would silently
-      // stop those the day this shipped.
-      return { error: "send_email_template is not wired to the mailer", fatal: false };
+      // Treating a permanently-unsupported action as fatal would silently
+      // stop those the day this shipped. Nothing is sent and nothing is
+      // recorded as taken.
+      return {
+        error: "send_email_template is not wired to the mailer: email is not an automation action " +
+          "(use Campaigns or Nurture) — remove this step from the rule",
+        fatal: false,
+      };
 
     default:
       // Previously this fell through the switch and was then recorded as taken,
@@ -320,6 +329,68 @@ export async function executeActions(
   return { taken, ok, detail };
 }
 
+// ── Plan entitlement ────────────────────────────────────────────────────────
+
+export type Entitlement =
+  | { ok: true; limit: number | null; ids: Set<string> | null }   // ids null = unlimited
+  | { ok: false; error: string };
+
+/** One entry per org per run, so a sweep or a burst of events asks once. */
+export type EntitlementCache = Map<string, Promise<Entitlement>>;
+
+/**
+ * Which enabled rules the org's CURRENT plan lets it run.
+ *
+ * max_automations comes from plan_of(), which already resolves expiry, grace
+ * and refunds (effective_plan). Only the oldest N enabled rules run — see
+ * entitledRuleIds. Never throws; an unreadable plan is { ok: false } and the
+ * caller runs nothing (fail closed: running rules for an org we cannot prove
+ * is entitled is the bug this exists to fix; skipping costs one tick).
+ */
+export function loadEntitlement(supabase: Db, orgId: string, cache?: EntitlementCache): Promise<Entitlement> {
+  const hit = cache?.get(orgId);
+  if (hit) return hit;
+  const p = (async (): Promise<Entitlement> => {
+    try {
+      const { data, error } = await supabase.rpc("plan_of", { p_org_id: orgId });
+      if (error) return { ok: false, error: `plan lookup failed: ${error.message || "unknown error"}` };
+      // A function returning one composite row comes back as an object; be
+      // tolerant of a one-element array too.
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row || typeof row !== "object") return { ok: false, error: "plan lookup returned no plan" };
+      const raw = (row as { max_automations?: unknown }).max_automations;
+      const limit = raw === null || raw === undefined ? null : Number(raw);
+      if (limit === null) return { ok: true, limit: null, ids: null };
+      if (!Number.isFinite(limit) || limit <= 0) return { ok: true, limit: 0, ids: new Set() };
+
+      const { data: rules, error: rulesErr } = await supabase
+        .from("automations").select("id, created_at")
+        .eq("org_id", orgId).eq("enabled", true)
+        // Ordered in the database the same way entitledRuleIds orders, so
+        // the N rows fetched ARE the oldest N; the helper re-applies the rule
+        // so the choice is defined in one tested place.
+        .order("created_at", { ascending: true }).order("id", { ascending: true })
+        .limit(limit);
+      if (rulesErr) return { ok: false, error: `rule list failed: ${rulesErr.message || "unknown error"}` };
+      return {
+        ok: true, limit,
+        ids: entitledRuleIds((rules ?? []) as { id: string; created_at?: string | null }[], limit),
+      };
+    } catch (e) {
+      return { ok: false, error: `plan lookup threw: ${(e as Error)?.message || "unknown"}` };
+    }
+  })();
+  cache?.set(orgId, p);
+  return p;
+}
+
+/** Keep only the rules the entitlement allows. */
+export function filterEntitled<T extends { id: string }>(rules: T[], ent: Entitlement): T[] {
+  if (!ent.ok) return [];
+  if (ent.ids === null) return rules;
+  return rules.filter((r) => ent.ids!.has(r.id));
+}
+
 /**
  * Fire event-driven automations (lead_created / stage_changed) for one lead.
  *
@@ -333,6 +404,7 @@ export async function fireEventAutomations(
   lead: Lead,
   event: "lead_created" | "stage_changed",
   now = new Date(),
+  cache?: EntitlementCache,
 ): Promise<{ fired: number }> {
   try {
     const { data: autos, error: autoErr } = await supabase
@@ -348,8 +420,23 @@ export async function fireEventAutomations(
     }
     if (!autos?.length) return { fired: 0 };
 
+    // Plan gate. Without it an expired or downgraded org kept every rule it
+    // had enabled while paying.
+    const ent = await loadEntitlement(supabase, orgId, cache);
+    if (!ent.ok) {
+      console.error("event automations: not run —", ent.error);
+      return { fired: 0 };
+    }
+    const runnable = filterEntitled(autos as Automation[], ent);
+    if (runnable.length < autos.length) {
+      console.warn(
+        `event automations: ${autos.length - runnable.length} enabled rule(s) for org ${orgId} not run — ` +
+          `plan allows ${ent.limit ?? "unlimited"}`,
+      );
+    }
+
     let fired = 0;
-    for (const a of autos as Automation[]) {
+    for (const a of runnable) {
       // Cooldown: has this rule already run for this lead recently? Bounded to
       // one row by construction, so unlike the cron path's old query this was
       // never at risk of max-rows truncation. The explicit ordering is what was

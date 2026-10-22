@@ -16,7 +16,7 @@ import type { Lead } from "../lib/types";
 // it is also the keyboard path, which native DnD never provided either.
 
 export function Pipeline({ navigate }: { navigate: (to: string) => void }) {
-  const { org, ui, stages } = useApp();
+  const { org, ui, stages, profile } = useApp();
   const { leads, loading, error, reload, setLeads, totalLeads, truncated } = useLeads(org?.id);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overKey, setOverKey] = useState<string | null>(null);
@@ -49,21 +49,35 @@ export function Pipeline({ navigate }: { navigate: (to: string) => void }) {
     setLeads(leads.map((l) => (l.id === id ? { ...l, stage_key: stageKey } : l)));
 
     const label = stages.find((s) => s.key === stageKey)?.label ?? stageKey;
-    const { error } = await supabase
+    // `.select("id")` so a refusal is distinguishable from success. PostgREST
+    // answers an UPDATE whose WHERE matches no VISIBLE row with 204 and
+    // error: null — so the card stayed in its new column, "Moved to X" was
+    // toasted, and the stage never changed. LeadDetail's moveStage already
+    // reads it this way; the board did not.
+    const { data: moved, error } = await supabase
       .from("leads")
       .update({ stage_key: stageKey, updated_at: new Date().toISOString() })
-      .eq("id", id);
+      .eq("id", id)
+      .select("id");
 
     if (error) {
       setLeads(leads); // roll back
       toast.error(error.message);
       return;
     }
+    if (!moved?.length) {
+      setLeads(leads); // roll back
+      toast.error("The stage was not changed — this record is no longer visible to you, or you no longer have permission to change it.");
+      return;
+    }
     // Secondary to the stage move that already succeeded — so a failure here
     // must not undo it, but it must not be invisible either: the Activity
     // feed would quietly stop matching what happened.
     const { error: actErr } = await supabase.from("activities").insert({
-      org_id: lead.org_id, lead_id: id, type: "stage_change", content: `Moved to ${label}.`,
+      // user_id, so the feed says WHO moved it — the same attribution
+      // LeadDetail's log() writes. Without it every board move read as if
+      // the system had done it.
+      org_id: lead.org_id, lead_id: id, user_id: profile?.id ?? null, type: "stage_change", content: `Moved to ${label}.`,
     });
     if (actErr) console.warn("stage move logged nowhere:", actErr.message);
     toast.show(`Moved to ${label}`);

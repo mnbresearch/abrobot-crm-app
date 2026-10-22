@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import { Card, Empty, useToast } from "../components/ui";
+import { normPhone } from "../lib/leadContact";
+import type { FieldDef } from "../lib/types";
 
 // CSV import. Parsing is done here rather than pulling in a library — the
 // format is simple and a dependency for one screen isn't worth it. Handles
@@ -38,11 +40,22 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-const TARGETS = [
+// Every industry gets these: who the person is, how to reach them, and free
+// text that becomes a note on the record.
+const CORE_TARGETS = [
   { key: "", label: "— skip —" },
   { key: "name", label: "Name" },
   { key: "email", label: "Email" },
   { key: "phone", label: "Phone" },
+  { key: "notes", label: "Notes (added to the record's history)" },
+];
+
+// Built-in lead columns that only mean something to a study-abroad
+// consultancy. They were offered — and guessed — for every industry, so a
+// dental clinic's "Treatment level" column could land in course_level, a
+// column its screens never show, and the data was effectively lost. Other
+// packs carry their own fields as custom fields, offered below these.
+const STUDY_ABROAD_TARGETS = [
   { key: "target_country", label: "Target country" },
   { key: "course", label: "Course" },
   { key: "course_level", label: "Course level" },
@@ -50,18 +63,43 @@ const TARGETS = [
   { key: "budget_inr", label: "Budget" },
 ];
 
-/** Guess a mapping from the header text. */
-function guess(header: string): string {
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Guess a mapping from the header text, among the targets this org has. */
+function guess(header: string, studyAbroad: boolean, fields: FieldDef[]): string {
   const h = header.toLowerCase().replace(/[^a-z]/g, "");
-  if (/^(name|fullname|customer|student|patient|client)$/.test(h)) return "name";
+  if (/^(name|fullname|customer|student|patient|client|buyer|candidate|lead)$/.test(h)) return "name";
   if (h.includes("email") || h.includes("mail")) return "email";
-  if (h.includes("phone") || h.includes("mobile") || h.includes("contact")) return "phone";
-  if (h.includes("country")) return "target_country";
-  if (h.includes("courselevel") || h.includes("level")) return "course_level";
-  if (h.includes("course") || h.includes("program")) return "course";
-  if (h.includes("intake")) return "intake";
-  if (h.includes("budget")) return "budget_inr";
-  return "";
+  if (h.includes("phone") || h.includes("mobile") || h.includes("contact") || h.includes("whatsapp")) return "phone";
+  if (/^(notes?|comments?|remarks?|message|enquiry|inquiry)$/.test(h)) return "notes";
+  // The org's own fields next: an exact match on the key or the label.
+  const exact = fields.find((f) => norm(f.key) === norm(header) || norm(f.label) === norm(header));
+  if (exact) return exact.key;
+  if (studyAbroad) {
+    if (h.includes("country")) return "target_country";
+    if (h.includes("courselevel") || h.includes("level")) return "course_level";
+    if (h.includes("course") || h.includes("program")) return "course";
+    if (h.includes("intake")) return "intake";
+    if (h.includes("budget")) return "budget_inr";
+  }
+  // Then a looser match — the header contains the field's label or key.
+  const loose = fields.find((f) => {
+    const k = norm(f.key), l = norm(f.label);
+    const hh = norm(header);
+    return (k.length >= 3 && hh.includes(k)) || (l.length >= 3 && hh.includes(l));
+  });
+  return loose ? loose.key : "";
+}
+
+/** A v4 UUID, from crypto.randomUUID where the browser has it. Older Android
+ *  WebViews (Chrome < 92) do not, and they are common at front desks. */
+function newId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const x = Array.from(b, (n) => n.toString(16).padStart(2, "0")).join("");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
 }
 
 /** PostgREST's hosted max-rows default. There is no supabase/config.toml in
@@ -70,6 +108,15 @@ const MAX_ROWS = 1000;
 
 export function Import({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, profile, stages, fields, isAdmin } = useApp();
+  const studyAbroad = ui.slug === "study_abroad";
+  // Built-in targets this org can actually see, then its own pack fields. A
+  // custom field whose key collides with a built-in is offered once, as the
+  // custom field — which is also where run() writes it.
+  const customKeySet = new Set(fields.map((f) => f.key));
+  const targets = [
+    ...CORE_TARGETS,
+    ...(studyAbroad ? STUDY_ABROAD_TARGETS.filter((t) => !customKeySet.has(t.key)) : []),
+  ];
   const [rows, setRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<string[]>([]);
   const [filename, setFilename] = useState("");
@@ -94,7 +141,7 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
     if (parsed.length < 2) { toast.error("That file has no data rows"); return; }
     setFilename(f.name);
     setRows(parsed);
-    setMapping(parsed[0].map(guess));
+    setMapping(parsed[0].map((h) => guess(h, studyAbroad, fields)));
     setResult(null);
   };
 
@@ -207,6 +254,10 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
 
     let inserted = 0, duplicates = 0, failed = 0;
     const batch: Record<string, unknown>[] = [];
+    // Notes keyed by the id we give the record ourselves, so each note is
+    // attached to exactly the row it came from — never inferred from the
+    // order in which the server happens to return inserted rows.
+    const notesFor = new Map<string, string>();
 
     for (const r of body) {
       const rec: Record<string, unknown> = {};
@@ -216,20 +267,35 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
         const v = (r[i] ?? "").trim();
         if (!v) return;
         if (customKeys.has(target)) custom[target] = v;
+        else if (target === "notes") rec.notes = rec.notes ? `${rec.notes}\n${v}` : v;
         else if (target === "budget_inr") rec[target] = Number(v.replace(/[^\d.]/g, "")) || null;
         else if (target === "email") rec[target] = v.toLowerCase();
+        // Normalised exactly as every capture path does (_shared/capture.ts),
+        // so "9876543210" in a sheet dedupes against "+919876543210" from the
+        // widget instead of becoming a second record. A value normPhone
+        // refuses is kept as typed rather than dropping the row's contact.
+        else if (target === "phone") rec[target] = normPhone(v) ?? v;
         else rec[target] = v;
       });
 
       const email = (rec.email as string) ?? null;
       const phone = (rec.phone as string) ?? null;
-      if (!rec.name && !email && !phone) { failed++; continue; }
+      // A row nobody can contact is skipped and counted, the same rule as
+      // adding a record by hand (AddLead requires a phone or an email). A
+      // name alone used to be enough, so these arrived as records no one
+      // could ever follow up — and "Rows with no contact" undercounted them.
+      if (!email && !phone) { failed++; continue; }
+      const note = rec.notes as string | undefined;
+      delete rec.notes;
       if ((email && seenEmail.has(email)) || (phone && seenPhone.has(phone))) { duplicates++; continue; }
       if (email) seenEmail.add(email);
       if (phone) seenPhone.add(phone);
 
+      const id = newId();
+      if (note) notesFor.set(id, note);
       batch.push({
         ...rec,
+        id,
         org_id: org.id,
         name: rec.name ?? email?.split("@")[0] ?? phone ?? "Unknown",
         source: "csv_import",
@@ -264,6 +330,7 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
     let rejected = 0;
     let notAttempted = 0;
     let rejectReason: string | null = null;
+    let notesFailed = 0;
 
     // chunked so a large file doesn't hit request limits.
     //
@@ -287,6 +354,22 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
         break;
       }
       inserted += count ?? chunk.length;
+
+      // Notes for the rows that just landed. Secondary to the records, so a
+      // failure here does not stop the import — but it is counted and said.
+      const notes = chunk
+        .filter((r) => notesFor.has(r.id as string))
+        .map((r) => ({
+          org_id: org.id, lead_id: r.id as string, user_id: profile?.id ?? null,
+          type: "note" as const, content: notesFor.get(r.id as string)!,
+        }));
+      if (notes.length) {
+        const { error: noteErr } = await supabase.from("activities").insert(notes);
+        if (noteErr) notesFailed += notes.length;
+      }
+    }
+    if (notesFailed) {
+      toast.error(`${notesFailed} imported ${notesFailed === 1 ? "record's" : "records'"} notes could not be saved — the records themselves are in.`);
     }
     setProgress({ done: batch.length, total: batch.length, phase: "Finishing up" });
 
@@ -517,7 +600,7 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
                         value={mapping[i] ?? ""}
                         onChange={(e) => setMapping(mapping.map((m, j) => (j === i ? e.target.value : m)))}
                       >
-                        {TARGETS.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                        {targets.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
                         {fields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
                       </select>
                     </td>
@@ -532,14 +615,15 @@ export function Import({ navigate }: { navigate: (to: string) => void }) {
             <button
               className="btn btn-primary"
               onClick={run}
-              disabled={!mapping.some((m) => m === "name" || m === "email" || m === "phone")}
+              disabled={!mapping.some((m) => m === "email" || m === "phone")}
             >
               Import {rows.length - 1} rows
             </button>
           </div>
-          {!mapping.some((m) => m === "name" || m === "email" || m === "phone") && (
+          {!mapping.some((m) => m === "email" || m === "phone") && (
             <p className="sub" style={{ textAlign: "right", marginTop: 7, color: "var(--red)" }}>
-              Map at least one of name, email or phone.
+              Map an email or a phone column — rows without either are skipped, because nobody
+              could follow them up.
             </p>
           )}
         </Card>

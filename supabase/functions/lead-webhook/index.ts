@@ -62,7 +62,7 @@ function extractLead(body: any, source: string) {
 
   // `name = email?.split("@")[0] ?? phone ?? "Unknown lead"` put the PHONE
   // NUMBER in the name column — which is how a live record ended up reading
-  // "👤 +918745821142" with the same digits repeated on the phone line below,
+  // "👤 +919876543210" with the same digits repeated on the phone line below,
   // in the CRM and in every Telegram alert. It also never trimmed, so a
   // whitespace-only name was truthy and rendered as "👤 <b>   </b>".
   name = displayName(name, email, phone);
@@ -147,6 +147,43 @@ async function resolveCustom(sb: any, orgId: string, submitted: Record<string, u
   return Object.keys(out).length ? out : null;
 }
 
+/**
+ * What the WhatsApp autoreply says.
+ *
+ * It was hardcoded study-abroad copy — "A counsellor will get back to you…
+ * tell us your target country and course" — sent under every tenant's name,
+ * so a dental clinic's patients were asked which country they wanted to study
+ * in, and an org with no name signed it "AbroBot". The tenant's own text from
+ * agent_config.whatsapp_autoreply_text wins; otherwise a sentence that is true
+ * of any business at all.
+ *
+ * Read separately from getWhatsAppConfig, and a failed read falls back to the
+ * neutral default rather than skipping the reply: this is copy, not
+ * credentials, and the column only exists once its migration has run — a
+ * missing column must not stop every WhatsApp autoreply on the platform.
+ */
+async function autoreplyText(orgId: string, leadName: string): Promise<string> {
+  const [{ data: cfg, error: cfgErr }, { data: orgRow }] = await Promise.all([
+    supabase.from("agent_config").select("whatsapp_autoreply_text, brand_name")
+      .eq("org_id", orgId).maybeSingle(),
+    supabase.from("organizations").select("name").eq("id", orgId).maybeSingle(),
+  ]);
+  if (cfgErr) {
+    console.warn(`lead-webhook: could not read autoreply text for org ${orgId}, using the default:`, cfgErr.message);
+  }
+  const own = (cfg?.whatsapp_autoreply_text ?? "").toString().trim();
+  if (own) return own;
+
+  const brand = (cfg?.brand_name || orgRow?.name || "").toString().trim() || "our team";
+  // lead.name comes from displayName(), whose last resort for a contact with
+  // no usable name is the placeholder "New enquiry" — and the old greeting
+  // duly said "Hi New! 👋" to everyone who had no WhatsApp profile name.
+  // Greet by name only when there is a real one.
+  const first = leadName && leadName !== "New enquiry" ? leadName.trim().split(/\s+/)[0] : "";
+  const greet = first && !/^[\d+\-() ]+$/.test(first) ? `Hi ${first}! 👋 ` : "Hi! 👋 ";
+  return `${greet}Thanks for your message — ${brand} will get back to you shortly.`;
+}
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, authorization",
@@ -159,7 +196,8 @@ const json = (body: unknown, status = 200) =>
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
-  const key = new URL(req.url).searchParams.get("key");
+  const reqUrl = new URL(req.url);
+  const key = reqUrl.searchParams.get("key");
   if (!key) return json({ ok: false, error: "missing ?key=" }, 401);
 
   const { data: wk, error: wkErr } = await supabase
@@ -178,6 +216,36 @@ Deno.serve(async (req) => {
   if (!wk?.active) return json({ ok: false, error: "invalid or inactive key" }, 401);
 
   if (req.method === "GET") {
+    // ── WhatsApp Cloud API webhook verification ─────────────────────────
+    //
+    // Meta will not deliver a single message to a callback URL until it has
+    // verified it: a GET carrying hub.mode=subscribe, the "Verify token" the
+    // admin typed into the Meta app, and hub.challenge — which must be echoed
+    // back as the bare body. This endpoint answered that GET with its JSON
+    // form-config response, so verification always failed and the WhatsApp
+    // capture key the Integrations screen offers could never be connected.
+    //
+    // The verify token is the capture key itself: it is already in the URL
+    // Meta was given, so it is not a weaker secret than the one we hold, and
+    // it means there is no second value for an admin to invent and lose. By
+    // the time we are here the key has resolved to an active row, so an
+    // unknown or revoked key is still refused above with a 401 — which is the
+    // answer Meta's verify tool shows the admin.
+    //
+    // text/plain, not JSON. Meta compares the body byte for byte.
+    const mode = reqUrl.searchParams.get("hub.mode");
+    const challenge = reqUrl.searchParams.get("hub.challenge");
+    const verifyToken = reqUrl.searchParams.get("hub.verify_token");
+    if (mode === "subscribe" && challenge) {
+      if (verifyToken !== key) {
+        return json({ ok: false, error: "hub.verify_token must equal this capture key" }, 403);
+      }
+      return new Response(challenge, {
+        status: 200,
+        headers: { ...CORS, "Content-Type": "text/plain" },
+      });
+    }
+
     const { data: org } = await supabase.from("organizations")
       .select("name, brand_color, active").eq("id", wk.org_id).single();
     if (!org?.active) return json({ ok: false, error: "inactive" }, 404);
@@ -274,6 +342,30 @@ Deno.serve(async (req) => {
   // producing a 500 that webhook senders retry against forever.
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return json({ ok: false, error: "expected a JSON object" }, 400);
+  }
+
+  // ── WhatsApp delivery receipts ──────────────────────────────────────────
+  //
+  // Once a WhatsApp Business number is subscribed, Meta posts to the same
+  // callback for every status change on messages WE sent — sent, delivered,
+  // read, failed — as entry[].changes[].value.statuses, with no `messages`.
+  // Those carry the recipient's number, so the generic path below found a
+  // "contact", and with no email and no message it answered 422.
+  //
+  // A 4xx to Meta is not harmless: it retries, and a webhook that keeps
+  // failing is throttled and eventually disabled — taking the real inbound
+  // messages down with the receipts. They are acknowledged and ignored; the
+  // CRM has nowhere to show delivery state yet, and creating a lead from one
+  // would file our OWN outbound message as an enquiry.
+  {
+    const b = body as { object?: unknown; entry?: unknown };
+    const entries = Array.isArray(b.entry) ? b.entry as { changes?: unknown }[] : [];
+    const values = entries.flatMap((e) => Array.isArray(e?.changes) ? e.changes as { value?: unknown }[] : [])
+      .map((c) => (c?.value ?? {}) as { statuses?: unknown; messages?: unknown });
+    const statusOnly = values.length > 0 &&
+      values.some((v) => Array.isArray(v.statuses) && v.statuses.length > 0) &&
+      !values.some((v) => Array.isArray(v.messages) && v.messages.length > 0);
+    if (statusOnly) return json({ ok: true, ignored: "status update" });
   }
 
   // ── Provider adapters ───────────────────────────────────────────────────
@@ -414,7 +506,12 @@ Deno.serve(async (req) => {
       console.error(`lead-webhook: dedupe update failed for lead ${existing[0].id}:`, updErr.message);
       return json({ ok: false, error: "could not update the existing record" }, 500);
     }
-    return json({ ok: true, deduped: true, lead_id: existing[0].id });
+    // Uniform, and deliberately without the record id. The capture key ships
+    // in page source, so this response is readable by anyone: returning the
+    // id let a stranger confirm a given address or phone is a customer here
+    // AND learn the internal id of that person's record. `deduped` stays —
+    // product.html's form uses it to say "we already have your thread".
+    return json({ ok: true, deduped: true });
   }
 
   // Counted in the database — see org_assignment_load() and 20260914090000.
@@ -505,7 +602,8 @@ Deno.serve(async (req) => {
       const { data: raced } = await dq.limit(1);
       if (raced?.[0]?.id) {
         console.warn(`lead-webhook: concurrent create for org ${wk.org_id}, merged into ${raced[0].id}`);
-        return json({ ok: true, deduped: true, lead_id: raced[0].id });
+        // Same shape as the dedupe path above, for the same reason.
+        return json({ ok: true, deduped: true });
       }
       // Constraint fired but we cannot find the row — most likely a
       // pre-existing MIXED-CASE record from before addresses were normalised,
@@ -577,15 +675,10 @@ Deno.serve(async (req) => {
     if (waCfg === null) {
       console.error(`lead-webhook: skipping WhatsApp autoreply for org ${wk.org_id} — config unreadable`);
     } else if (waAllowed === true && waCfg.whatsapp_autoreply) {
-      const { data: orgRow } = await supabase.from("organizations")
-        .select("name").eq("id", wk.org_id).single();
-      const brand = orgRow?.name || "AbroBot";
       autoreply = await sendWhatsAppText(
         waCfg,
         lead.phone,
-        `Hi ${lead.name.split(" ")[0]}! 👋 Thanks for reaching out to ${brand}. ` +
-        `A counsellor will get back to you shortly. ` +
-        `Meanwhile, feel free to tell us your target country and course.`,
+        await autoreplyText(wk.org_id, lead.name),
       );
       // A refusal here means this org's WhatsApp credentials do not cover the
       // number it is configured to send from. It is silent from the visitor's
@@ -595,9 +688,11 @@ Deno.serve(async (req) => {
         console.warn("whatsapp autoreply refused for org", wk.org_id, "-", autoreply.detail);
       }
 
-      // Only a delivered autoreply counts against the allowance.
+      // Only a delivered autoreply counts against the allowance. record_usage,
+      // not consume_usage: the message has already gone, so it is recorded
+      // unconditionally rather than refused-and-dropped near the limit.
       if (autoreply?.sent) {
-        await supabase.rpc("consume_usage", {
+        await supabase.rpc("record_usage", {
           p_org_id: wk.org_id, p_metric: "whatsapp_messages", p_amount: 1,
         });
       }

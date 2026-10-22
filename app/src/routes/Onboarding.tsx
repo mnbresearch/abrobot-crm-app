@@ -2,14 +2,14 @@ import { useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import { getIndustry } from "../lib/industries";
-import { useToast } from "../components/ui";
+import { LoadError, useToast } from "../components/ui";
 
 // The 90-second onboarding. Picking an industry seeds the pipeline, the custom
 // fields and the AI agent persona in one call to apply_industry_pack(), so the
 // user never sees a blank CRM.
 
 export function Onboarding({ onDone }: { onDone: () => void }) {
-  const { industries, org, refresh } = useApp();
+  const { industries, org, refresh, signOut } = useApp();
   const [picked, setPicked] = useState<string | null>(org?.industry_slug ?? null);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
@@ -28,6 +28,24 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   };
 
   const preview = picked ? getIndustry(picked) : null;
+
+  // The store reads the industry list non-fatally once an org exists (it only
+  // logs the error), so a failed read arrived here as an empty grid and a
+  // permanently disabled button — a screen with no way forward and nothing
+  // saying why. An active pack always has at least one industry, so empty
+  // means the read failed. Retry re-runs the shell load; sign out is the way
+  // past a stale token, which is what most often produces this.
+  if (industries.length === 0) {
+    return (
+      <div style={{ maxWidth: 640, margin: "0 auto", padding: "44px 20px" }}>
+        <LoadError
+          message="The list of industries could not be loaded."
+          onRetry={() => void refresh()}
+          onSignOut={() => void signOut()}
+        />
+      </div>
+    );
+  }
 
   return (
     <div style={{ maxWidth: 940, margin: "0 auto", padding: "44px 20px" }}>

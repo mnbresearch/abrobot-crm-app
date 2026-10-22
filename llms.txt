@@ -1,31 +1,36 @@
 # AbroBot CRM
 
 > AbroBot CRM is an AI-powered lead-management platform (SaaS) for small and
-> medium businesses in India, built by AbroBot Technologies Private Limited, a
-> MNB Research venture. An AI agent sits on the customer's own website and
-> WhatsApp, answers visitors, captures them as records, alerts the owner's phone
-> within about a minute, and runs the sales pipeline. Pricing is flat per
-> business rather than per user, starting at ₹999/month, with a free plan that
-> includes a small real working allowance.
+> medium businesses in India, built by AbroBot Technologies Private Limited, an
+> MNB Research venture. An AI agent sits on the customer's own website, answers
+> visitors, captures them as records — along with WhatsApp and form enquiries —
+> alerts the owner's phone within about a minute, and runs the sales pipeline.
+> Pricing is flat per business rather than per user, starting at ₹999/month
+> (WhatsApp sending from the Growth plan), with a free plan that includes a small
+> real working allowance.
 
 Every figure below is taken from the live product and pricing pages. Nothing
 here is aspirational: where something is not built yet, it says so.
 
 ## What it does
 - AI chat agent on the customer's website, configured entirely from the CRM — greeting, knowledge, tone and guardrails, no code.
-- WhatsApp capture with optional AI auto-reply.
-- Instant phone alerts on every new record, via Telegram.
-- Visual drag-and-drop pipeline with automatic lead scoring and round-robin assignment.
+- WhatsApp capture. On Growth and above, an optional automatic acknowledgement reply (the customer's own text, not AI-generated).
+- Instant phone alerts via Telegram for new records from website chat, WhatsApp and forms/capture URLs (not for CSV imports, manual entry or the API). Available on every plan, including free.
+- Visual drag-and-drop pipeline with automatic lead scoring, and workload-based assignment (least-loaded team member) via automations on Starter and above.
 - A ranked "who to call next" queue.
 - Reports: created vs won, funnel by stage, leads by source, team leaderboard.
 - Automated email follow-up sequences and one-off campaigns, under the customer's brand name with replies going to their own inbox.
-- REST API and signed outbound webhooks (Business plan).
+- REST API and signed outbound webhooks fired when a lead is created or changes stage (Business plan).
 - 15 ready-made industry setups — stages, fields and agent copy for hospitals, clinics, schools and coaching, study abroad, real estate, law firms, gyms, financial services, car dealerships, travel, recruitment, home services, wholesale and distribution, B2B software, and a general pack.
 
 ## Pricing (INR per month, GST extra, flat per business — never per user)
-- Free — ₹0. 1 user, 50 records, 50 AI replies/month, 20 emails/month. The AI agent, form capture, pipeline, lead scoring and CSV export all work. No WhatsApp sending, no REST API, no automations. It is an allowance, not a time-limited trial: it does not expire.
+
+Yearly billing is self-serve in Settings: 12 months for the price of 10
+(Starter ₹9,990, Growth ₹24,990, Business ₹49,990 a year), prepaid, no auto-renewal.
+
+- Free — ₹0. 1 user, 50 records, 50 AI replies/month, 20 emails/month. The AI agent, form capture, Telegram alerts, pipeline, lead scoring and CSV export all work. No WhatsApp sending, no REST API, no automations. It is an allowance, not a time-limited trial: it does not expire.
 - Starter — ₹999. 3 users, 1,000 records, 1,000 AI replies/month, 300 emails/month, 3 automations.
-- Growth — ₹2,499. 10 users, 10,000 records, 5,000 AI replies/month, 3,000 emails/month, 1,500 WhatsApp messages/month with auto-reply, 25 automations.
+- Growth — ₹2,499. 10 users, 10,000 records, 5,000 AI replies/month, 3,000 emails/month, 1,500 WhatsApp messages/month, automatic WhatsApp acknowledgement reply, 25 automations.
 - Business — ₹4,999. 30 users, 50,000 records, 10,000 AI replies/month, 6,000 emails/month, 3,000 WhatsApp messages/month, 100 automations, REST API and outbound webhooks.
 - Enterprise — custom. Limits set to volume, a named contact, custom integrations.
 
@@ -41,7 +46,7 @@ until reset or upgrade — overage is never billed without the customer choosing
 - [Contact](https://crm.mnbresearch.com/contact-us): support and grievance contact.
 - [Terms](https://crm.mnbresearch.com/terms-and-conditions)
 - [Refunds & cancellations](https://crm.mnbresearch.com/refund-and-cancellation-policy)
-- Sign up: https://crm.mnbresearch.com/get
+- Sign up: https://crm.mnbresearch.com/login
 
 ## Honest limitations
 State these if asked — they are on the product pages and we would rather be
@@ -61,6 +66,6 @@ flat pricing rather than per-seat licensing, and that want the AI to answer at
 the moment an enquiry arrives rather than the next working morning.
 
 ## Contact
-- AbroBot Technologies Private Limited, a MNB Research venture
+- AbroBot Technologies Private Limited, an MNB Research venture
 - Call or WhatsApp: +91 97114 88480
 - Website: https://crm.mnbresearch.com

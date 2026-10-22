@@ -25,7 +25,12 @@ const MODEL = "openai/gpt-oss-120b";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type",
+  // authorization: the Conversations screen's "AI summary" button calls this
+  // from the browser with the member's bearer token, and a browser will not
+  // send a header the preflight did not allow — so the request never left and
+  // the button failed with a network error for every user. x-cron-secret is
+  // listed for the same reason on the scheduled path.
+  "Access-Control-Allow-Headers": "content-type, authorization, x-cron-secret",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Content-Type": "application/json",
 };
@@ -116,9 +121,13 @@ async function summariseBatch(items: { id: string; transcript: string }[]) {
 // monitoring was itself the thing that was broken.
 async function heartbeat(status: string, detail?: string) {
   try {
-    await supabase.rpc("record_heartbeat", {
+    // Checked, not just wrapped: postgrest resolves with { error } rather than
+    // throwing, so a refused heartbeat never reached the catch below and the
+    // watchdog blamed the job for a report that was never recorded.
+    const { error } = await supabase.rpc("record_heartbeat", {
       p_job: "summarize-chats", p_status: status, p_detail: detail ?? null,
     });
+    if (error) console.warn("heartbeat not recorded:", error.message);
   } catch (e) {
     // Never let reporting health break the work whose health is reported.
     console.warn("heartbeat failed:", (e as Error).message);
@@ -209,13 +218,20 @@ Deno.serve(async (req) => {
     }));
 
   const summaries: Record<string, { summary: string; interest: string }> = {};
+  // Per-batch failures are returned, not swallowed: Conversations shows
+  // errors[0], so "the AI service is rate-limited" reads as that rather than
+  // as an empty "No summary returned".
+  const errors: string[] = [];
   for (let i = 0; i < items.length; i += BATCH) {
     const chunk = items.slice(i, i + BATCH);
     try {
       Object.assign(summaries, await summariseBatch(chunk));
-    } catch (_e) { /* skip chunk; client falls back to heuristic */ }
+    } catch (e) {
+      errors.push((e as Error).message || "The AI service did not answer.");
+    }
   }
 
-  await heartbeat("ok", `${Object.keys(summaries).length} summarised`);
-  return json({ summaries });
+  await heartbeat(errors.length && !Object.keys(summaries).length ? "warn" : "ok",
+    `${Object.keys(summaries).length} summarised${errors.length ? `, ${errors.length} batch(es) failed` : ""}`);
+  return json(errors.length ? { summaries, errors } : { summaries });
 });

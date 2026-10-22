@@ -103,7 +103,7 @@ const RECIPES = [
 ];
 
 export function Automations() {
-  const { org, ui, stages, fields, isAdmin } = useApp();
+  const { org, ui, stages, fields, isAdmin, plan } = useApp();
   const [rows, setRows] = useState<Automation[]>([]);
   // A toast lasts 3.2 seconds; "No automations yet" stays. On this screen that
   // is a claim that nothing is currently acting on the org's records, which is
@@ -176,7 +176,11 @@ export function Automations() {
     const payload = {
       org_id: org.id,
       name: editing.name.trim(),
-      enabled: editing.enabled ?? true,
+      // Paused unless the rule already says otherwise. `?? true` meant a
+      // brand-new rule went live on save while the Recipes card promised that
+      // new rules start paused — a half-configured rule could start messaging
+      // or reassigning real records before anyone pressed Resume.
+      enabled: editing.enabled ?? false,
       trigger: editing.trigger ?? "no_contact_for",
       trigger_value: Number(editing.trigger_value ?? 0),
       conditions: editing.conditions ?? [],
@@ -206,7 +210,7 @@ export function Automations() {
     }
     setEditing(null);
     await load();
-    toast.show("Rule saved");
+    toast.show(payload.enabled ? "Rule saved" : "Rule saved — paused until you press Resume");
   };
 
   const toggle = async (a: Automation) => {
@@ -330,6 +334,19 @@ export function Automations() {
 
   return (
     <div className="stack">
+      {/* The server runs only the oldest N enabled rules a plan allows
+          (_shared/run-actions.ts filterEntitled) — so say which ones are
+          being held back rather than letting a rule look live and do nothing. */}
+      {plan && plan.automationsLimit !== null && rows.filter((r) => r.enabled).length > plan.automationsLimit && (
+        <div className="card" style={{ borderColor: "var(--amber)" }}>
+          <b>Your plan runs {plan.automationsLimit === 0 ? "no automations" : `${plan.automationsLimit} automation${plan.automationsLimit === 1 ? "" : "s"}`}.</b>{" "}
+          <span className="sub">
+            {plan.automationsLimit === 0
+              ? "None of the rules switched on below will run until you upgrade."
+              : `Only the ${plan.automationsLimit} oldest switched-on rule${plan.automationsLimit === 1 ? "" : "s"} will run; the rest are held back until you upgrade or pause some.`}
+          </span>
+        </div>
+      )}
       <div className="row">
         <div>
           <h1>Automations</h1>
@@ -343,7 +360,7 @@ export function Automations() {
         </button>
         <button
           className="btn btn-primary"
-          onClick={() => setEditing({ trigger: "no_contact_for", trigger_value: 48, conditions: [], actions: [], enabled: true, cooldown_hours: 24 })}
+          onClick={() => setEditing({ trigger: "no_contact_for", trigger_value: 48, conditions: [], actions: [], enabled: false, cooldown_hours: 24 })}
         >
           + New rule
         </button>
@@ -593,6 +610,22 @@ export function Automations() {
               <div className="label" style={{ marginBottom: 3 }}>In plain English</div>
               {describe(editing)}
             </div>
+          )}
+
+          {!editing.id && (
+            <label className="row" style={{ gap: 8, marginBottom: 13, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={!!editing.enabled}
+                onChange={(e) => setEditing({ ...editing, enabled: e.target.checked })}
+              />
+              <span>
+                Turn this rule on now
+                <span className="sub" style={{ display: "block", fontSize: 12 }}>
+                  Left unticked, it saves paused — press Resume on it when you're ready.
+                </span>
+              </span>
+            </label>
           )}
 
           <div className="row" style={{ justifyContent: "flex-end" }}>

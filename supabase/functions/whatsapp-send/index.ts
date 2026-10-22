@@ -6,7 +6,7 @@
 // access token, and may only message leads belonging to their own org.
 //
 // POST { lead_id, text }
-//  -> { ok, message_id }  and logs a `whatsapp` activity against the lead.
+//  -> { ok, message_id, via: "own" | "platform" }  and logs a `whatsapp` activity against the lead.
 //
 // NOTE: Meta only permits free-form text inside the 24h window opened by the
 // customer's last inbound message. Outside it you need an approved template;
@@ -102,9 +102,48 @@ Deno.serve(async (req) => {
       error: "We couldn't read this organisation's WhatsApp settings just now. Nothing was sent — please try again.",
     }, 503);
   }
+  // ── Reserve the message BEFORE sending it ─────────────────────────────────
+  //
+  // consume_usage was called after the send and its answer thrown away. The
+  // allowance read above is a snapshot, so two counsellors sending at once on
+  // the last message both passed it, both sent, and the second "refused"
+  // result was ignored — the cap was advisory exactly when it was reached.
+  //
+  // consume_usage increments and checks atomically, so it is the real gate:
+  // take the slot first, refuse if it is not granted, and give it back if the
+  // send then fails. Billing is still for confirmed sends only — which is what
+  // the old "meter AFTER a confirmed send" was protecting — just without the
+  // race. A REFUSED reservation is not handed back: since 20261014090000
+  // consume_usage does not count what it refuses, so a release there would
+  // erase a message that really was sent.
+  const release = async (why: string) => {
+    const { error: relErr } = await admin.rpc("consume_usage", {
+      p_org_id: profile.org_id, p_metric: "whatsapp_messages", p_amount: -1,
+    });
+    if (relErr) console.error(`whatsapp-send: could not release a reserved message (${why}):`, relErr.message);
+  };
+  const { data: usage, error: usageErr } = await admin.rpc("consume_usage", {
+    p_org_id: profile.org_id, p_metric: "whatsapp_messages", p_amount: 1,
+  });
+  if (usageErr) {
+    // Fail CLOSED, same as the allowance read: Meta bills per message.
+    console.error("whatsapp-send: consume_usage failed, refusing:", usageErr.message);
+    return json({ error: "Could not check your WhatsApp allowance. Nothing was sent." }, 503);
+  }
+  if ((usage as { allowed?: boolean } | null)?.allowed === false) {
+    const u = usage as { used?: number; limit?: number };
+    return json({
+      error: `You have used this month's WhatsApp allowance${u.limit != null ? ` (${u.limit} messages)` : ""}. It resets on the 1st.`,
+      code: "WHATSAPP_LIMIT_REACHED",
+      used: u.used, limit: u.limit,
+    }, 402);
+  }
+
   const result = await sendWhatsAppText(cfg, lead.phone, text);
 
   if (!result.sent) {
+    // Not sent, so not billed.
+    await release(`send ${result.reason}`);
     // 409, not 502. A refusal is not Meta failing us — it is this organisation
     // asking to send from a number its own credentials do not cover, and the
     // detail says exactly what to do about it. Reporting it as a bad gateway
@@ -117,11 +156,8 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: result.detail ?? result.reason }, status);
   }
 
-  // Meter AFTER a confirmed send. Counting attempts would bill a customer for
-  // Meta's rejections, which is the wrong side to err on.
-  await admin.rpc("consume_usage", {
-    p_org_id: profile.org_id, p_metric: "whatsapp_messages", p_amount: 1,
-  });
+  // Already metered by the reservation above, which is kept now that Meta has
+  // confirmed the send.
 
   await admin.from("activities").insert({
     org_id: profile.org_id, lead_id: lead.id, user_id: userData.user.id,
@@ -130,5 +166,8 @@ Deno.serve(async (req) => {
   });
   await admin.from("leads").update({ last_contacted_at: new Date().toISOString() }).eq("id", lead.id);
 
-  return json({ ok: true, message_id: result.message_id });
+  // `via` is "platform" when this org has no WhatsApp token of its own and the
+  // message went out from the platform's shared number. Deliberate, but the
+  // sender should be able to see it rather than assume it was their number.
+  return json({ ok: true, message_id: result.message_id, via: result.via });
 });

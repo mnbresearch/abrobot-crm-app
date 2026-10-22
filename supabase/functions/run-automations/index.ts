@@ -16,12 +16,16 @@
 //   * every run written to automation_runs, success or failure
 //   * a failing action logs and continues rather than aborting the batch
 //   * dry_run for testing a rule against real data before arming it
+//   * plan-gated: only the oldest N enabled rules run, N = the CURRENT plan's
+//     max_automations (plan_of), so an expired or downgraded org's rules stop
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { shouldRun, type Automation } from "../_shared/automations.ts";
 
 import { requireCronOrMember } from "../_shared/cron-auth.ts";
-import { executeActions, fireEventAutomations, type ExecContext } from "../_shared/run-actions.ts";
+import {
+  type EntitlementCache, executeActions, filterEntitled, fireEventAutomations, loadEntitlement, type ExecContext,
+} from "../_shared/run-actions.ts";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -74,6 +78,9 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { /* empty body is the cron case */ }
   const dryRun = body?.dry_run === true;
 
+  // One plan lookup per org per invocation.
+  const planCache: EntitlementCache = new Map();
+
   // ── Event mode ─────────────────────────────────────────────────────────────
   // The database trigger on leads posts {event, lead_id, org_id} here whenever
   // a record is created or changes stage. That is what makes "when a record is
@@ -112,7 +119,7 @@ Deno.serve(async (req) => {
       return json({ error: `unknown event "${body.event}"`, valid: EVENTS }, 400);
     }
 
-    const result = await fireEventAutomations(supabase, lead.org_id, lead, evt);
+    const result = await fireEventAutomations(supabase, lead.org_id, lead, evt, new Date(), planCache);
     return json({ ok: true, mode: "event", event: body.event, lead_id: body.lead_id, result });
   }
 
@@ -284,6 +291,32 @@ Deno.serve(async (req) => {
       if (scheduled) await touchSweep(org.id, null);
       continue;
     }
+
+    // ── Plan gate ─────────────────────────────────────────────────────────
+    // max_automations was checked only when a rule was switched on, so an
+    // org that expired or downgraded kept running everything it had enabled
+    // while paying. Only the oldest N enabled rules (across ALL triggers, not
+    // just the time-based ones fetched above) run; none on free/expired.
+    const ent = await loadEntitlement(supabase, org.id, planCache);
+    if (!ent.ok) {
+      // Fail closed and say so: an unprovable entitlement must not run rules.
+      console.error(`run-automations: plan lookup failed for ${org.slug}, org skipped:`, ent.error);
+      warnings.push(`${org.slug}: plan lookup failed, org skipped (${ent.error})`);
+      degraded = true;
+      if (scheduled) await touchSweep(org.id, null);
+      continue;
+    }
+    const entitled = filterEntitled(autos as Automation[], ent);
+    if (entitled.length < autos.length) {
+      warnings.push(
+        `${org.slug}: ${autos.length - entitled.length} time-based rule(s) not run — plan allows ${ent.limit ?? "unlimited"} active automation(s)`,
+      );
+    }
+    if (!entitled.length) {
+      if (scheduled) await touchSweep(org.id, null);
+      continue;
+    }
+    autos.splice(0, autos.length, ...entitled);
 
     const { data: stages, error: stageErr } = await supabase
       .from("pipeline_stages").select("key, is_won, is_lost").eq("org_id", org.id);

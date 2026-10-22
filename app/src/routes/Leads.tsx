@@ -5,6 +5,7 @@ import {
   Card, Empty, FieldInput, Modal, ScoreChip, Skeleton, StagePill,
   cellValue, humanize, useToast, LoadError, TruncationNotice } from "../components/ui";
 import type { Lead } from "../lib/types";
+import { findConflictingLead, isUniqueViolation, normPhone, type ConflictingLead } from "../lib/leadContact";
 
 // How many matches a server-side search returns. Deliberately larger than the
 // command palette's 8 — this is the screen people come to when they want to
@@ -398,6 +399,7 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
         <AddLead
           onClose={() => setAdding(false)}
           onSaved={async () => { setAdding(false); await reload(); toast.show(`${ui.leadNoun} added`); }}
+          onOpen={(id) => { setAdding(false); navigate(`/leads/${id}`); }}
           orgId={org!.id}
           userId={profile?.id ?? null}
         />
@@ -407,8 +409,10 @@ export function Leads({ navigate }: { navigate: (to: string) => void }) {
   );
 }
 
-function AddLead({ orgId, userId, onClose, onSaved }: {
+function AddLead({ orgId, userId, onClose, onSaved, onOpen }: {
   orgId: string; userId: string | null; onClose: () => void; onSaved: () => void;
+  /** Go to an existing record instead of creating a duplicate of it. */
+  onOpen: (id: string) => void;
 }) {
   const { ui, fields, stages } = useApp();
   const [name, setName] = useState("");
@@ -422,6 +426,9 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
   // below reads as "this person is not in your CRM", and off a failed read that
   // is a claim we have no basis for.
   const [dupeError, setDupeError] = useState<string | null>(null);
+  // The record a save collided with, when the database refused it as a
+  // duplicate — so the error can offer the way to the one that exists.
+  const [conflict, setConflict] = useState<ConflictingLead | null>(null);
 
   const first = stages[0]?.key ?? "new";
 
@@ -432,7 +439,9 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
     if (term.length < 5) { setDupe(null); setDupeError(null); return; }
     const t = setTimeout(async () => {
       let query = supabase.from("leads").select("id, name, email, phone, stage_key, stage, score").eq("org_id", orgId);
-      query = email.trim() ? query.eq("email", email.trim().toLowerCase()) : query.eq("phone", phone.trim());
+      // Normalised the same way it is stored, so "98765 43210" finds the
+      // widget's "+919876543210".
+      query = email.trim() ? query.eq("email", email.trim().toLowerCase()) : query.eq("phone", normPhone(phone) ?? phone.trim());
       // The error was discarded, so a failed lookup looked exactly like "no
       // match" — the warning below simply never appeared and the second record
       // got created with nothing on screen to stop it.
@@ -447,13 +456,20 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
   const save = async () => {
     if (!name.trim()) { setErr("Name is required"); return; }
     if (!phone.trim() && !email.trim()) { setErr("Add a phone number or an email — one of the two is needed to follow up"); return; }
+    // Stored in the same E.164 form every capture path uses, so the unique
+    // index and dedupe see one number however it was typed.
+    if (phone.trim() && !normPhone(phone)) {
+      setErr("That phone number doesn't look complete — include the country code for numbers outside India.");
+      return;
+    }
     setSaving(true);
     setErr(null);
+    setConflict(null);
 
     const { data, error } = await supabase.from("leads").insert({
       org_id: orgId,
       name: name.trim(),
-      phone: phone.trim() || null,
+      phone: normPhone(phone),
       email: email.trim().toLowerCase() || null,
       source: "manual",
       stage_key: first,
@@ -462,8 +478,26 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
       next_follow_up_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
     }).select("id").single();
 
+    if (error) {
+      // 23505: one of the dedupe unique indexes (20260924092000) refused a
+      // second live record with this email or phone. "Save anyway" lands here
+      // whenever the warning above was right, and the raw Postgres text —
+      // "duplicate key value violates unique constraint …" — told nobody what
+      // to do next.
+      if (isUniqueViolation(error)) {
+        const holder = await findConflictingLead(
+          orgId, { email: email.trim().toLowerCase() || null, phone: normPhone(phone) }, error,
+        );
+        setSaving(false);
+        setConflict(holder);
+        setErr(`Another record already has that ${holder?.field ?? "email/phone"}, so a second one wasn't created.`);
+        return;
+      }
+      setSaving(false);
+      setErr(error.message);
+      return;
+    }
     setSaving(false);
-    if (error) { setErr(error.message); return; }
 
     if (data?.id) {
       // Secondary to the record that has already been created, so a failure
@@ -518,8 +552,12 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
         >
           <div style={{ fontWeight: 700, fontSize: 13 }}>⚠️ Already in your CRM</div>
           <div className="sub" style={{ fontSize: 12.5, marginTop: 3 }}>
-            <b>{dupe.name}</b> has the same {email.trim() ? "email" : "phone"}. Saving will create a second record.
+            <b>{dupe.name}</b> has the same {email.trim() ? "email" : "phone"}. Open that record instead —
+            your workspace may refuse a second record with the same {email.trim() ? "email" : "phone"}.
           </div>
+          <button className="btn btn-sm" style={{ marginTop: 8 }} onClick={() => onOpen(dupe.id)}>
+            Open {dupe.name} →
+          </button>
         </div>
       )}
 
@@ -530,7 +568,19 @@ function AddLead({ orgId, userId, onClose, onSaved }: {
         </div>
       ))}
 
-      {err && <p style={{ color: "var(--red)", fontSize: 13 }}>{err}</p>}
+      {err && (
+        <p style={{ color: "var(--red)", fontSize: 13 }}>
+          {err}
+          {conflict && (
+            <>
+              {" "}
+              <button className="btn btn-sm" style={{ marginLeft: 6 }} onClick={() => onOpen(conflict.id)}>
+                Open {conflict.name || "that record"} →
+              </button>
+            </>
+          )}
+        </p>
+      )}
 
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
         <button className="btn" onClick={onClose}>Cancel</button>

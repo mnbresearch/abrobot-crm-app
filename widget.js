@@ -44,6 +44,37 @@
 
   var API = "https://pomsltnrxvbcafwtbtlc.supabase.co/functions/v1/chat-agent";
 
+  // ── Never trust a URL or a colour, even from our own config endpoint ──────
+  //
+  // These values are typed by the tenant in Settings and arrive here through a
+  // public endpoint; they become href=, src= and raw CSS on the CUSTOMER's own
+  // website. chat-agent now refuses anything that is not http(s) or #rrggbb,
+  // but this file is cached by browsers and CDNs for days and may well talk to
+  // an older deployment, and the data-* attributes below never pass through the
+  // server at all. So the same rule is applied again here, at the last point
+  // before the DOM: a `javascript:` booking link or a colour containing "}"
+  // simply does not render.
+  //
+  // Same rules as supabase/functions/_shared/url-safety.ts — keep them in step.
+  function safeHttpUrl(v) {
+    if (typeof v !== "string") return null;
+    var s = v.trim();
+    if (!s || s.length > 500) return null;
+    if (!/^https?:\/\//i.test(s)) return null;
+    if (/[\s\u0000-\u001f\u007f<>"'`\\]/.test(s)) return null;
+    try {
+      var u = new URL(s);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      if (!u.hostname) return null;
+    } catch (e) { return null; }
+    return s;
+  }
+  function safeHexColor(v) {
+    if (typeof v !== "string") return null;
+    var s = v.trim();
+    return /^#[0-9a-fA-F]{6}$/.test(s) ? s : null;
+  }
+
   // ── Fallbacks, and why none of them name a company ────────────────────────
   //
   // This object used to hold AbroBot's branding: "Study-abroad assistant ·
@@ -108,7 +139,13 @@
 
   function boot() {
     if (built) return; built = true;
-    var C = CFG.widget_color || "#2f3a4a";
+    // Validated once, here, so every consumer below — the CSS, the logo, the
+    // header link and the booking chip — reads an already-safe value.
+    CFG.booking_url = safeHttpUrl(CFG.booking_url);
+    CFG.contact_url = safeHttpUrl(CFG.contact_url);
+    CFG.logo_url = safeHttpUrl(CFG.logo_url);
+    CFG.widget_color = safeHexColor(CFG.widget_color) || "#2f3a4a";
+    var C = CFG.widget_color;
     var GRAD = "linear-gradient(90deg," + shade(C, -8) + " 0%," + shade(C, 22) + " 50%," + C + " 100%)";
     var FG = onAccent(shade(C, 22));
     var SIDE = CFG.widget_position === "left" ? "left" : "right";
@@ -230,7 +267,7 @@
       // "Powered by <tenant>", which is circular on the tenant's own website
       // and would now render "Powered by Chat" whenever config was still in
       // flight.
-      '<div class="abx-cred">Powered by <a class="abx-brand" href="https://crm.mnbresearch.com" target="_blank" rel="noopener">AbroBot CRM</a></div>';
+      '<div class="abx-cred">Powered by <a class="abx-brand" href="https://crm.mnbresearch.com" target="_blank" rel="noopener">AbroBot CRM</a> · <a class="abx-brand" href="https://crm.mnbresearch.com/privacy-policy" target="_blank" rel="noopener">Privacy</a></div>';
     document.body.appendChild(panel);
 
     var body = panel.querySelector("#abxBody");

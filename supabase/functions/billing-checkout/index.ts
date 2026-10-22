@@ -82,7 +82,12 @@ Deno.serve(async (req) => {
     .select("id, name, slug").eq("id", profile.org_id).single();
   if (!org) return json({ error: "organisation not found" }, 404);
 
-  const orderId = `abcrm_${org.slug}_${plan}_${Date.now()}`;
+  // Cashfree caps order_id at 45 characters. `abcrm_${slug}_${plan}_${ms}`
+  // passed that for any slug over ~16 characters and the order was refused.
+  // 6 + 12 + 1 + 13 = 32 characters, always. The plan is not needed here: it
+  // is stored on the payments row, and nothing parses this id (the webhook and
+  // checkout-recovery look the row up by order_id as an opaque key).
+  const orderId = `abcrm_${String(org.id).replace(/-/g, "").slice(0, 12)}_${Date.now()}`;
 
   const result = await createOrder({
     orderId,

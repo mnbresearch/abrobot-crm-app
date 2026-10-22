@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unsubscribe</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="robots" content="noindex, nofollow">
+<!--
+  The human half of unsubscribing. Email footers link here; this page POSTs to
+  the function that owns the list.
+
+  Why it is not served by the function itself: Supabase delivers every edge
+  function GET response as text/plain, so the confirm page those functions
+  returned showed the recipient raw HTML and no button (checked 13 Oct 2026).
+  One-click unsubscribe from the mail client (List-Unsubscribe-Post) still goes
+  straight to the function, because that is a POST and nothing is rendered.
+
+  A GET of this page changes nothing — link scanners prefetch email links, and
+  must never unsubscribe anyone. Only the button does.
+
+  ?list=nurture   follow-up emails a business sends to its enquirers
+  ?list=checkout  AbroBot CRM's own unfinished-upgrade reminders
+-->
+<style>
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f7f8fc;color:#28304d;}
+  .wrap{max-width:460px;margin:12vh auto;padding:32px 26px;background:#fff;border:1px solid #e6e9f2;border-radius:12px;text-align:center;}
+  h1{font-size:22px;margin:0 0 10px;color:#12172b;}
+  p{line-height:1.6;font-size:15px;}
+  button{background:#b45309;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-size:15px;cursor:pointer;}
+  button[disabled]{opacity:.6;cursor:wait;}
+  .muted{color:#5b6480;font-size:13px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">Unsubscribe?</h1>
+  <p id="msg">Loading…</p>
+  <p><button id="go" type="button" hidden>Yes, unsubscribe me</button></p>
+  <p class="muted">Trouble? Email <a href="mailto:contact@mnbresearch.com">contact@mnbresearch.com</a> and we'll remove you by hand.</p>
+</div>
+<script>
+(function () {
+  var FN = "https://pomsltnrxvbcafwtbtlc.supabase.co/functions/v1/";
+  var LISTS = {
+    nurture:  { fn: "nurture",           what: "follow-up emails from the business you enquired with" },
+    checkout: { fn: "checkout-recovery", what: "reminders about an unfinished AbroBot CRM upgrade" }
+  };
+  var q = new URLSearchParams(location.search);
+  var list = LISTS[q.get("list")];
+  var t = q.get("t") || "";
+  var title = document.getElementById("title"), msg = document.getElementById("msg"), go = document.getElementById("go");
+
+  if (!list || !/^[0-9a-f-]{36}$/i.test(t)) {
+    title.textContent = "That link isn't complete";
+    msg.textContent = "Please use the full link from the email, or email us and we'll unsubscribe you.";
+    return;
+  }
+  msg.textContent = "You'll stop receiving " + list.what + ".";
+  go.hidden = false;
+
+  go.addEventListener("click", function () {
+    go.disabled = true;
+    fetch(FN + list.fn + "?unsub=" + encodeURIComponent(t), { method: "POST", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok && b.ok !== false, b: b }; }); })
+      .then(function (x) {
+        title.textContent = (x.b && x.b.title) || (x.ok ? "You're unsubscribed" : "We couldn't process that");
+        msg.textContent = (x.b && x.b.message) || "";
+        go.hidden = true;
+      })
+      .catch(function () {
+        title.textContent = "We couldn't process that just now";
+        msg.textContent = "Please email contact@mnbresearch.com and we'll unsubscribe you straight away.";
+        go.disabled = false;
+      });
+  });
+})();
+</script>
+</body>
+</html>

@@ -4,8 +4,12 @@
 //
 // leads.score was NOT NULL but never written by anything, so every existing
 // lead sits at its column default. This backfills them, and can be re-run any
-// time weights change or as a scheduled refresh (engagement and intake
-// proximity both drift over time).
+// time weights change (engagement and intake proximity both drift over time).
+//
+// NOT SCHEDULED. Nothing in pg_cron or any migration calls this; it runs only
+// when an admin invokes it (JWT required, own org only). Scores therefore
+// drift between manual runs. Scheduling it would need a cron-secret path,
+// which this function deliberately does not have.
 //
 // Auth mirrors send-campaign: the caller sends the logged-in user's Supabase
 // access token, and may only rescore their own org. JWT verification stays ON.

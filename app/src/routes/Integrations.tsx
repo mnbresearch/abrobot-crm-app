@@ -55,6 +55,24 @@ const HOOK_SOURCES: { value: string; label: string; steps: string }[] = [
     steps: "Ask your JustDial account manager to enable lead push (API) to this URL, method POST. Check the first lead that arrives." },
   { value: "tradeindia", label: "TradeIndia",
     steps: "TradeIndia seller panel → My Inquiries → CRM / API integration → give this URL as the push endpoint. Check the first lead that arrives." },
+  // `whatsapp` has been in the lead_source enum since day one, and it is the
+  // ONLY source lead-webhook sends the WhatsApp auto-reply for (it checks the
+  // key's source, not the payload). Without it in this list there was no way
+  // to create such a key from the product, so the auto-reply could be switched
+  // on and could never fire. Twilio posts form-encoded From=whatsapp:+…, which
+  // lead-webhook reads natively. Meta's Cloud API webhook can point here
+  // directly too: lead-webhook answers Meta's GET hub.challenge handshake when
+  // hub.verify_token equals this capture key, and acknowledges delivery-status
+  // callbacks with 200 instead of treating them as failed captures.
+  //
+  // And the auto-reply goes out through Meta (sendWhatsAppText → Graph API)
+  // from the Phone Number ID saved on the WhatsApp card. Meta only delivers a
+  // free-form message inside a 24-hour window opened by the customer messaging
+  // THAT number — so a message received on a separate Twilio number does not
+  // open it, and Meta refuses the reply. The steps say so rather than
+  // promising an auto-reply the platform cannot deliver.
+  { value: "whatsapp", label: "WhatsApp",
+    steps: "Twilio: Console → Messaging → your WhatsApp sender → \"When a message comes in\" → paste this URL, method POST. Each message arrives with the sender's number, profile name and text. Meta Cloud API: in your Meta app → WhatsApp → Configuration, set Callback URL = this URL and Verify token = the part after key= (it starts with wh_), then subscribe to \"messages\". The auto-reply is sent through Meta from the number saved on the WhatsApp card, so it is only delivered to people who messaged that same number — not to people who wrote to a separate Twilio number." },
 ];
 const sourceLabel = (v: string) => HOOK_SOURCES.find((x) => x.value === v)?.label ?? v;
 
@@ -72,8 +90,23 @@ interface Endpoint {
  * other. There is deliberately no way to display a saved token, to anyone.
  */
 interface IntegrationStatus {
-  whatsapp: { configured: boolean; phone_id_set: boolean; display_number: string | null; autoreply: boolean };
-  telegram: { configured: boolean; chat_id_set: boolean; alerts_on: boolean };
+  whatsapp: {
+    configured: boolean; phone_id_set: boolean; display_number: string | null; autoreply: boolean;
+    /**
+     * The saved auto-reply message (agent_config.whatsapp_autoreply_text).
+     * Optional on purpose: a save-integration deployed before that column
+     * existed omits the key entirely, and `undefined` is how this screen tells
+     * "no custom message saved" (null) from "the server cannot store one yet".
+     */
+    autoreply_text?: string | null;
+    /** No token of this org's own, but the platform's credentials are serving it. */
+    using_platform_default?: boolean;
+  };
+  telegram: {
+    configured: boolean; chat_id_set: boolean; alerts_on: boolean;
+    /** No bot token of this org's own; alerts go out from the AbroBot bot. */
+    using_platform_default?: boolean;
+  };
   email: {
     own_key: boolean;
     nurture_on: boolean;
@@ -134,6 +167,14 @@ function StatusPill({
   );
 }
 
+// The server caps whatsapp_autoreply_text at 500 characters; the textarea
+// enforces the same so nothing is silently cut off on save.
+const AUTOREPLY_MAX = 500;
+const defaultAutoreply = (orgName?: string | null) =>
+  orgName?.trim()
+    ? `Thanks for your message — ${orgName.trim()} will get back to you shortly.`
+    : "Thanks for your message — we'll get back to you shortly.";
+
 // Sends the admin to the plan screen. Settings honours ?tab=, so this lands on
 // Plan & usage rather than the Industry tab.
 function navigateToPlan() {
@@ -178,6 +219,10 @@ export function Integrations() {
   const [waPhoneId, setWaPhoneId] = useState("");
   const [waNumber, setWaNumber] = useState("");
   const [waTestTo, setWaTestTo] = useState("");
+  // Auto-reply. Prefilled from status on load; until then the toggle is off
+  // and the text is the neutral default below, never another tenant's copy.
+  const [waAutoreply, setWaAutoreply] = useState(false);
+  const [waAutoreplyText, setWaAutoreplyText] = useState("");
   const [tgToken, setTgToken] = useState("");
   const [tgChat, setTgChat] = useState("");
   const [emKey, setEmKey] = useState("");
@@ -237,6 +282,17 @@ export function Integrations() {
         }
       }
       if (s?.whatsapp?.display_number) setWaNumber(s.whatsapp.display_number);
+      // The auto-reply is configuration, not a credential, so the form shows
+      // what is saved. A missing or empty saved text gets the neutral default,
+      // with the org's name written in literally — not a {brand} placeholder,
+      // because nothing on the send path is documented to substitute one.
+      setWaAutoreply(!!s?.whatsapp?.autoreply);
+      // Only a SAVED custom text fills the box. With none saved the box stays
+      // empty and shows the default as a placeholder: saving it empty stores
+      // null, so lead-webhook keeps using its own default (which uses the
+      // brand name and greets the sender by first name) instead of a frozen
+      // copy of this screen's wording.
+      setWaAutoreplyText((s?.whatsapp?.autoreply_text ?? "").trim());
       // Same treatment as the WhatsApp display number: these are values, not
       // credentials, so the form shows what is actually saved rather than an
       // empty box that reads as "not set".
@@ -431,12 +487,38 @@ export function Integrations() {
   const saveWhatsApp = async () => {
     setBusy(true);
     try {
+      // save_whatsapp reads token and phone_id the same way: "" keeps what is
+      // stored and the literal "-" clears it. The Phone Number ID box is
+      // always empty on load (it shows a "saved" placeholder, never the
+      // value), so sending it raw used to mean that saving a new display
+      // number with the box untouched wrote NULL over a working Phone Number
+      // ID and disconnected WhatsApp. Trimmed, so a stray space is not a value.
       await callFunction("save-integration", {
         action: "save_whatsapp",
-        token: waToken, phone_id: waPhoneId, display_number: waNumber,
+        token: waToken, phone_id: waPhoneId.trim(), display_number: waNumber,
       });
       setWaToken("");   // never keep a token in component state after saving
+      setWaPhoneId(""); // back to the "saved" placeholder, like the token
       toast.show("WhatsApp settings saved");
+      await load();
+    } catch (e) { toast.error((e as Error).message); }
+    setBusy(false);
+  };
+
+  const saveAutoreply = async () => {
+    const text = waAutoreplyText.trim();
+    // An empty box is valid: it means "use the standard greeting".
+    setBusy(true);
+    try {
+      // Only the auto-reply keys. token and phone_id are left out entirely
+      // rather than sent as "", so this button cannot touch the credentials
+      // whichever way the server reads an empty string.
+      await callFunction("save-integration", {
+        action: "save_whatsapp",
+        autoreply: waAutoreply,
+        autoreply_text: text === defaultAutoreply(org?.name) ? "" : text.slice(0, AUTOREPLY_MAX),
+      });
+      toast.show(waAutoreply ? "Auto-reply on" : "Auto-reply off");
       await load();
     } catch (e) { toast.error((e as Error).message); }
     setBusy(false);
@@ -457,10 +539,17 @@ export function Integrations() {
   const saveTelegram = async () => {
     setBusy(true);
     try {
+      // No `notify`. This sent notify: true on every save, so pressing Save
+      // here silently switched back on the "Telegram alert on every new
+      // record" setting an admin had turned off in Settings → AI Agent — the
+      // one place that switch is meant to live. Omitted, the server keeps
+      // whatever is stored. chat_id follows the token's rule: "" keeps the
+      // saved value, "-" clears it.
       await callFunction("save-integration", {
-        action: "save_telegram", bot_token: tgToken, chat_id: tgChat, notify: true,
+        action: "save_telegram", bot_token: tgToken, chat_id: tgChat.trim(),
       });
       setTgToken("");
+      setTgChat("");
       toast.show("Telegram settings saved");
       await load();
     } catch (e) { toast.error((e as Error).message); }
@@ -585,14 +674,20 @@ export function Integrations() {
               saving a token over a live one is how a working number breaks. */}
           {statusSettled && !statusKnown
             ? `We couldn't read your WhatsApp settings${statusError ? ` (${statusError})` : ""}, so this card can't tell you whether it's connected. Reload before changing anything — saving a token here replaces whatever is already saved.`
-            : status?.whatsapp.configured
-              ? "Connected. Your team can message records from the CRM, and inbound WhatsApp arrives as records."
+            : status?.whatsapp.configured || status?.whatsapp.using_platform_default
+              // This said "inbound WhatsApp arrives as records", which nothing
+              // on this card makes true. Saving a token here sets up SENDING
+              // only. Inbound messages become records when they are posted to
+              // a capture URL whose source is WhatsApp (lead-webhook, below) —
+              // and that same URL is what triggers the auto-reply.
+              ? "Connected for sending — your team can message records from the CRM. Incoming WhatsApp messages become records only when they are posted to a WhatsApp capture URL (see Capture URLs below)."
               : "Connect Meta's WhatsApp Cloud API so your team can message records from the CRM."}
           {" "}
           <StatusPill
             known={statusKnown}
-            on={!!status?.whatsapp.configured}
-            onLabel="connected"
+            on={!!(status?.whatsapp.configured || status?.whatsapp.using_platform_default)}
+            onLabel={!status?.whatsapp.configured && status?.whatsapp.using_platform_default
+              ? "connected (AbroBot default)" : "connected"}
             offLabel="not connected"
           />
         </p>
@@ -601,10 +696,11 @@ export function Integrations() {
           <label className="label" htmlFor="wa-phone-id">Phone Number ID</label>
           <input id="wa-phone-id" className="input" value={waPhoneId}
             onChange={(e) => setWaPhoneId(e.target.value)}
-            placeholder={status?.whatsapp.phone_id_set ? "•••••• (saved — type to replace)" : "e.g. 123456789012345"} />
+            placeholder={status?.whatsapp.phone_id_set ? "•••••• (saved — leave blank to keep)" : "e.g. 123456789012345"} />
           <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
             Meta Business → WhatsApp → API Setup. It's the long number under your test
-            or live phone number, not the phone number itself.
+            or live phone number, not the phone number itself. Leave blank to keep the
+            saved one; type <code>-</code> on its own to clear it.
           </p>
         </div>
 
@@ -634,7 +730,11 @@ export function Integrations() {
             onClick={() => void saveWhatsApp()} disabled={busy}>Save WhatsApp</button>
           <input className="input" style={{ maxWidth: 190 }} value={waTestTo}
             onChange={(e) => setWaTestTo(e.target.value)} placeholder="Test to +91…" />
-          <button className="btn" onClick={() => void testWhatsApp()} disabled={busy}>
+          {/* The test sends from YOUR saved number (save-integration test_whatsapp
+              needs your own token and Phone Number ID), so it is only offered
+              once those are saved — on the AbroBot default it would just error. */}
+          <button className="btn" onClick={() => void testWhatsApp()} disabled={busy || !status?.whatsapp.configured}
+            title={status?.whatsapp.configured ? undefined : "Save your own token and Phone Number ID to send a test"}>
             Send test
           </button>
         </div>
@@ -643,6 +743,53 @@ export function Integrations() {
           message. Outside that window you need an approved template — we pass Meta's
           error straight through rather than pretending it sent.
         </p>
+
+        {/* ── Auto-reply ───────────────────────────────────────────────────
+            whatsapp_autoreply has been read by lead-webhook since the
+            WhatsApp send path shipped, and save-integration has accepted it,
+            but no screen ever wrote it — so the feature existed and could not
+            be switched on. The conditions below are lead-webhook's, stated
+            as they are: WhatsApp capture URL, WhatsApp on the plan and under
+            the month's cap, and only a delivered reply is metered. */}
+        <div style={{ borderTop: "1px solid var(--border)", marginTop: 14, paddingTop: 14 }}>
+          <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+            <label className="row" style={{ cursor: "pointer", gap: 8 }}>
+              <input type="checkbox" checked={waAutoreply} disabled={busy || !statusKnown}
+                onChange={(e) => setWaAutoreply(e.target.checked)} />
+              <span style={{ fontWeight: 600 }}>Auto-reply to new WhatsApp enquiries</span>
+            </label>
+            <StatusPill
+              known={statusKnown}
+              on={!!status?.whatsapp.autoreply}
+              onLabel="auto-reply on"
+              offLabel="auto-reply off"
+            />
+          </div>
+          <div className="field" style={{ marginTop: 10 }}>
+            <label className="label" htmlFor="wa-autoreply">Message</label>
+            <textarea id="wa-autoreply" className="textarea" rows={3} maxLength={AUTOREPLY_MAX}
+              value={waAutoreplyText} disabled={busy || !statusKnown}
+              onChange={(e) => setWaAutoreplyText(e.target.value)} />
+            <p className="sub" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.7 }}>
+              {waAutoreplyText.length}/{AUTOREPLY_MAX}. Sent exactly as written — no placeholders
+              are filled in, so write your business name out in full. It answers the first message from a number
+              that isn't already a record, when that message arrives through a capture URL whose
+              source is <b>WhatsApp</b> — repeat messages from a known contact get no reply — and
+              only while WhatsApp is on your plan and this month's WhatsApp allowance is not used
+              up; each reply that is delivered counts as one WhatsApp message. It is sent through
+              Meta from the number saved above, and Meta only delivers it to someone who messaged
+              that same number in the last 24 hours.
+              {statusKnown && status?.whatsapp.autoreply_text === undefined && (
+                <> <b>The server hasn't been updated to store a custom message yet</b> — until it is,
+                switching this on sends the built-in greeting instead of the text above.</>
+              )}
+            </p>
+          </div>
+          <button className={`btn${busy ? " btn-busy" : ""}`}
+            onClick={() => void saveAutoreply()} disabled={busy || !statusKnown}>
+            Save auto-reply
+          </button>
+        </div>
       </Card>
 
       <Card title="Telegram alerts">
@@ -650,10 +797,25 @@ export function Integrations() {
           A ping the moment a record arrives.{" "}
           <StatusPill
             known={statusKnown}
-            on={!!status?.telegram.configured}
-            onLabel="connected"
+            // The platform bot can only deliver once a chat id is saved, so
+            // "using the default" without one is not connected.
+            on={!!(status?.telegram.configured || (status?.telegram.using_platform_default && status?.telegram.chat_id_set))}
+            onLabel={!status?.telegram.configured && status?.telegram.using_platform_default
+              ? "connected (AbroBot default)" : "connected"}
             offLabel="not connected"
+          />{" "}
+          <StatusPill
+            known={statusKnown}
+            on={!!status?.telegram.alerts_on}
+            onLabel="alerts on"
+            offLabel="alerts off"
           />
+        </p>
+        {/* Saving here no longer changes this switch (it used to force it on),
+            so say where it lives. */}
+        <p className="sub" style={{ fontSize: 12, marginTop: -4 }}>
+          Whether an alert goes out for every new record is the <b>Telegram alert on every new{" "}
+          {ui.leadNoun.toLowerCase()}</b> switch in <b>Settings → AI Agent</b>. Saving this card leaves that switch as it is.
         </p>
 
         <div className="field">
@@ -671,11 +833,12 @@ export function Integrations() {
           <label className="label" htmlFor="tg-chat">Chat ID</label>
           <input id="tg-chat" className="input" value={tgChat}
             onChange={(e) => setTgChat(e.target.value)}
-            placeholder={status?.telegram.chat_id_set ? "•••••• (saved — type to replace)" : "e.g. -1001234567890"} />
+            placeholder={status?.telegram.chat_id_set ? "•••••• (saved — leave blank to keep)" : "e.g. -1001234567890"} />
           <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
             Message <b>@userinfobot</b> on Telegram and it replies with your ID. For a
             group, add the bot to the group first — group IDs start with a minus sign.
             This is required; there is no sensible default for "where do your alerts go".
+            Leave blank to keep the saved one; type <code>-</code> on its own to clear it.
           </p>
         </div>
 
@@ -933,8 +1096,8 @@ export function Integrations() {
       {/* ── Inbound capture ───────────────────────────────────────────────── */}
       <Card title={`Capture URLs — send ${ui.leadNounPlural.toLowerCase()} in`}>
         <p className="sub" style={{ marginTop: -8 }}>
-          Point a website form, IndiaMART, JustDial, TradeIndia, a Google Ads lead form, or a
-          Zapier action (including Facebook Lead Ads) at one of these. Anything that arrives is
+          Point a website form, IndiaMART, JustDial, TradeIndia, a Google Ads lead form, incoming
+          WhatsApp via Twilio, or a Zapier action (including Facebook Lead Ads) at one of these. Anything that arrives is
           scored, assigned and alerted like any other record.
         </p>
 
@@ -992,8 +1155,10 @@ export function Integrations() {
 
         <p className="sub" style={{ fontSize: 12, marginTop: 12 }}>
           POST JSON with any of <code>name</code>, <code>email</code>, <code>phone</code>,{" "}
-          <code>message</code>. WhatsApp Cloud API and Twilio payloads are recognised
-          automatically, as are IndiaMART, JustDial, TradeIndia and Google Ads lead-form pushes.{" "}
+          <code>message</code>. Twilio WhatsApp posts and Meta Cloud API webhooks are recognised
+          automatically (Meta's verification handshake included), as are IndiaMART, JustDial,
+          TradeIndia and Google Ads lead-form pushes. Choose <b>WhatsApp</b> as the source for
+          WhatsApp messages — it is the only source the WhatsApp auto-reply answers.{" "}
           {HOOK_SOURCES.find((o) => o.value === hookSource)?.steps}{" "}
           Treat the URL as a password — anyone holding it can add records.
         </p>

@@ -84,7 +84,13 @@ export function Templates() {
     else { setLoadError(null); setRows((tpl.data as Template[]) ?? []); }
     // null, not false, when we genuinely do not know — the card below
     // distinguishes "off" from "unknown" rather than asserting.
-    setNurtureOn(cfg.error ? null : (cfg.data?.nurture_enabled ?? false));
+    //
+    // `=== true`, the nurture function's own test ("a missing config row is
+    // not consent"), and the same one Settings → AI Agent now uses for its
+    // checkbox. The two screens used to disagree about a missing row — one
+    // showed follow-up on, this one off — and only this one matched what is
+    // actually sent.
+    setNurtureOn(cfg.error ? null : cfg.data?.nurture_enabled === true);
     setLoading(false);
   };
 

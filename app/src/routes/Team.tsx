@@ -8,6 +8,13 @@ import type { MemberStatus, Profile, UserRole } from "../lib/types";
 // dropdown invited an org admin to promote their own user to it. Whether
 // or not RLS refuses the write, it should never be selectable here.
 const ROLES: UserRole[] = ["counsellor", "org_admin"];
+
+// Where an invitee signs in. Was `window.location.host`, so an admin on a
+// preview deployment or localhost told their colleague to sign in somewhere
+// that is gone tomorrow or exists only on one laptop. crm.mnbresearch.com is
+// the product domain named in the Terms (and the widget snippet's default).
+const APP_HOST = "crm.mnbresearch.com";
+
 const STATUSES: MemberStatus[] = ["pending", "active", "disabled"];
 
 interface Invite {
@@ -68,7 +75,9 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
     onChanged();
     // Says what actually happened. "Invite created" left people expecting an
     // email to have gone out.
-    toast.show(`Invite created for ${clean} — send them the link yourself`);
+    // "send them the link yourself" — there is no link to send. They sign in
+    // at the app with this address, and that is the whole step.
+    toast.show(`Invite created for ${clean} — no email was sent. Tell them to sign in at ${APP_HOST} with that address.`);
   };
 
   const revoke = async (id: string) => {
@@ -96,10 +105,19 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
   // admin told their colleague they were in, and the colleague was refused
   // when they tried to log in. The admin heard about it from the colleague.
   // The arithmetic is: seats already taken, plus everyone still to accept.
+  //
+  // What accept_invite actually checks (20260901090000): ACTIVE members only,
+  // at the moment the invitee signs in — `active_now + 1 > seat_cap` refuses.
+  // A pending invite holds nothing. So the copy below no longer says pending
+  // invites "count": they are counted here as a planning number, and the
+  // server lets in whoever signs in first while a seat is free.
   const seatsLimit = plan?.seatsLimit ?? null;
   const seatsUsed = plan?.seatsUsed ?? 0;
   const committed = seatsUsed + pending.length;
   const seatsFull = seatsLimit !== null && committed >= seatsLimit;
+  // Truly full: nobody else can join at all until someone is disabled or the
+  // plan grows. Distinct from "full once everyone pending accepts".
+  const seatsTaken = seatsLimit !== null && seatsUsed >= seatsLimit;
 
   return (
     <>
@@ -113,12 +131,18 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
             }}
           >
             <div style={{ fontWeight: 700, fontSize: 13 }}>
-              {seatsFull ? "⚠️ No seats left on your plan" : `${committed} of ${seatsLimit} seats used`}
+              {seatsTaken
+                ? "⚠️ No seats left on your plan"
+                : seatsFull
+                  ? "⚠️ Not enough seats for everyone invited"
+                  : `${committed} of ${seatsLimit} seats spoken for`}
             </div>
             <p className="sub" style={{ fontSize: 12.5, marginTop: 3 }}>
-              {seatsFull
-                ? `Your ${plan?.effective ?? "current"} plan allows ${seatsLimit} ${seatsLimit === 1 ? "person" : "people"}, and you have ${seatsUsed} active${pending.length ? ` plus ${pending.length} waiting to join` : ""}. You can still create an invite, but whoever you send it to will be turned away at sign-in until you upgrade — so tell them, or upgrade first.`
-                : `Active members and pending invites both count. ${seatsLimit - committed} left.`}
+              {seatsTaken
+                ? `Your ${plan?.effective ?? "current"} plan allows ${seatsLimit} ${seatsLimit === 1 ? "person" : "people"}, and all ${seatsUsed} ${seatsUsed === 1 ? "seat is" : "seats are"} taken by active members. You can still create an invite, but whoever you send it to will be turned away at sign-in until you upgrade or disable a member — so tell them, or make room first.`
+                : seatsFull
+                  ? `${seatsUsed} active and ${pending.length} waiting to join, on a plan of ${seatsLimit}. Seats are taken when someone signs in, not when they are invited — so the first ${seatsLimit - seatsUsed} to sign in get in, and anyone after that is turned away until you upgrade or disable a member.`
+                  : `${seatsUsed} active plus ${pending.length} waiting to join. A pending invite doesn't hold a seat — seats are taken when someone signs in — so this is what you will be using once everyone has. ${seatsLimit - committed} left.`}
             </p>
           </div>
         )}
@@ -147,10 +171,16 @@ function InviteCard({ onChanged }: { onChanged: () => void }) {
           </button>
         </div>
 
-        <p className="sub" style={{ fontSize: 12.5, marginTop: 10 }}>
-          <b>No email is sent — you need to tell them yourself.</b> This reserves their place.
-          Ask them to sign in at <b>{window.location.host}</b> using this exact address and they
-          join automatically, with no further step from you.
+        {/* "This reserves their place" was not true: accept_invite counts
+            active members only, so an invite reserves nothing (see the seat
+            note above). And "sign in" needed spelling out — sign-in is a
+            magic link (Login.tsx, signInWithOtp), so the one email they do
+            get is the one they ask for on that page. */}
+        <p className="sub" style={{ fontSize: 12.5, marginTop: 10, lineHeight: 1.7 }}>
+          <b>No email is sent — you need to tell them yourself.</b> Ask them to go to{" "}
+          <b>{APP_HOST}</b>, enter this exact address and click the sign-in link that arrives in
+          their inbox. They join your team automatically, as the role chosen here, with no further
+          step from you — as long as a seat is free when they do.
         </p>
 
         {/* Checked before the pending list, because an absent list is read as

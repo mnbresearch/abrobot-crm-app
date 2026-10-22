@@ -4,7 +4,9 @@
 # `X-Content-Type-Options` and `Referrer-Policy`: no HSTS, no CSP, no
 # X-Frame-Options. Every other product in the portfolio had at least HSTS.
 #
-# Cloudflare Pages reads this file from the publish root. Rules are matched
+# Cloudflare Pages reads this file from the publish root — site/, which
+# scripts/build-site.sh rebuilds from this repo-root copy. Edit THIS file, not
+# site/_headers. Rules are matched
 # per-path, most specific first; `/*` applies to everything.
 
 /*

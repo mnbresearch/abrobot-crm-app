@@ -54,6 +54,24 @@ jobs:
           fi
           echo "OK — no bundle points at a source map."
 
+      - name: Published directory — no source maps, allowlist only
+        run: |
+          # Cloudflare Pages publishes site/ (wrangler.toml). Until 14 Oct 2026
+          # it published the repo root, so every doc, migration and edge
+          # function source was a public URL. site/ is an allowlist built by
+          # scripts/build-site.sh; the root assets/ copy is a fallback. Neither
+          # may ever carry a source map.
+          MAPS=$(find site assets -type f -name '*.map' 2>/dev/null || true)
+          if [ -n "$MAPS" ]; then
+            echo "::error::Source maps in a published directory:"
+            echo "$MAPS"
+            exit 1
+          fi
+          [ -d site ] || { echo "::error::site/ is missing — run bash scripts/build-site.sh"; exit 1; }
+          grep -Eq '^pages_build_output_dir *= *"site"' wrangler.toml \
+            || { echo "::error::wrangler.toml must set pages_build_output_dir = \"site\""; exit 1; }
+          node --test tests/publish-allowlist.test.cjs
+
   edge-functions:
     name: Edge functions — typecheck
     runs-on: ubuntu-latest

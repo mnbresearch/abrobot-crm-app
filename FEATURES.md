@@ -1,9 +1,33 @@
-# What this system actually does — 24 September 2026
+# What this system actually does — 24 September 2026 (corrected 14 October 2026)
 
 A categorised inventory of every feature built to date, written against the
-code rather than against the roadmap. Twenty-one feature areas, fourteen edge
-functions, eight scheduled jobs, thirty-seven migrations, one embeddable
-widget.
+code rather than against the roadmap. Twenty-one feature areas, sixteen edge
+functions (fourteen when first written; `checkout-recovery` was added on
+13 October and `resend-events` on 14 October), eight scheduled jobs when first
+written, thirty-seven migrations at that time, one embeddable widget.
+
+> **Corrections, 14 October 2026.** Several statements below were true when
+> written and are not any more. Each is also corrected where it appears.
+>
+> - **`rescore-leads` has a caller.** Settings has a rescore
+>   action (`app/src/routes/Settings.tsx`, `callFunction("rescore-leads")`).
+> - **`assign_to` has a UI control.** Automations → "Assign to a specific
+>   member" (`app/src/routes/Automations.tsx`).
+> - **The REST API is rate limited.** `api/index.ts` calls `hit_rate_limit`
+>   per key and returns `x-ratelimit-*` / `retry-after` headers.
+> - **The four plain-SQL jobs have heartbeats.** `sync_cron_heartbeats()`
+>   (`20260924093000_job_monitoring_gaps.sql`) projects `cron.job_run_details`
+>   onto `job_heartbeats` for purge-archived, reconcile-webhooks,
+>   prune-webhook-deliveries and mark-lapsed-subscriptions.
+> - **Unsubscribe covers campaigns too.** One-off campaigns (`send-campaign`)
+>   honour the same `/unsubscribe?list=nurture` opt-out and the platform
+>   suppression list as nurture and checkout reminders; bounces and spam
+>   complaints are added to that list by the `resend-events` webhook.
+> - **Sixteen edge functions**, not fourteen (see the table below).
+> - **The legacy app is retired and the site is an allowlist.** Cloudflare
+>   Pages publishes only `site/` (built by `scripts/build-site.sh`); legacy.html,
+>   `abrobot-crm-site-v15/`, docs, SQL and source are no longer served. `/get`
+>   301-redirects to `/login`. See RELEASE-2026-10-14.md.
 
 The point of this document is to be able to answer, for any feature, three
 questions without opening a file: **does it run, what is it made of, and how
@@ -519,7 +543,11 @@ bands, non-numeric budget → 0 not NaN, intake proximity, `lost` = 0, and a
 breakdown-sums-to-score invariant. Good coverage of the maths, none of the
 write paths.
 
-## `rescore-leads` — built, deployed, documented, never called
+## `rescore-leads` — built, deployed, documented; now called from Settings
+
+> **Corrected 14 October 2026:** the paragraph below describes September. Settings
+> now calls it (`Settings.tsx`, `callFunction("rescore-leads")`), so admins can
+> refresh scores on demand. There is still no scheduled rescore.
 
 `app/src` contains **zero references to `rescore-leads`**. No button, no admin
 action, no cron entry. The only mentions anywhere are its own source, the
@@ -529,8 +557,7 @@ only), supports `dry_run`, pages by keyset with a 45-second wall-clock budget,
 and aborts with **no writes** if the activities read fails rather than risk
 zeroing everyone's engagement component. It is well-built dead code.
 
-**Status: Partially built** — the function is complete; the product has no way
-to invoke it.
+**Status: Working** (as of October) — invoked from Settings by an admin; not scheduled.
 
 ---
 
@@ -596,12 +623,12 @@ stage-changed, and every 15 minutes for time-based conditions.
 | `set_follow_up` | yes | yes |
 | `add_note` | yes | yes |
 | `notify_telegram` | yes | yes |
-| `assign_to` | **yes** | **no** |
+| `assign_to` | **yes** | **yes** (since October) |
 | `send_email_template` | **no — deliberate stub** | no |
 
-`assign_to` (assign to one named person) is fully implemented and unit-tested
-but has no control in the builder — reachable only by writing the `automations`
-row directly. `send_email_template` is in the type union and the DB enum but
+`assign_to` (assign to one named person) is fully implemented and unit-tested,
+and (corrected 14 October) now has a builder control — "Assign to a specific
+member", limited to active members. `send_email_template` is in the type union and the DB enum but
 refuses with `"send_email_template is not wired to the mailer"`, non-fatal:
 *"Unattended sending needs the unsubscribe and rate handling the nurture
 function already owns; duplicating it risks mailing a lead who opted out"*
@@ -620,8 +647,7 @@ the same lead, the same day.
 `*/15 * * * *`. No env secrets of its own; Telegram credentials are read inside
 `notify.ts`.
 
-**Status: Working.** Heavily hardened, with one honest gap (`send_email_template`)
-and one UI omission (`assign_to`).
+**Status: Working.** Heavily hardened, with one honest gap (`send_email_template`).
 
 **Verified by.** `_shared/automations.test.cjs` and `_shared/run-actions.test.cjs`.
 The latter is the strongest test in the repo: a fake postgrest client that
@@ -1157,7 +1183,7 @@ says so on screen rather than implying one went out. Getting the invite to the
 person is a manual step.
 
 There is also a live housekeeping item: `RUN-THIS-NEXT.md:409` records a
-machine-generated account, `audit_sec_1789801652_202348@gmail.com`, holding
+machine-generated account (`audit_sec_…@gmail.com` — see Team for the full address; it is no longer written in docs), holding
 **counsellor** access to the AbroBot org — which means real student names,
 phone numbers and full chat transcripts. The epoch in the name decodes to
 20 September. It is almost certainly residue from an automated security test.
@@ -1310,7 +1336,7 @@ you want from a monitor.
 
 **Status: Working with caveats.** Two, both structural:
 
-- **Four scheduled jobs are not watched by heartbeat.** `purge-archived`, `reconcile-webhooks`, `prune-webhook-deliveries` and `mark-lapsed-subscriptions` are plain SQL called directly by `cron.schedule`, have no `job_heartbeats` rows, and never route through `call_edge_function`. Detector (1) does not see them and detector (3) cannot. Their only cover is detector (2), pg_cron's own failure count — which catches a job that *errors*, not one that has been unscheduled or is silently doing nothing.
+- ~~**Four scheduled jobs are not watched by heartbeat.**~~ *Corrected 14 Oct: `sync_cron_heartbeats()` (20260924093000) now gives them heartbeats.* `purge-archived`, `reconcile-webhooks`, `prune-webhook-deliveries` and `mark-lapsed-subscriptions` are plain SQL called directly by `cron.schedule`, have no `job_heartbeats` rows, and never route through `call_edge_function`. Detector (1) does not see them and detector (3) cannot. Their only cover is detector (2), pg_cron's own failure count — which catches a job that *errors*, not one that has been unscheduled or is silently doing nothing.
 - **Nothing watches the watchman.** The watchdog survives an edge-function or HTTP outage because it is pure SQL on pg_cron. It cannot survive pg_cron itself dying, because it runs on pg_cron. The honest mitigation is an external ping, not a cleverer query.
 
 **Verified by.** `_shared/cron-auth.test.cjs` — roughly 40 assertions covering
@@ -1427,7 +1453,7 @@ with nothing saying so."*
 
 ---
 
-# The fourteen edge functions
+# The sixteen edge functions
 
 Deploy flags are the authoritative list in `scripts/deploy-all.sh`, which
 **refuses to run** if any directory under `supabase/functions/` is missing from
@@ -1440,7 +1466,7 @@ five days for the same reason.
 |---|---|---|---|---|
 | `chat-agent` | The AI chatbot; answers visitors, captures leads | `--no-verify-jwt` | `hit_rate_limit` 20/min per org+IP, org slug required with no default, 2000-char message cap | `widget.js` on customer sites |
 | `lead-webhook` | Public lead intake (forms, WhatsApp, Zapier, Meta) | `--no-verify-jwt` | `webhook_keys.key` query param (plaintext), `hit_rate_limit` 60/min, 32 KB body cap | Third-party senders |
-| `api` | Customer REST API | `--no-verify-jwt` | `resolve_api_key()` SHA-256 lookup + per-route scope check + `plan_allows_api()`. **No rate limit** | Customer systems |
+| `api` | Customer REST API | `--no-verify-jwt` | `resolve_api_key()` SHA-256 lookup + per-route scope check + `plan_allows_api()` + `hit_rate_limit` per key (`x-ratelimit-*` headers) | Customer systems |
 | `app-signup` | Marketing-site signup → lead in the `abrobot` org | `--no-verify-jwt` | `x-app-secret` header, constant-time, fails closed | `app.abrobot.ai` |
 | `billing-webhook` | Cashfree payment / refund / dispute events | `--no-verify-jwt` | HMAC-SHA256 over `timestamp + rawBody`, constant-time, fails closed on unset secret | Cashfree |
 | `run-automations` | Automation sweep + event dispatch | `--no-verify-jwt` | `requireCronOrMember()` — `x-cron-secret` or an active member's JWT | pg_cron every 15 min; `trg_notify_lead_change`; Automations "Test run" |
@@ -1451,7 +1477,9 @@ five days for the same reason.
 | `send-campaign` | One-off email to a filtered audience | JWT **on** | Supabase JWT + `org_admin`/`super_admin` only + `email_allowance()` | `Templates.tsx`, `LeadDetail.tsx` |
 | `save-integration` | Write-only credential storage and test sends | JWT **on** | Supabase JWT + admin role | `Integrations.tsx` |
 | `billing-checkout` | Create a Cashfree order | JWT **on** | Supabase JWT + admin role; price read server-side | `Settings.tsx` |
-| `rescore-leads` | Batch recompute `leads.score` | JWT **on** | Supabase JWT + active member, own org only | **Nothing.** No caller anywhere in `app/src` |
+| `rescore-leads` | Batch recompute `leads.score` | JWT **on** | Supabase JWT + active member, own org only | Settings → rescore (admin, on demand) |
+| `checkout-recovery` | Abandoned-checkout reminder emails + their unsubscribe | `--no-verify-jwt` | `requireCronOrMember()` + super-admin role check; the unsubscribe token for the opt-out path | pg_cron `abrobot-checkout-recovery` hourly; Platform screen |
+| `resend-events` | Resend bounce / spam-complaint webhook → platform suppression list | `--no-verify-jwt` | Svix signature over the raw body, ±5 min window; fails closed if `RESEND_WEBHOOK_SECRET` is unset | Resend |
 
 The `--no-verify-jwt` flags are load-bearing in both directions. Deploying
 `chat-agent`, `lead-webhook` or `app-signup` *without* the flag turns on JWT
@@ -1505,7 +1533,7 @@ untested backup is a hope, not a backup."*
 
 Eleven test files, all under `supabase/functions/_shared/`. CI
 (`.github/workflows/ci.yml`) runs them repo-wide, plus `tsc --noEmit`, a
-`vite build`, `deno check` on all fourteen functions, and a `pglast` parse check
+`vite build`, `deno check` on every function, and a `pglast` parse check
 on every migration and script.
 
 | File | Covers | Notable |
@@ -1547,9 +1575,9 @@ Distinct from things that are built and broken. These simply do not exist.
 - **No reconciliation for stuck payments.** A Cashfree webhook that never arrives leaves a `payments` row at `created` forever, and nothing sweeps for it.
 - **Invites send no email.** The screen says so, but getting the link to the invitee is manual.
 - **`send_email_template` is not an automation action.** Deliberate — unattended sending needs nurture's unsubscribe and rate handling.
-- **`assign_to` has no UI control**, though it is implemented and tested.
+- ~~**`assign_to` has no UI control**~~ — corrected 14 Oct: it has one (Automations).
 - **`admin_set_member` has no UI control**, though it is implemented and audited.
-- **`rescore-leads` has no caller at all.** Scores are never refreshed after intake.
+- ~~**`rescore-leads` has no caller at all.**~~ — corrected 14 Oct: Settings calls it on demand. There is still no scheduled rescore.
 - **The super-admin console cannot open a tenant's records.** Supporting a customer requires signing in as them.
 - **No merge tool for duplicates.** Dedupe no longer matches archived records, so re-contacting someone whose record was archived creates a new one; if both are later restored there is no way to combine them.
 - **No campaign attribution.** No `utm_*` columns anywhere, despite capture happening on customer marketing pages.
@@ -1560,22 +1588,22 @@ Distinct from things that are built and broken. These simply do not exist.
 
 **Platform and safety**
 
-- **No rate limiting on the public REST API.** `hit_rate_limit()` exists and is called from two places, neither of which is `api/index.ts`.
+- ~~**No rate limiting on the public REST API.**~~ — corrected 14 Oct: `api/index.ts` rate-limits per key via `hit_rate_limit()`.
 - **No domain allowlist for the chat widget.** `Access-Control-Allow-Origin: *` and an org slug that is public by construction.
 - **No cursor pagination on the API.** Offset only, documented as able to skip or repeat rows under concurrent writes.
 - **No DNS-rebinding defence on outbound webhooks.** The SSRF guard validates the literal address correctly; the real fix is resolving and pinning the IP in an edge function, outside Postgres.
-- **Four scheduled jobs have no heartbeat.** `purge-archived`, `reconcile-webhooks`, `prune-webhook-deliveries`, `mark-lapsed-subscriptions` are visible only through `cron.job_run_details`, which catches a job that errors, not one that has stopped.
+- ~~**Four scheduled jobs have no heartbeat.**~~ *Corrected 14 Oct: `sync_cron_heartbeats()` covers them.* `purge-archived`, `reconcile-webhooks`, `prune-webhook-deliveries`, `mark-lapsed-subscriptions` are visible only through `cron.job_run_details`, which catches a job that errors, not one that has stopped.
 - **Nothing watches the watchman.** The watchdog survives an HTTP or edge-function outage. It cannot survive pg_cron, because it runs on pg_cron. The honest mitigation is an external ping.
 - **No CDN monitoring.** If Cloudflare stops serving, every customer's widget and the app go dark with no alarm.
 - **`20260816120000_agent_config_secret_hardening.sql` Step 3 is not applied.** Plaintext credentials on `agent_config` are readable by any active org member with the service-role bypass out of the picture; this is dormant only because no org has a non-admin member yet. `system-health`'s `checkSecurity` exists to detect the moment that changes.
 - **Three RLS policies exist in no migration.** `super_all_leads`, `conversations_org` and `super_read_conversations` were created in the Supabase dashboard before migration history began. RESTRICTIVE policies neutralise them for soft delete; nothing prevents the same thing happening again on another table or verb.
-- **The frontend cutover is incomplete.** `_redirects` still routes eight paths to the legacy bundle, which still owns the marketing, pricing and trial flows.
-- **`abrobot-crm-site-v15/widget.js` is a second, older widget copy at a publicly reachable path.** It carries the XSS fix and is covered by the test suite, but it is a stale build served from the CDN.
+- ~~**The frontend cutover is incomplete.**~~ — corrected 14 Oct: the legacy rewrites are gone, legacy.html is no longer published, and `/get` 301-redirects to `/login`.
+- *Corrected 14 Oct: no longer publicly reachable — only `site/` is published.* - **`abrobot-crm-site-v15/widget.js` is a second, older widget copy at a publicly reachable path.** It carries the XSS fix and is covered by the test suite, but it is a stale build served from the CDN.
 
 **Open with a date**
 
 - **Meta payment method by 30 September.** Hard deadline, still open.
-- **A leftover test account holds counsellor access to live student records.** `audit_sec_1789801652_202348@gmail.com`, joined 20 September. Deliberately not removed — revoking access is the owner's call.
+- **A leftover test account holds counsellor access to live student records.** `audit_sec_…@gmail.com` (full address in Team), joined 20 September. Deliberately not removed — revoking access is the owner's call.
 - **~80 audit findings remain**, led by the unchecked-`{error}` sweep, then empty-vs-error states on six screens, then accessibility (~59 of 75 inputs have no programmatic label; `.pill-green` is 2.24:1 against WCAG AA).
 
 ---
@@ -1638,9 +1666,10 @@ on the CRM site plus RFC 8058 one-click headers.
 **Ships OFF and in dry-run.** Platform screen → "Abandoned-checkout reminders":
 enable, dry run, test send (sample data, configured test recipient only), log.
 
-**Not built:** Resend delivery/bounce webhooks (bounces are not yet added to
-`platform_email_suppressions` automatically); WhatsApp reminders (needs an
-approved Meta template).
+**Not built:** WhatsApp reminders (needs an approved Meta template).
+*(Corrected 14 Oct: the Resend bounce/complaint webhook now exists —
+`resend-events` adds hard bounces and spam complaints to
+`platform_email_suppressions`.)*
 
 **Also fixed alongside:** the nurture unsubscribe page was unusable — Supabase
 serves edge-function GETs as `text/plain`, so recipients saw raw HTML with no

@@ -1,0 +1,31 @@
+# AbroBot CRM — routing for crm.mnbresearch.com (Cloudflare Pages).
+#
+# This file is copied into site/, the publish directory, by
+# scripts/build-site.sh. Only the allowlisted files in site/ are served; the
+# rest of the repository (docs, SQL, scripts, app source, old bundles) is not.
+#
+# Order matters: Cloudflare Pages applies the FIRST matching rule. Real files
+# in site/ (product.html, pricing.html, widget.js, ...) are served before any
+# rule here, so they need no entry.
+#
+# ── The legacy app is retired (14 October 2026) ─────────────────────────────
+# /get, /onboarding, /myday, /priority, /compose, /analytics, /leaderboard and
+# /super used to be rewritten to legacy.html — the original bundle, which still
+# ran its own signup, pricing and password flows on this domain. legacy.html and
+# its bundles stay in the repository as history but are no longer published,
+# so those paths now fall through to the current app below.
+#
+# /get was the target of every "Sign up free" / "Get started" link on the
+# marketing pages and in llms.txt. Those now point at /login (the same place
+# the landing page's "Start free" goes); this keeps old links and bookmarks
+# working. 301 because the move is permanent.
+/get            /login          301
+
+# Browsers request /favicon.ico when a page declares no icon. Without this the
+# catch-all answered with the app shell (HTML, HTTP 200).
+/favicon.ico    /favicon.svg    301
+
+# ── Everything else: the app ─────────────────────────────────────────────────
+# Client-side routes (/login, /leads, /leads/:id, /settings, ...) need this so a
+# hard refresh does not 404.
+/*              /index.html     200

@@ -31,6 +31,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { applyTemplate, escapeHtml, textToHtml } from "../_shared/template.ts";
 import { fetchWithTimeout } from "../_shared/http.ts";
+import { loadSuppressed, normaliseEmail } from "../_shared/suppression.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -40,6 +41,13 @@ const admin = createClient(
 const PLATFORM_RESEND_KEY = Deno.env.get("RESEND_API_KEY") ?? "";
 const FROM_ADDRESS = Deno.env.get("NURTURE_FROM") || "hello@updates.mnbresearch.com";
 const FN_BASE = (Deno.env.get("SUPABASE_URL") || "") + "/functions/v1";
+// Where the footer "unsubscribe" link points — the same page nurture uses.
+// Supabase serves edge-function GETs as text/plain, so linking the footer
+// straight at the nurture function showed recipients a page of raw HTML with
+// no working button. The CRM-site page renders properly and POSTs back to the
+// function. List-Unsubscribe still targets the function directly: one-click
+// from the mail client is a POST and never renders anything.
+const SITE = Deno.env.get("CRM_BASE_URL") || "https://crm.mnbresearch.com";
 
 const MAX_RECIPIENTS = 2000;
 
@@ -182,6 +190,16 @@ Deno.serve(async (req) => {
     if (remaining !== null && remaining < 1) {
       return json({ error: "You have used this month's email allowance." }, 402);
     }
+    // A test is still real mail from a real sender; it honours the platform
+    // suppression list like everything else.
+    const testSup = await loadSuppressed(admin, [String(body.test_to)]);
+    if (testSup.error !== null) {
+      console.error("send-campaign: suppression list unreadable, refusing test:", testSup.error);
+      return json({ error: "Could not check the unsubscribe list just now. Nothing was sent — please try again." }, 503);
+    }
+    if (testSup.suppressed.has(normaliseEmail(body.test_to))) {
+      return json({ error: "That address has unsubscribed from our email, so the test was not sent." }, 422);
+    }
     const sample = {
       name: profile.full_name || "Sample Person",
       email: String(body.test_to),
@@ -189,12 +207,12 @@ Deno.serve(async (req) => {
     };
     const html = wrap(
       textToHtml(applyTemplate(bodyTpl, sample, brand)),
-      brand, contactUrl, `${FN_BASE}/nurture?unsub=preview`,
+      brand, contactUrl, `${SITE}/unsubscribe?list=nurture&t=preview`,
     );
     await sendEmail(key, from, String(body.test_to), replyTo,
       `[TEST] ${applyTemplate(subjectTpl, sample, brand)}`, html, `${FN_BASE}/nurture?unsub=preview`);
     // Metered like any other send, so "test" is not an unlimited side door.
-    await admin.rpc("consume_usage", { p_org_id: orgId, p_metric: "emails", p_amount: 1 });
+    await admin.rpc("record_usage", { p_org_id: orgId, p_metric: "emails", p_amount: 1 });
     return json({ ok: true, test: true, to: body.test_to });
   }
 
@@ -224,19 +242,40 @@ Deno.serve(async (req) => {
   const { data: leads, error: leadErr } = await q.limit(MAX_RECIPIENTS);
   if (leadErr) return json({ error: leadErr.message }, 500);
 
-  const recipients = leads ?? [];
+  // ── The platform suppression list ─────────────────────────────────────────
+  //
+  // nurture_opted_out above is this tenant's own list. platform_email_
+  // suppressions is everyone who unsubscribed from, bounced on or complained
+  // about mail from our sending domain — and every tenant on the platform key
+  // sends from that domain. One query for the whole batch; an unreadable list
+  // sends NOTHING, because mailing someone who asked us to stop is the failure
+  // with legal weight, and a retry a minute later costs nobody anything.
+  const sup = await loadSuppressed(admin, (leads ?? []).map((l) => l.email));
+  if (sup.error !== null) {
+    console.error("send-campaign: suppression list unreadable, refusing:", sup.error);
+    return json({ error: "Could not check the unsubscribe list just now. Nothing was sent — please try again." }, 503);
+  }
+  const suppressedCount = (leads ?? []).filter((l) => sup.suppressed.has(normaliseEmail(l.email))).length;
+  const recipients = (leads ?? []).filter((l) => !sup.suppressed.has(normaliseEmail(l.email)));
 
   // ── count_only: let the UI show the number before anything is sent ────────
   if (body.count_only) {
     return json({
       ok: true, count_only: true, matched: recipients.length,
-      capped: recipients.length >= MAX_RECIPIENTS,
+      // Shown so the number on the confirm screen adds up: these matched the
+      // audience but will not be mailed.
+      ...(suppressedCount ? { suppressed: suppressedCount } : {}),
+      capped: recipients.length + suppressedCount >= MAX_RECIPIENTS,
       remaining,
       sample: recipients.slice(0, 3).map((l) => l.email),
     });
   }
   if (recipients.length === 0) {
-    return json({ error: "No one matches that audience — nothing was sent." }, 422);
+    return json({
+      error: suppressedCount
+        ? "Everyone in that audience has unsubscribed from our email — nothing was sent."
+        : "No one matches that audience — nothing was sent.",
+    }, 422);
   }
 
   if (remaining !== null && recipients.length > remaining) {
@@ -255,7 +294,8 @@ Deno.serve(async (req) => {
   for (const l of recipients) {
     try {
       const unsubUrl = `${FN_BASE}/nurture?unsub=${l.nurture_token}`;
-      const html = wrap(textToHtml(applyTemplate(bodyTpl, l, brand)), brand, contactUrl, unsubUrl);
+      const unsubPage = `${SITE}/unsubscribe?list=nurture&t=${l.nurture_token}`;
+      const html = wrap(textToHtml(applyTemplate(bodyTpl, l, brand)), brand, contactUrl, unsubPage);
       await sendEmail(key, from, l.email, replyTo,
         applyTemplate(subjectTpl, l, brand), html, unsubUrl);
 
@@ -272,12 +312,13 @@ Deno.serve(async (req) => {
   // Meter what actually left, not what was attempted. A bounce at Resend is
   // not something to bill a customer's allowance for.
   if (sent > 0) {
-    await admin.rpc("consume_usage", { p_org_id: orgId, p_metric: "emails", p_amount: sent });
+    await admin.rpc("record_usage", { p_org_id: orgId, p_metric: "emails", p_amount: sent });
   }
 
   return json({
     ok: true,
     matched: recipients.length,
+    ...(suppressedCount ? { suppressed: suppressedCount } : {}),
     sent,
     errors: errors.slice(0, 20),
     // Named, not enforced. If the errors above are 403s, this is why.

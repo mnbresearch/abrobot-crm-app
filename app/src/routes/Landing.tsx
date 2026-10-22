@@ -443,7 +443,7 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
       </section>
 
       <footer className="lp-wrap lp-foot">
-        <span>© {new Date().getFullYear()} MNB Research</span>
+        <span>© {new Date().getFullYear()} AbroBot Technologies Private Limited — an MNB Research venture</span>
         <nav className="lp-foot-links" aria-label="Footer">
           <a href="/product">Product</a>
           <a href="/pricing">Pricing</a>

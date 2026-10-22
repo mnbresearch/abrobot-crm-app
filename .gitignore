@@ -23,3 +23,6 @@ vite.config.ts.timestamp-*
 .env
 .env.*
 !.env.example
+
+# Stray build scratch directories (build-site.sh now builds in $TMPDIR).
+.site-build*/

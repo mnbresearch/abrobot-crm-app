@@ -1,3 +1,8 @@
+> **Superseded (14 October 2026) — see [RELEASE-2026-10-14.md](RELEASE-2026-10-14.md) / [FEATURES.md](FEATURES.md).**
+> Kept unchanged below as history. Do not follow its steps: the deploy procedure is
+> now `bash scripts/deploy-all.sh`, Cloudflare Pages publishes only `site/`, and the
+> legacy app (legacy.html, /get) is retired.
+
 # 29 September — the front door
 
 `/` rendered the sign-in form. Anyone arriving from a link, a search result or
@@ -133,8 +138,8 @@ by probing the running system, not by assumption:
 
 ## First signal on the capture change
 
-A new enquiry arrived **4 hours after the deploy**: `dennishk1985@gmail.com`,
-captured by the chat agent, **6 messages**. Worth noting because the pattern
+A new enquiry arrived **4 hours after the deploy** (a real enquirer — address
+removed from this doc on 14 Oct 2026; it is in the CRM), captured by the chat agent, **6 messages**. Worth noting because the pattern
 this change targeted was one-message conversations that never convert — before
 it, 97 of 139 conversations were a single message. This one ran to six and gave
 an address.
@@ -401,7 +406,7 @@ own work" — the first pass found real problems, and so did the second.
 
 ## 1. 🔴 A leftover test account has live access to student records
 
-**Team → `audit_sec_1789801652_202348@gmail.com` · counsellor · active ·
+**Team → `audit_sec_…@gmail.com` (full address in Team) · counsellor · active ·
 joined 3 days ago.** Machine-generated name, epoch decodes to 20 September —
 almost certainly residue from an automated security test. It holds
 **counsellor** access to real student names, phone numbers and full chat

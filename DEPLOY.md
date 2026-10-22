@@ -1,3 +1,8 @@
+> **Superseded (14 October 2026) — see [RELEASE-2026-10-14.md](RELEASE-2026-10-14.md) / [FEATURES.md](FEATURES.md).**
+> Kept unchanged below as history. Do not follow its steps: the deploy procedure is
+> now `bash scripts/deploy-all.sh`, Cloudflare Pages publishes only `site/`, and the
+> legacy app (legacy.html, /get) is retired.
+
 # Deploying AbroBot CRM
 
 Two independent halves. Deploy them separately — that separation is what lets

@@ -70,8 +70,17 @@ The flags are not interchangeable:
 Cashfree dashboard → **Developers → Webhooks → Add**
 
 - **URL:** `https://pomsltnrxvbcafwtbtlc.supabase.co/functions/v1/billing-webhook`
-- **Events:** `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_FAILED_WEBHOOK`,
-  `PAYMENT_USER_DROPPED_WEBHOOK`
+- **Events — subscribe to ALL of these** (corrected 14 October 2026; this
+  list used to stop at the first three, which meant refunds and chargebacks
+  never revoked a plan):
+  - `PAYMENT_SUCCESS_WEBHOOK` — the only event that grants a plan
+  - `PAYMENT_FAILED_WEBHOOK`
+  - `PAYMENT_USER_DROPPED_WEBHOOK`
+  - `REFUND_STATUS_WEBHOOK` — a successful refund revokes the plan it paid for
+  - the dispute (chargeback) webhooks: `DISPUTE_CREATED`, `DISPUTE_UPDATED`,
+    `DISPUTE_CLOSED` (Cashfree may label them `DISPUTE_*_WEBHOOK` in the
+    dashboard). Only a dispute the merchant LOSES or ACCEPTS revokes; a newly
+    opened or won dispute changes nothing — see `billing-webhook/index.ts`.
 
 Use Cashfree's **Test webhook** button. Expect `200 {"received":true,...}`.
 
@@ -112,7 +121,7 @@ The webhook:
 |---|---|
 | Fails **closed** | No secret configured rejects every webhook rather than accepting forged ones |
 | Verifies **raw bytes** | Re-serialising parsed JSON changes whitespace and key order; the signature would never match |
-| 5-minute replay window | A captured request cannot be replayed later |
+| 15-minute replay window | A captured request cannot be replayed later. 15, not the more common 5, because Cashfree retries a failed delivery with the ORIGINAL timestamp, so a 5-minute window rejected later retries and lost payments (`MAX_WEBHOOK_AGE_SECONDS` in `_shared/cashfree.ts`); idempotency is what actually stops a replay granting twice |
 | Constant-time compare | A fast-exit compare leaks the signature byte by byte |
 | Idempotent | Cashfree retries until it gets a 2xx; a retry must not extend a plan twice |
 | 500 on grant failure | Cashfree retries, so a taken payment is never left ungranted |

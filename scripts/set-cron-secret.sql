@@ -40,22 +40,33 @@
 -- Two places must hold the SAME value, and the value must never be pasted into
 -- a chat window or committed.
 --
---   1. Run PART 1 below. It generates a random secret, stores it, and prints
---      it once. Copy that value.
+--   1. Run PART 1 below. If no secret is stored yet it generates a random one
+--      and stores it; either way it prints the stored value. Copy that value.
+--      PART 1 NEVER replaces an existing secret (on conflict do nothing): an
+--      earlier version rotated it on every run, which silently broke every
+--      scheduled job until the dashboard secret was updated to match.
 --
 --   2. Supabase Dashboard → Edge Functions → Secrets → Add new secret
 --        Name:  CRON_SECRET
 --        Value: (paste)
 --      Save.
 --
---   3. Redeploy the three functions so they pick the secret up:
---        supabase functions deploy run-automations --no-verify-jwt
---        supabase functions deploy nurture         --no-verify-jwt
---        supabase functions deploy system-health
+--   3. Redeploy the functions so they pick the secret up. ALL of them need
+--      --no-verify-jwt: pg_cron sends no Supabase JWT, so deploying without
+--      the flag makes the platform reject every scheduled call (401) before
+--      the cron-secret check even runs. (bash scripts/deploy-all.sh does this
+--      for every function with the right flag.)
+--        supabase functions deploy run-automations   --no-verify-jwt
+--        supabase functions deploy nurture           --no-verify-jwt
+--        supabase functions deploy system-health     --no-verify-jwt
+--        supabase functions deploy checkout-recovery --no-verify-jwt
 --
 --   4. Run PART 2 to confirm the loop closed. Wait for :00, :15, :30 or :45.
 --
--- If you would rather choose the value yourself, skip PART 1 and run:
+-- To ROTATE the secret deliberately (or choose the value yourself), skip
+-- PART 1 and run the update below, then immediately put the same value in the
+-- dashboard and redeploy as in step 3 — until both match, every scheduled job
+-- is refused:
 --   update public.app_settings set value = 'your-secret', updated_at = now()
 --    where key = 'cron_secret';
 
@@ -68,13 +79,17 @@
 
 insert into public.app_settings (key, value, updated_at)
 values ('cron_secret', encode(gen_random_bytes(32), 'hex'), now())
-on conflict (key) do update
-  set value = encode(gen_random_bytes(32), 'hex'),
-      updated_at = now();
+on conflict (key) do nothing;
+
+-- The 20260903140000 placeholder counts as "no secret". Replace ONLY that —
+-- a real value is never touched by this file.
+update public.app_settings
+   set value = encode(gen_random_bytes(32), 'hex'), updated_at = now()
+ where key = 'cron_secret'
+   and value = 'REPLACE_WITH_YOUR_CRON_SECRET';
 
 -- COPY THIS VALUE into the Supabase dashboard as CRON_SECRET.
--- It is shown here and nowhere else. If you lose it, re-run PART 1 — it
--- generates a fresh one, and you simply update the dashboard to match.
+-- Re-running PART 1 shows the SAME stored value again; it does not rotate it.
 select 'COPY THIS INTO Edge Functions → Secrets → CRON_SECRET' as instruction,
        value as cron_secret
   from public.app_settings
