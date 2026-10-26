@@ -27,18 +27,38 @@ export function Reports() {
   const [range, setRange] = useState<string>("90");
   const [team, setTeam] = useState<Profile[]>([]);
   const [teamError, setTeamError] = useState<string | null>(null);
+  const [allLeadsLoaded, setAllLeadsLoaded] = useState<Lead[] | null>(null);
+  const [loadingAllLeads, setLoadingAllLeads] = useState(false);
+  const [allLeadsProgress, setAllLeadsProgress] = useState<{ done: number; total: number | null } | null>(null);
   const toast = useToast();
+
+  const loadCompleteDataset = async () => {
+    if (!org) return;
+    setLoadingAllLeads(true);
+    try {
+      const { leads: all, error: fetchErr } = await fetchAllLeads(org.id, {
+        onProgress: (done, total) => setAllLeadsProgress({ done, total }),
+      });
+      if (fetchErr) {
+        toast.error(`Could not load full dataset: ${fetchErr}`);
+        return;
+      }
+      setAllLeadsLoaded(all);
+      toast.show(`Loaded all ${all.length.toLocaleString("en-IN")} historical records into reports`);
+    } catch (e) {
+      toast.error(`Could not load full dataset: ${(e as Error).message}`);
+    } finally {
+      setLoadingAllLeads(false);
+      setAllLeadsProgress(null);
+    }
+  };
+
+  const activeDataset = allLeadsLoaded ?? leads;
 
   useEffect(() => {
     if (!org) return;
     void supabase.from("profiles").select("*").eq("org_id", org.id)
       .then(({ data, error: teamErr }) => {
-        // The error was dropped, so a failed read produced an empty team — and
-        // the leaderboard below is built by mapping over that array. An entire
-        // sales team rendered as a blank table headed "🏆 Team leaderboard",
-        // which reads as "nobody has closed anything", not as a failed request.
-        // The export also resolves owner names from it, so every row's owner
-        // column silently became "(removed user)".
         if (teamErr) { setTeamError(teamErr.message); return; }
         setTeamError(null);
         setTeam((data as Profile[]) ?? []);
@@ -46,10 +66,10 @@ export function Reports() {
   }, [org]);
 
   const scoped = useMemo(() => {
-    if (range === "all") return leads;
+    if (range === "all") return activeDataset;
     const cutoff = Date.now() - Number(range) * 86400000;
-    return leads.filter((l) => new Date(l.created_at).getTime() >= cutoff);
-  }, [leads, range]);
+    return activeDataset.filter((l) => new Date(l.created_at).getTime() >= cutoff);
+  }, [activeDataset, range]);
 
   const wonKeys = useMemo(() => new Set(stages.filter((s) => s.is_won).map((s) => s.key)), [stages]);
   const lostKeys = useMemo(() => new Set(stages.filter((s) => s.is_lost).map((s) => s.key)), [stages]);
@@ -100,6 +120,45 @@ export function Reports() {
       })
       .sort((a, b) => b.won - a.won || b.total - a.total);
   }, [team, scoped, wonKeys, lostKeys]);
+
+  const conversionStats = useMemo(() => {
+    let won = 0;
+    let lost = 0;
+    const wonScores: number[] = [];
+    const lostScores: number[] = [];
+    const lostReasons: Record<string, number> = {};
+
+    scoped.forEach((l) => {
+      const isWon = wonKeys.has(keyOf(l));
+      const isLost = lostKeys.has(keyOf(l));
+      if (isWon) {
+        won++;
+        wonScores.push(l.score);
+      } else if (isLost) {
+        lost++;
+        lostScores.push(l.score);
+        if (l.lost_reason) {
+          const r = l.lost_reason.trim();
+          lostReasons[r] = (lostReasons[r] ?? 0) + 1;
+        }
+      }
+    });
+
+    const decided = won + lost;
+    const winRate = decided > 0 ? Math.round((won / decided) * 100) : null;
+    const avgWonScore = wonScores.length > 0 ? Math.round(wonScores.reduce((a, b) => a + b, 0) / wonScores.length) : null;
+    const avgLostScore = lostScores.length > 0 ? Math.round(lostScores.reduce((a, b) => a + b, 0) / lostScores.length) : null;
+
+    return {
+      won,
+      lost,
+      decided,
+      winRate,
+      avgWonScore,
+      avgLostScore,
+      topLostReasons: Object.entries(lostReasons).sort((a, b) => b[1] - a[1]).slice(0, 5),
+    };
+  }, [scoped, wonKeys, lostKeys]);
 
   // Export used to emit eight columns and call it a record. Everything that
   // makes a record worth keeping — the custom fields the industry pack defines,
@@ -296,10 +355,12 @@ export function Reports() {
           through everything server-side, so it is the one thing on this screen
           that is NOT limited to the loaded records. */}
       <TruncationNotice
-        loaded={leads.length}
+        loaded={activeDataset.length}
         total={totalLeads}
         noun={ui.leadNounPlural.toLowerCase()}
-        what="The charts and leaderboard below cover only these — the CSV export covers every record."
+        what={allLeadsLoaded ? "Complete historical dataset loaded into memory." : "The charts and leaderboard below cover only these — load all records or export CSV for the full set."}
+        onLoadMore={allLeadsLoaded ? undefined : () => void loadCompleteDataset()}
+        loadingMore={loadingAllLeads}
       />
 
       {teamError && <LoadError message={`Team could not be loaded: ${teamError}. The leaderboard below is empty for that reason, not because nobody has closed anything.`} />}
@@ -309,7 +370,7 @@ export function Reports() {
           <h1>Reports</h1>
           <p className="sub" style={{ marginTop: 2 }}>
             {scoped.length.toLocaleString("en-IN")} {ui.leadNounPlural.toLowerCase()} in range
-            {truncated ? ` · of ${(totalLeads ?? 0).toLocaleString("en-IN")} total` : ""}
+            {allLeadsLoaded ? " · Full history loaded" : truncated ? ` · of ${(totalLeads ?? 0).toLocaleString("en-IN")} total` : ""}
           </p>
         </div>
         <div className="spacer" />
@@ -323,6 +384,20 @@ export function Reports() {
               {r.label}
             </button>
           ))}
+          {!allLeadsLoaded && truncated && (
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={() => void loadCompleteDataset()}
+              disabled={loadingAllLeads}
+              title="Loads every historical record from the server so charts cover 100% of your data"
+            >
+              {loadingAllLeads
+                ? allLeadsProgress
+                  ? `Loading ${allLeadsProgress.done.toLocaleString("en-IN")}…`
+                  : "Loading all…"
+                : "⚡ Load all for analytics"}
+            </button>
+          )}
           <button
             className={`btn btn-sm${exporting ? " btn-busy" : ""}`}
             onClick={() => void exportCsv()}
@@ -335,6 +410,40 @@ export function Reports() {
                 : "Exporting…"
               : "⬇ Export CSV"}
           </button>
+        </div>
+      </div>
+
+      <div className="grid grid-3" style={{ gap: 12 }}>
+        <div className="card" style={{ padding: "14px 16px" }}>
+          <div className="sub" style={{ fontSize: 12, fontWeight: 600 }}>Pipeline Win Rate</div>
+          <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4, color: "var(--green)" }}>
+            {conversionStats.winRate !== null ? `${conversionStats.winRate}%` : "—"}
+          </div>
+          <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>
+            {conversionStats.won} won of {conversionStats.decided} decided deals
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: "14px 16px" }}>
+          <div className="sub" style={{ fontSize: 12, fontWeight: 600 }}>Predictive AI Score Delta</div>
+          <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4, color: accent }}>
+            {conversionStats.avgWonScore !== null ? `${conversionStats.avgWonScore}` : "—"}
+            <span style={{ fontSize: 14, fontWeight: 600, color: "var(--muted)" }}> vs {conversionStats.avgLostScore ?? "—"}</span>
+          </div>
+          <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>
+            Average score: Won deals vs Lost deals
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: "14px 16px" }}>
+          <div className="sub" style={{ fontSize: 12, fontWeight: 600 }}>Decided vs Active Pipeline</div>
+          <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4, color: "var(--ink)" }}>
+            {scoped.length - conversionStats.decided}
+            <span style={{ fontSize: 14, fontWeight: 600, color: "var(--muted)" }}> in progress</span>
+          </div>
+          <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>
+            {conversionStats.decided} resolved · {scoped.length} in range
+          </div>
         </div>
       </div>
 

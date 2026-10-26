@@ -245,10 +245,15 @@ export function useToast() {
 
 /** Score chip. Colour bands chosen to match the scoring model's intent:
  *  70+ is "call them now", 40–69 "worth working", below 40 "nurture". */
-export function ScoreChip({ score }: { score: number }) {
+export function ScoreChip({ score, onClick }: { score: number; onClick?: () => void }) {
   const color = score >= 70 ? "var(--green)" : score >= 40 ? "var(--amber)" : "var(--muted)";
   return (
-    <span className="score" title={`Lead score ${score}/100`}>
+    <span
+      className="score"
+      title={`Lead score ${score}/100${onClick ? " — click for AI score breakdown" : ""}`}
+      onClick={onClick}
+      style={onClick ? { cursor: "pointer" } : undefined}
+    >
       <span className="score-bar">
         <span className="score-fill" style={{ width: `${Math.max(0, Math.min(100, score))}%`, background: color }} />
       </span>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
-import { Card, Empty, LoadError, Modal, Spinner, timeAgo, useToast } from "../components/ui";
+import { Card, Empty, LoadError, Modal, ScoreChip, Spinner, timeAgo, useToast } from "../components/ui";
 import { CheckoutRecoveryCard, ProductAnalyticsCard } from "./AdminGrowth";
 
 /**
@@ -82,6 +82,7 @@ export function Admin() {
   const [plansError, setPlansError] = useState<string | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [editing, setEditing] = useState<OrgRow | null>(null);
+  const [inspecting, setInspecting] = useState<OrgRow | null>(null);
   // admin_set_member's UI. Kept here rather than on the tenant-facing Team
   // screen on purpose — see the comment above MemberModal.
   const [members, setMembers] = useState<OrgRow | null>(null);
@@ -237,7 +238,10 @@ export function Admin() {
                         : "—"}
                     </td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <button className="btn btn-sm" onClick={() => setEditing(o)}>Plan</button>
+                      <button className="btn btn-sm btn-ghost" onClick={() => setInspecting(o)}>
+                        🔍 Inspect
+                      </button>
+                      <button className="btn btn-sm" style={{ marginLeft: 6 }} onClick={() => setEditing(o)}>Plan</button>
                       <button className="btn btn-sm" style={{ marginLeft: 6 }} onClick={() => setMembers(o)}>
                         Members
                       </button>
@@ -365,6 +369,12 @@ export function Admin() {
           onClose={() => setMembers(null)}
           onDone={async () => { setMembers(null); await load(); }}
           toast={toast}
+        />
+      )}
+      {inspecting && (
+        <InspectOrgModal
+          org={inspecting}
+          onClose={() => setInspecting(null)}
         />
       )}
       {toast.node}
@@ -710,6 +720,162 @@ function PlanModal({
         <button className="btn btn-primary" disabled={busy} onClick={() => void apply()}>
           {busy ? "Applying…" : "Apply"}
         </button>
+      </div>
+    </Modal>
+  );
+}
+
+interface TenantLead {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  score: number;
+  stage_key: string | null;
+  stage: string;
+  created_at: string;
+}
+
+interface TenantAgentInfo {
+  agent_name?: string | null;
+  enabled?: boolean;
+  model?: string | null;
+  guardrail_strict_no_code?: boolean;
+  guardrail_anti_injection?: boolean;
+}
+
+function InspectOrgModal({
+  org,
+  onClose,
+}: {
+  org: OrgRow;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [leads, setLeads] = useState<TenantLead[]>([]);
+  const [agent, setAgent] = useState<TenantAgentInfo | null>(null);
+  const [keyCount, setKeyCount] = useState<number>(0);
+  const [fetchErr, setFetchErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadInspect() {
+      setLoading(true);
+      const [leadsRes, agentRes, keysRes] = await Promise.all([
+        supabase
+          .from("leads")
+          .select("id, name, email, phone, score, stage_key, stage, created_at")
+          .eq("org_id", org.org_id)
+          .order("created_at", { ascending: false })
+          .limit(8),
+        supabase
+          .from("agent_config")
+          .select("agent_name, enabled, model, guardrail_strict_no_code, guardrail_anti_injection")
+          .eq("org_id", org.org_id)
+          .maybeSingle(),
+        supabase
+          .from("webhook_keys")
+          .select("id", { count: "exact", head: true })
+          .eq("org_id", org.org_id)
+          .eq("active", true),
+      ]);
+      if (cancelled) return;
+      if (leadsRes.error) {
+        setFetchErr(leadsRes.error.message);
+      } else {
+        setLeads((leadsRes.data as TenantLead[]) ?? []);
+      }
+      setAgent(agentRes.data as TenantAgentInfo);
+      setKeyCount(keysRes.count ?? 0);
+      setLoading(false);
+    }
+    void loadInspect();
+    return () => { cancelled = true; };
+  }, [org.org_id]);
+
+  return (
+    <Modal title={`Tenant Overview — ${org.name}`} onClose={onClose} wide>
+      <div className="grid grid-2" style={{ gap: 12, marginBottom: 14 }}>
+        <div className="card" style={{ padding: 12 }}>
+          <div className="sub" style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>Workspace</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginTop: 4 }}>{org.name}</div>
+          <div className="sub" style={{ fontSize: 12.5, marginTop: 2 }}>
+            Slug: <code>{org.slug}</code> · Industry: <b>{org.industry ?? "general"}</b>
+          </div>
+          <div className="row row-wrap" style={{ marginTop: 8, gap: 6 }}>
+            <span className="pill pill-muted">Plan: {org.effective_plan}</span>
+            <span className={org.active ? "pill pill-green" : "pill pill-red"}>
+              {org.active ? "Active" : "Suspended"}
+            </span>
+            <span className="pill pill-muted">{org.members} team members</span>
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: 12 }}>
+          <div className="sub" style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>AI Agent &amp; Integrations</div>
+          <div style={{ fontSize: 14, fontWeight: 700, marginTop: 4 }}>
+            {agent?.agent_name || "AI Agent"} {agent?.enabled !== false ? "🟢 Online" : "🔴 Paused"}
+          </div>
+          <div className="sub" style={{ fontSize: 12.5, marginTop: 2 }}>
+            Model: <code>{agent?.model || "default (openai/gpt-oss-120b)"}</code>
+          </div>
+          <div className="row row-wrap" style={{ marginTop: 8, gap: 6 }}>
+            <span className="pill pill-green" title="Strict guardrails prevent code generation & prompt leaks">
+              🛡️ No-Code Guardrails {agent?.guardrail_strict_no_code !== false ? "Active" : "Off"}
+            </span>
+            <span className="pill pill-muted">
+              🔌 {keyCount} active webhook {keyCount === 1 ? "key" : "keys"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 10 }}>
+        <h3 style={{ fontSize: 14, marginBottom: 6 }}>Recent Records ({leads.length} of {org.records})</h3>
+        {loading ? (
+          <p className="sub">Loading recent records…</p>
+        ) : fetchErr ? (
+          <p style={{ color: "var(--red)", fontSize: 13 }}>Could not load records: {fetchErr}</p>
+        ) : leads.length === 0 ? (
+          <p className="sub">No records created yet in this workspace.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Contact</th>
+                  <th>Score</th>
+                  <th>Stage</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leads.map((l) => (
+                  <tr key={l.id} style={{ cursor: "default" }}>
+                    <td style={{ fontWeight: 600 }}>{l.name}</td>
+                    <td className="sub" style={{ fontSize: 12 }}>{l.email ?? l.phone ?? "—"}</td>
+                    <td><ScoreChip score={l.score} /></td>
+                    <td><span className="pill pill-muted">{l.stage_key ?? l.stage}</span></td>
+                    <td className="sub" style={{ fontSize: 12 }}>{timeAgo(l.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="row" style={{ justifyContent: "space-between", marginTop: 16 }}>
+        <a
+          className="btn btn-sm"
+          href={`https://crm.mnbresearch.com/?org=${encodeURIComponent(org.slug)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Test Chatbot Widget ↗
+        </a>
+        <button className="btn btn-primary" onClick={onClose}>Done</button>
       </div>
     </Modal>
   );

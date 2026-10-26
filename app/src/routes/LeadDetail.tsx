@@ -15,6 +15,7 @@ import {
   downloadErasureCertificate,
   type ConsentPreferences,
 } from "../lib/compliance";
+import { scoreLead, type ScoreResult } from "../lib/score";
 import type { Activity, Lead } from "../lib/types";
 
 // Activity types that mean someone actually reached the person. Only these
@@ -60,6 +61,9 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [erasureInput, setErasureInput] = useState("");
   const [erasing, setErasing] = useState(false);
   const [exportingSar, setExportingSar] = useState(false);
+  const [scoreModalOpen, setScoreModalOpen] = useState(false);
+  const [scoreResult, setScoreResult] = useState<ScoreResult | null>(null);
+  const [applyingScore, setApplyingScore] = useState(false);
   // null = not known (not read yet, or the read failed). Unknown leaves the
   // button usable — whatsapp-send enforces the plan itself and says why — but
   // a KNOWN "not included" stops someone writing a message that can only be
@@ -338,6 +342,50 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     if (!note.trim()) return;
     await log("note", note.trim());
     setNote("");
+  };
+
+  const openScoreModal = () => {
+    if (!lead) return;
+    const res = scoreLead({
+      email: lead.email,
+      phone: lead.phone,
+      budget_inr: lead.custom?.budget_inr ?? lead.custom?.budget,
+      target_country: (lead.custom?.target_country as string) ?? (lead.custom?.country as string),
+      course: (lead.custom?.course as string) ?? (lead.custom?.service as string),
+      course_level: (lead.custom?.course_level as string) ?? (lead.custom?.tier as string),
+      intake: (lead.custom?.intake as string) ?? (lead.custom?.timeline as string),
+      stage_key: lead.stage_key ?? lead.stage,
+      engagement_count: acts.length,
+      custom: lead.custom,
+    });
+    setScoreResult(res);
+    setScoreModalOpen(true);
+  };
+
+  const applyScore = async () => {
+    if (!lead || !scoreResult) return;
+    setApplyingScore(true);
+    const prev = lead.score;
+    const next = scoreResult.score;
+    const { error } = await supabase
+      .from("leads")
+      .update({ score: next, updated_at: new Date().toISOString() })
+      .eq("id", lead.id);
+    setApplyingScore(false);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    setLead({ ...lead, score: next });
+    await log("system", `AI lead score recalculated from ${prev} to ${next}/100.`);
+    toast.show(`Score updated to ${next}/100`);
+    setScoreModalOpen(false);
+  };
+
+  const quickLogCall = async (outcome: string) => {
+    if (!lead) return;
+    await log("call", outcome);
+    toast.show("Call logged");
   };
 
   if (loading) return <Spinner />;
@@ -833,11 +881,71 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     </Modal>
   );
 
+  const scoreModal = scoreModalOpen && scoreResult && (
+    <Modal title={`AI Lead Score — ${lead?.name} (${scoreResult.score}/100)`} onClose={() => setScoreModalOpen(false)}>
+      <p className="sub" style={{ marginTop: -6, marginBottom: 14 }}>
+        Transparent, deterministic evaluation calculated from verified contact channels, declared budget, program fit, timeline proximity, and interaction history.
+      </p>
+
+      <div className="card" style={{ background: "var(--bg-subtle)", padding: "14px 16px", marginBottom: 16 }}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>Current Score</div>
+            <div style={{ fontSize: 24, fontWeight: 800 }}>{lead?.score}/100</div>
+          </div>
+          <div style={{ fontSize: 24, opacity: 0.6 }}>➔</div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>Calculated Score</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: scoreResult.score >= 70 ? "var(--green)" : scoreResult.score >= 40 ? "var(--amber)" : "var(--muted)" }}>
+              {scoreResult.score}/100
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="stack" style={{ gap: 10 }}>
+        {scoreResult.items.map((item) => (
+          <div key={item.key} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+            <div className="row" style={{ justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+              <span style={{ fontWeight: 600 }}>{item.label}</span>
+              <span className="mono" style={{ fontWeight: 700 }}>
+                {item.points} / {item.max} pts
+              </span>
+            </div>
+            <div className="score-bar" style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}>
+              <div
+                style={{
+                  height: "100%",
+                  width: `${item.max > 0 ? Math.round((item.points / item.max) * 100) : 0}%`,
+                  background: item.points === item.max ? "var(--green)" : item.points > 0 ? "var(--amber)" : "var(--muted)",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
+            <div className="sub" style={{ fontSize: 12, marginTop: 4 }}>{item.detail}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+        <button className="btn" onClick={() => setScoreModalOpen(false)}>Close</button>
+        <button
+          className="btn btn-primary"
+          onClick={() => void applyScore()}
+          disabled={applyingScore || lead?.score === scoreResult.score}
+        >
+          {applyingScore ? "Updating…" : lead?.score === scoreResult.score ? "Score is current" : `Apply score (${scoreResult.score}/100)`}
+        </button>
+      </div>
+    </Modal>
+  );
+
   return (
     <div className="stack">
       {waModal}
       {emailModal}
       {complianceModal}
+      {scoreModal}
       {detailsOpen && (
         <EditLeadDetails
           lead={lead}
@@ -856,7 +964,7 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
           <h1>{lead.name}</h1>
           <div className="row row-wrap" style={{ marginTop: 7 }}>
             <StagePill stageKey={stageKey} stages={stages} />
-            <ScoreChip score={lead.score} />
+            <ScoreChip score={lead.score} onClick={openScoreModal} />
             <span className="pill pill-muted">via {lead.source}</span>
             {lead.nurture_opted_out && <span className="pill pill-red">Unsubscribed</span>}
             {consentPrefs.opt_out_whatsapp && (
@@ -1104,10 +1212,54 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
       </div>
 
       <Card title="Activity">
+        <div style={{ marginBottom: 14 }}>
+          <div className="sub" style={{ fontSize: 12, fontWeight: 600, marginBottom: 7 }}>
+            ⚡ 1-Click Call Outcome Log:
+          </div>
+          <div className="row row-wrap" style={{ gap: 6 }}>
+            <button
+              className="btn btn-sm"
+              style={{ padding: "4px 9px", fontSize: 12 }}
+              onClick={() => void quickLogCall("Connected — Interested; follow-up discussion scheduled.")}
+              title="Logs call activity and refreshes last contacted date"
+            >
+              📞 Connected (Interested)
+            </button>
+            <button
+              className="btn btn-sm"
+              style={{ padding: "4px 9px", fontSize: 12 }}
+              onClick={() => void quickLogCall("Connected — Requested callback later.")}
+            >
+              📞 Callback Later
+            </button>
+            <button
+              className="btn btn-sm"
+              style={{ padding: "4px 9px", fontSize: 12 }}
+              onClick={() => void quickLogCall("No Answer — Ringing, no response.")}
+            >
+              📵 No Answer
+            </button>
+            <button
+              className="btn btn-sm"
+              style={{ padding: "4px 9px", fontSize: 12 }}
+              onClick={() => void quickLogCall("Busy — Number busy on another call.")}
+            >
+              ⏳ Busy
+            </button>
+            <button
+              className="btn btn-sm"
+              style={{ padding: "4px 9px", fontSize: 12 }}
+              onClick={() => void quickLogCall("Wrong Number / Invalid contact.")}
+            >
+              ❌ Wrong Number
+            </button>
+          </div>
+        </div>
+
         <div className="row" style={{ gap: 9, marginBottom: 15 }}>
           <input
             className="input"
-            placeholder="Add a note…"
+            placeholder="Add a custom note…"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") void addNote(); }}

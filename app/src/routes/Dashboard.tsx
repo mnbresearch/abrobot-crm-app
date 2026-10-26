@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, PieChart, Pie, Cell } from "recharts";
 import { useApp, useLeads, useStageCounts } from "../lib/store";
+import { supabase } from "../lib/supabase";
 import { computeKpi } from "../lib/industries";
 import type { KpiDef } from "../lib/industries";
 import { AnimatedNumber, Card, Empty, ScoreChip, Skeleton, StagePill, timeAgo, LoadError, TruncationNotice } from "../components/ui";
@@ -52,6 +53,26 @@ function exactKpi(def: KpiDef, counts: Record<string, number>, stages: { key: st
 export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
   const { org, ui, stages, isAdmin } = useApp();
   const { leads, loading, error: leadsError, reload, truncated, totalLeads } = useLeads(org?.id);
+  const [securityStats, setSecurityStats] = useState<{ total: number; latestFlag: string | null } | null>(null);
+
+  useEffect(() => {
+    if (!org?.id) return;
+    let cancelled = false;
+    void supabase
+      .from("conversations")
+      .select("id, security_flag")
+      .eq("org_id", org.id)
+      .not("security_flag", "is", null)
+      .limit(100)
+      .then(({ data, error }) => {
+        if (cancelled || error || !data) return;
+        setSecurityStats({
+          total: data.length,
+          latestFlag: data[0]?.security_flag ?? null,
+        });
+      });
+    return () => { cancelled = true; };
+  }, [org?.id]);
 
   const stageMeta = useMemo(
     () => stages.map((s) => ({ key: s.key, is_won: s.is_won, is_lost: s.is_lost })),
@@ -118,6 +139,41 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
       {/* Both render nothing when there's nothing to say. */}
       <HealthCard />
       <SetupChecklist navigate={navigate} />
+
+      {securityStats && securityStats.total > 0 && (
+        <div
+          className="card"
+          style={{
+            background: "linear-gradient(135deg, rgba(16, 185, 129, 0.05), rgba(59, 130, 246, 0.05))",
+            borderLeft: "4px solid var(--green)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 12,
+            padding: "12px 18px",
+          }}
+        >
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <span style={{ fontSize: 24 }}>🛡️</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                AI Cybersecurity Shield Active · {securityStats.total} {securityStats.total === 1 ? "Probe" : "Probes"} Deflected
+              </div>
+              <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>
+                Malicious C++ code queries &amp; prompt injection attacks intercepted at gateway. Zero LLM leakage.
+              </div>
+            </div>
+          </div>
+          <button
+            className="btn btn-sm btn-ghost"
+            onClick={() => navigate("/conversations")}
+            style={{ fontWeight: 600, fontSize: 12 }}
+          >
+            Review Deflected Chats →
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-kpi stagger">
         {ui.kpis.map((k) => {
