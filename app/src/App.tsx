@@ -26,6 +26,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { CreateOrg } from "./routes/CreateOrg";
 import { ShortcutsHelp } from "./components/ShortcutsHelp";
 import { CookieBanner } from "./components/CookieBanner";
+import { CompulsoryUpgradePaywall } from "./components/CompulsoryUpgradePaywall";
 import { useTheme } from "./lib/theme";
 
 // Routes mirror the legacy app's URLs so both frontends can serve the same
@@ -66,10 +67,13 @@ const NAV: NavItem[] = [
 export default function App() {
   const {
     loading, session, profile, org, ui, isAdmin, isSuperAdmin, needsOnboarding,
-    loadError, signOut, refresh,
-  } = useApp();   // plan is read by <PlanPill/> from the same context
+    loadError, signOut, refresh, plan,
+  } = useApp();
   const { path, navigate } = useRoute();
   const { theme, cycle, resolved } = useTheme();
+
+  // ── 7-day demo compulsory upgrade bypass for super admin ────────────────
+  const [bypassedPaywall, setBypassedPaywall] = useState(false);
 
   // ── mobile drawer ────────────────────────────────────────────────────────
   const [navOpen, setNavOpen] = useState(false);
@@ -244,6 +248,17 @@ export default function App() {
 
   if (needsOnboarding) return <Onboarding onDone={() => { void refresh(); navigate("/"); }} />;
 
+  // ── Strict 7-Day Demo Compulsory Upgrade Paywall ─────────────────────────
+  // Demo accounts are strictly active for 7 days with 0 grace days. Once
+  // expired, workspace access is blocked until upgraded to a paid plan.
+  const isDemo = !!(org?.custom?.is_demo || plan?.isDemo);
+  const mustUpgrade = !!(org?.custom?.must_upgrade || plan?.mustUpgrade);
+  const isExpired = !!plan?.isExpired;
+
+  if ((isDemo || mustUpgrade) && isExpired && !bypassedPaywall) {
+    return <CompulsoryUpgradePaywall onBypass={() => setBypassedPaywall(true)} />;
+  }
+
   const leadParams = match("/leads/:id", path);
   const visible = NAV.filter((n) =>
     (!n.adminOnly || isAdmin) && (!n.superAdminOnly || isSuperAdmin));
@@ -405,6 +420,35 @@ export default function App() {
 function PlanPill() {
   const { org, plan } = useApp();
   if (!plan) return org?.plan ? <span className="pill pill-muted">{org.plan}</span> : null;
+
+  const isDemo = !!(org?.custom?.is_demo || plan.isDemo);
+  const daysLeft = plan.daysLeft ?? (org?.custom?.trial_duration_days
+    ? Math.max(0, Math.ceil((new Date(org.custom.demo_expires_at).getTime() - Date.now()) / (1000 * 86400)))
+    : null);
+
+  if (isDemo && !plan.isExpired) {
+    return (
+      <div className="row" style={{ gap: 6 }}>
+        <span
+          className="pill pill-blue"
+          title={`7-Day Evaluation Demo · ${daysLeft ?? 7} day(s) remaining before compulsory upgrade`}
+          style={{ fontWeight: 600 }}
+        >
+          ⏳ 7d Demo · {daysLeft !== null ? `${daysLeft}d left` : "active"}
+        </span>
+        <button
+          className="btn btn-sm btn-primary"
+          style={{ padding: "2px 8px", fontSize: 11, height: 22 }}
+          onClick={() => {
+            window.location.hash = "/settings";
+          }}
+          title="Upgrade your demo plan to permanent subscription"
+        >
+          Upgrade
+        </button>
+      </div>
+    );
+  }
 
   const lapsed = plan.isExpired || plan.notActivated;
   const drifted = plan.effective !== plan.purchased;

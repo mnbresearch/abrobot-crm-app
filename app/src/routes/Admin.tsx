@@ -3,6 +3,7 @@ import { useApp } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import { Card, Empty, LoadError, Modal, ScoreChip, Spinner, timeAgo, useToast } from "../components/ui";
 import { CheckoutRecoveryCard, ProductAnalyticsCard } from "./AdminGrowth";
+import { CreateDemoModal, DemoHandoverModal, DemoHandoverDetails } from "../components/CreateDemoModal";
 
 /**
  * Platform admin console — every organisation, from one screen.
@@ -33,6 +34,7 @@ interface OrgRow {
   whatsapp_used: number | null;
   period_end: string | null;
   created_at: string;
+  is_demo?: boolean;
 }
 
 interface PlanRow {
@@ -86,6 +88,8 @@ export function Admin() {
   // admin_set_member's UI. Kept here rather than on the tenant-facing Team
   // screen on purpose — see the comment above MemberModal.
   const [members, setMembers] = useState<OrgRow | null>(null);
+  const [showCreateDemo, setShowCreateDemo] = useState(false);
+  const [demoHandover, setDemoHandover] = useState<DemoHandoverDetails | null>(null);
   const [q, setQ] = useState("");
   const toast = useToast();
 
@@ -179,6 +183,9 @@ export function Admin() {
           onChange={(e) => setQ(e.target.value)}
         />
         <button className="btn" onClick={() => void load()}>Refresh</button>
+        <button className="btn btn-primary" onClick={() => setShowCreateDemo(true)}>
+          + Create Demo Account
+        </button>
       </div>
 
       {/* MRR above counts the LISTED price of each org's effective plan. It is
@@ -208,6 +215,7 @@ export function Admin() {
                     <td>
                       <div style={{ fontWeight: 600 }}>
                         {o.name}{" "}
+                        {o.is_demo && <span className="pill pill-blue" style={{ marginLeft: 4 }}>🎯 7d Demo</span>}
                         {!o.active && <span className="pill pill-red">suspended</span>}
                       </div>
                       <div className="sub" style={{ fontSize: 12 }}>
@@ -375,6 +383,22 @@ export function Admin() {
         <InspectOrgModal
           org={inspecting}
           onClose={() => setInspecting(null)}
+        />
+      )}
+      {showCreateDemo && (
+        <CreateDemoModal
+          onClose={() => setShowCreateDemo(false)}
+          onSuccess={(handover) => {
+            setShowCreateDemo(false);
+            setDemoHandover(handover);
+            void load();
+          }}
+        />
+      )}
+      {demoHandover && (
+        <DemoHandoverModal
+          details={demoHandover}
+          onClose={() => setDemoHandover(null)}
         />
       )}
       {toast.node}

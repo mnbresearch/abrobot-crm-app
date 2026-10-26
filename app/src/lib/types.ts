@@ -38,6 +38,7 @@ export interface Organization {
   credits_total: number;
   credits_used: number;
   industry_slug: string | null;
+  custom?: Record<string, any> | null;
 }
 
 export interface Profile {

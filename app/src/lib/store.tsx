@@ -36,6 +36,11 @@ export interface PlanState {
    * worse than no step at all.
    */
   automationsLimit: number | null;
+  daysLeft?: number | null;
+  isDemo?: boolean;
+  mustUpgrade?: boolean;
+  demoExpiresAt?: string | null;
+  features?: Record<string, any>;
 }
 
 interface AppState {
@@ -68,6 +73,11 @@ interface UsageSnapshotRow {
   seats: { used: number; limit: number | null };
   leads: { used: number; limit: number | null };
   automations?: { used: number; limit: number | null };
+  days_left?: number | null;
+  is_demo?: boolean;
+  must_upgrade?: boolean;
+  demo_expires_at?: string | null;
+  features?: Record<string, any>;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -158,6 +168,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
             // allows zero, and hiding it from an unlimited plan would remove a
             // step people actually need.
             automationsLimit: snap.automations?.limit ?? null,
+            daysLeft: snap.days_left ?? null,
+            isDemo: !!snap.is_demo,
+            mustUpgrade: !!snap.must_upgrade,
+            demoExpiresAt: snap.demo_expires_at ?? null,
+            features: snap.features ?? {},
           } : null);
         }
       } else {

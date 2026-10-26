@@ -96,6 +96,7 @@ FUNCTIONS=(
   "save-integration:"
   "billing-checkout:"
   "rescore-leads:"
+  "admin-provision-demo:"
 )
 
 # ════════════════════════════════════════════════════════════════════════════
