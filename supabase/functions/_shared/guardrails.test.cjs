@@ -94,6 +94,10 @@ test("explicit C++ queries and program requests are blocked", () => {
     "explain quicksort with code",
     "provide a c++ snippet",
     "give me a c++ function",
+    "debug python",
+    "run c++",
+    "solve python",
+    "compile c++",
   ];
 
   for (const input of badInputs) {

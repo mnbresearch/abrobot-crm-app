@@ -445,6 +445,50 @@ Deno.serve(async (req) => {
 
   await supabase.from("chat_messages").insert({ conversation_id: convId, org_id: org.id, role: "user", content: message });
 
+  // --- multi-layer guardrail pre-classification ---
+  // Fast, deterministic check: intercepts C++ queries, code generation requests,
+  // prompt injections, and system prompt extraction BEFORE lead capture or calling the LLM.
+  // Saves tokens, prevents latency, ensures attack probes containing phone/email do NOT
+  // pollute the CRM or trigger Telegram alerts, and guarantees zero leakage of code.
+  const guardrail = classifyInboundMessage(message, brand);
+  let securityFlag: string | null = guardrail.flag ?? null;
+  let securityDetails: string | null = guardrail.matchedPattern || guardrail.reason || null;
+
+  if (guardrail.action === "refuse") {
+    const refuseReply = guardrail.refusalMessage!;
+    const { error: replyInsertErr } = await supabase.from("chat_messages").insert({
+      conversation_id: convId, org_id: org.id, role: "assistant", content: refuseReply,
+    });
+    if (replyInsertErr) {
+      console.error(`chat-agent: could not store guardrail refusal for conv ${convId}:`, replyInsertErr.message);
+    }
+
+    const { count: msgCount } = await supabase
+      .from("chat_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", convId);
+
+    const updatePatch: Record<string, unknown> = {
+      last_message_at: new Date().toISOString(),
+      ...(msgCount !== null ? { message_count: msgCount } : {}),
+      security_flag: securityFlag,
+      security_details: securityDetails,
+    };
+
+    const { error: updErr } = await supabase.from("conversations").update(updatePatch).eq("id", convId);
+    if (updErr && updErr.message.includes("security_flag")) {
+      delete updatePatch.security_flag;
+      delete updatePatch.security_details;
+      await supabase.from("conversations").update(updatePatch).eq("id", convId);
+    }
+
+    return json({
+      reply: refuseReply,
+      conversation_id: convId,
+      security_flag: securityFlag,
+    });
+  }
+
   // --- capture contact details ---
   // Declared out here so the final response can report a failed capture.
   // Silence is the bug: the visitor gets a normal reply either way, so if we
@@ -662,50 +706,6 @@ Deno.serve(async (req) => {
       }
     }
     if (leadId) await supabase.from("conversations").update({ lead_id: leadId }).eq("id", convId);
-  }
-
-  // --- multi-layer guardrail pre-classification ---
-  // Fast, deterministic check: intercepts C++ queries, code generation requests,
-  // prompt injections, and system prompt extraction BEFORE calling the LLM.
-  // Saves tokens, prevents latency, and guarantees zero leakage of code or system directives.
-  const guardrail = classifyInboundMessage(message, brand);
-  let securityFlag: string | null = guardrail.flag ?? null;
-  let securityDetails: string | null = guardrail.matchedPattern || guardrail.reason || null;
-
-  if (guardrail.action === "refuse") {
-    const refuseReply = guardrail.refusalMessage!;
-    const { error: replyInsertErr } = await supabase.from("chat_messages").insert({
-      conversation_id: convId, org_id: org.id, role: "assistant", content: refuseReply,
-    });
-    if (replyInsertErr) {
-      console.error(`chat-agent: could not store guardrail refusal for conv ${convId}:`, replyInsertErr.message);
-    }
-
-    const { count: msgCount } = await supabase
-      .from("chat_messages")
-      .select("id", { count: "exact", head: true })
-      .eq("conversation_id", convId);
-
-    const updatePatch: Record<string, unknown> = {
-      last_message_at: new Date().toISOString(),
-      ...(msgCount !== null ? { message_count: msgCount } : {}),
-      security_flag: securityFlag,
-      security_details: securityDetails,
-    };
-
-    const { error: updErr } = await supabase.from("conversations").update(updatePatch).eq("id", convId);
-    if (updErr && updErr.message.includes("security_flag")) {
-      delete updatePatch.security_flag;
-      delete updatePatch.security_details;
-      await supabase.from("conversations").update(updatePatch).eq("id", convId);
-    }
-
-    return json({
-      reply: refuseReply,
-      conversation_id: convId,
-      security_flag: securityFlag,
-      ...(captureFailed ? { capture_failed: true } : {}),
-    });
   }
 
   // --- plan limit enforcement ---

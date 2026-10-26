@@ -236,8 +236,8 @@ export function classifyInboundMessage(message: string, brandName: string): Guar
       }
     }
 
-    // Broader check: Action verb + Code artifact (even without explicit language)
-    if (CODE_ACTION_VERBS.test(text) && CODE_ARTIFACT_WORDS.test(text)) {
+    // Broader check: Action verb + Code artifact or programming language
+    if (CODE_ACTION_VERBS.test(text) && (CODE_ARTIFACT_WORDS.test(text) || PROG_LANG_WORDS.test(text))) {
       if (!isCommercialInquiry) {
         return {
           allowed: false,
@@ -246,7 +246,7 @@ export function classifyInboundMessage(message: string, brandName: string): Guar
           action: "refuse",
           refusalMessage: getCodeRefusalMessage(brand),
           flag: "code_query_blocked",
-          matchedPattern: "verb_artifact",
+          matchedPattern: "Code action on programming language artifact",
         };
       }
     }
