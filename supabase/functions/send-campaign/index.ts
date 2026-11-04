@@ -32,6 +32,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { applyTemplate, escapeHtml, textToHtml } from "../_shared/template.ts";
 import { fetchWithTimeout } from "../_shared/http.ts";
 import { loadSuppressed, normaliseEmail } from "../_shared/suppression.ts";
+import { safeHttpUrl } from "../_shared/url-safety.ts";
 
 const admin = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -60,6 +61,7 @@ const CORS = {
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: CORS });
 
 function wrap(bodyHtml: string, brand: string, contactUrl: string, unsubUrl: string) {
+  const safeContact = safeHttpUrl(contactUrl);
   return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a;line-height:1.6;font-size:15px">
   <div style="text-align:center;padding:8px 0 18px;font-size:19px;font-weight:800">${escapeHtml(brand)}</div>
   ${bodyHtml}
@@ -67,7 +69,7 @@ function wrap(bodyHtml: string, brand: string, contactUrl: string, unsubUrl: str
   <p style="font-size:12px;color:#64748b">
     You are receiving this because you enquired with ${escapeHtml(brand)}. Reply to this email to reach us, or
     <a href="${unsubUrl}" style="color:#64748b">unsubscribe</a>.${
-      contactUrl ? ` <a href="${escapeHtml(contactUrl)}" style="color:#64748b">Contact ${escapeHtml(brand)}</a>.` : ""
+      safeContact ? ` <a href="${escapeHtml(safeContact)}" style="color:#64748b">Contact ${escapeHtml(brand)}</a>.` : ""
     }
   </p>
 </div>`;

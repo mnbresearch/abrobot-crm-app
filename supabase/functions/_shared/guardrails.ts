@@ -22,11 +22,11 @@ const PROG_LANG_WORDS =
 
 // Words denoting program/code artifacts
 const CODE_ARTIFACT_WORDS =
-  /\b(?:program|programme|code|script|algorithm|function|class|method|snippet|calculator|quicksort|binary search|mergesort|linked list|dfs|bfs|dijkstra|fibonacci|factorial|recursion|leetcode|hackerrank|codeforces|segfault|syntax error|compiler error|pointer|pointers|dynamic memory)\b/i;
+  /\b(?:program|programme|code|script|algorithm|function|class|method|snippet|calculator|quicksort|binary search|mergesort|bubble sort|insertion sort|topological sort|linked list|dfs|bfs|breadth first search|depth first search|dijkstra|knapsack|dynamic programming|fibonacci|factorial|recursion|leetcode|hackerrank|codeforces|segfault|syntax error|compiler error|pointer|pointers|dynamic memory)\b/i;
 
 // Action verbs requesting creation, debugging, or execution of code
 const CODE_ACTION_VERBS =
-  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix|run|execute|translate|convert|compile|do|explain)\b/i;
+  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix|run|execute|translate|convert|compile|do|explain|send|share|return|supply|produce|deliver|furnish|post|paste|draft|compose|construct|detail|need|want|require)\b/i;
 
 // Non-code commercial exclusions (e.g., promo codes, discount codes, postal codes)
 const CODE_EXCLUSIONS =
@@ -35,13 +35,13 @@ const CODE_EXCLUSIONS =
 // Specific patterns indicating a direct programming / code request
 const CODE_REQUEST_PATTERNS: RegExp[] = [
   // Any request to write, give, show, generate, solve code, program, script, algorithm, etc.
-  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix)\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b/i,
+  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix|send|deliver|produce|supply|draft|compose)\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b/i,
 
   // "how to code / write / program ... in <lang>"
   /\b(?:how\s+to\s+(?:write|code|program|implement|solve|build))\b.{0,30}\b(?:program|programme|code|script|algorithm|function|solution|snippet|query|calculator|quicksort|binary search|leetcode)\b/i,
 
-  // "can you code / write a program..."
-  /\b(?:can\s+you\s+(?:write|code|program|solve|generate|provide|give|do|show))\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet|calculator)\b/i,
+  // "can you code / write a program..." or "i need/want a program..."
+  /\b(?:can\s+you\s+(?:write|code|program|solve|generate|provide|give|do|show|send)|i\s+(?:need|want)\s+(?:a|an)?)\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet|calculator)\b/i,
 
   // C++ or C# specific patterns (lookarounds prevent \b failure on '+' and '#')
   /(?:\b(?:c\+\+|cpp|c#)(?![a-zA-Z0-9_+])).{0,30}\b(?:query|question|code|program|programme|assignment|homework|exercise|task|problem|solution|help|algorithm|function|snippet|class|pointer|pointers)\b/i,
@@ -50,15 +50,18 @@ const CODE_REQUEST_PATTERNS: RegExp[] = [
   // Language + artifact
   /(?:\b(?:c\+\+|cpp|c#|python|java|javascript|typescript|rust|go|c|ruby|php|sql|bash)(?![a-zA-Z0-9_+])).{0,25}\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b/i,
 
-  // "write/give/solve ... in <language>"
-  /\b(?:write|give|solve|debug|fix|implement|code)\b.{0,40}\b(?:in|using|with)\b.{0,15}(?:\b(?:c\+\+|cpp|c#|python|java|javascript|rust|go|c|bash)(?![a-zA-Z0-9_+]))/i,
+  // Artifact + Language (e.g. "script in python", "program in rust")
+  /\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b.{0,20}\b(?:in|using|with)\b.{0,15}(?:\b(?:c\+\+|cpp|c#|python|java|javascript|typescript|rust|go|c|ruby|php|sql|bash)(?![a-zA-Z0-9_+]))/i,
+
+  // "write/give/solve/send ... in <language>"
+  /\b(?:write|give|solve|debug|fix|implement|code|send|supply|share)\b.{0,40}\b(?:in|using|with)\b.{0,15}(?:\b(?:c\+\+|cpp|c#|python|java|javascript|rust|go|c|bash)(?![a-zA-Z0-9_+]))/i,
 
   // Homework, assignments, competitive programming
   /\b(?:solve|do|finish|help with)\b.{0,30}\b(?:my|this|the)?\b.{0,30}\b(?:assignment|homework|coding (?:problem|task|test)|leetcode|hackerrank|codeforces)\b/i,
   /\b(?:leetcode|hackerrank|codeforces)\b/i,
 
   // Algorithms and CS homework topics
-  /\b(?:quicksort|binary search|mergesort|linked list|dfs|bfs|dijkstra|fibonacci|factorial)\b/i,
+  /\b(?:quicksort|binary search|mergesort|bubble sort|insertion sort|topological sort|linked list|dfs|bfs|breadth first search|depth first search|dijkstra|knapsack|dynamic programming|fibonacci|factorial)\b/i,
 
   // Direct source code syntax embedded in prompt
   /#include\s*<[a-z0-9_.]+>|using\s+namespace\s+std;|std::cout|std::cin|printf\s*\(|malloc\s*\(|public\s+static\s+void\s+main/i,
@@ -189,19 +192,6 @@ export function classifyInboundMessage(message: string, brandName: string): Guar
     }
   }
 
-  // Check 2b: Compliance & Privacy Transparency
-  // If a visitor asks about privacy, data deletion, or the grievance officer under DPDP Act / GDPR,
-  // pass through with compliance flag so the assistant provides statutory transparency.
-  const isPrivacyInquiry = /\b(privacy\s+policy|data\s+protection|grievance\s+officer|delete\s+my\s+(data|info|number|email)|remove\s+my\s+(data|info|number|email)|how\s+do\s+you\s+(use|handle|store)\s+my\s+data|gdpr|dpdp)\b/i.test(text);
-  if (isPrivacyInquiry) {
-    return {
-      allowed: true,
-      threatScore: 0,
-      action: "pass",
-      flag: "privacy_compliance_query",
-    };
-  }
-
   // Check 3: Non-code commercial exclusions (e.g., discount code, promo code, zip code)
   const isCodeExclusion = CODE_EXCLUSIONS.test(text);
 
@@ -212,6 +202,7 @@ export function classifyInboundMessage(message: string, brandName: string): Guar
   const isCommercialInquiry = COMMERCIAL_SERVICE_INTENT.some((p) => p.test(text));
 
   // Check 5: Coding & Program Generation Requests
+  // (Evaluated BEFORE privacy transparency so an attacker cannot prefix/suffix with "GDPR/DPDP" to bypass code blocking)
   if (!isCodeExclusion) {
     for (const pattern of CODE_REQUEST_PATTERNS) {
       if (pattern.test(text)) {
@@ -252,6 +243,19 @@ export function classifyInboundMessage(message: string, brandName: string): Guar
     }
   }
 
+  // Check 6: Compliance & Privacy Transparency
+  // If a visitor asks about privacy, data deletion, or the grievance officer under DPDP Act / GDPR,
+  // pass through with compliance flag so the assistant provides statutory transparency.
+  const isPrivacyInquiry = /\b(privacy\s+policy|data\s+protection|grievance\s+officer|delete\s+my\s+(data|info|number|email)|remove\s+my\s+(data|info|number|email)|how\s+do\s+you\s+(use|handle|store)\s+my\s+data|gdpr|dpdp)\b/i.test(text);
+  if (isPrivacyInquiry) {
+    return {
+      allowed: true,
+      threatScore: 0,
+      action: "pass",
+      flag: "privacy_compliance_query",
+    };
+  }
+
   // Safe inbound message
   return {
     allowed: true,
@@ -273,6 +277,10 @@ const RAW_CODE_SNIPPETS_RE = [
   /public\s+static\s+void\s+main\s*\(/,
   /void\s+[a-z_][a-z0-9_]*\s*\([^)]*\)\s*\{[\s\S]{10,}\}/i,
   /def\s+[a-z_][a-z0-9_]*\s*\([^)]*\):[\s\S]{10,}/i,
+  /function\s+[a-zA-Z0-9_$]+\s*\([^)]*\)\s*\{[\s\S]{5,}\}/i,
+  /const\s+[a-zA-Z0-9_$]+\s*=\s*\([^)]*\)\s*=>/i,
+  /SELECT\s+.+\s+FROM\s+[a-zA-Z0-9_]+/i,
+  /^#!\/(usr\/)?bin\/(bash|sh|zsh|python)/m,
 ];
 
 /**
@@ -291,9 +299,9 @@ export function sanitizeModelOutput(
   let reason: string | undefined;
 
   // 1. Strip system XML tags if model leaked them
-  if (/<SYSTEM_SECURITY_POLICY>|<BUSINESS_IDENTITY>|<BUSINESS_KNOWLEDGE>|<\/SYSTEM_SECURITY_POLICY>/i.test(text)) {
+  if (/<SYSTEM_SECURITY_POLICY>|<BUSINESS_IDENTITY>|<BUSINESS_KNOWLEDGE>|<CONVERSATION_AND_STYLE_POLICY>|<TENANT_SPECIFIC_GUARDRAILS>|<\/SYSTEM_SECURITY_POLICY>/i.test(text)) {
     text = text.replace(/<SYSTEM_SECURITY_POLICY>[\s\S]*?<\/SYSTEM_SECURITY_POLICY>/gi, "");
-    text = text.replace(/<\/?(?:SYSTEM_SECURITY_POLICY|BUSINESS_IDENTITY|BUSINESS_KNOWLEDGE|STYLE_AND_CONVERSATION_POLICY|TENANT_SPECIFIC_GUARDRAILS)>/gi, "");
+    text = text.replace(/<\/?(?:SYSTEM_SECURITY_POLICY|BUSINESS_IDENTITY|BUSINESS_KNOWLEDGE|STYLE_AND_CONVERSATION_POLICY|CONVERSATION_AND_STYLE_POLICY|TENANT_SPECIFIC_GUARDRAILS)>/gi, "");
     sanitized = true;
     reason = "system_tag_leak";
   }
@@ -311,15 +319,13 @@ export function sanitizeModelOutput(
     }
 
     if (containsDisallowedCode) {
-      // Replace code with polite refusal
-      text = text.replace(SOURCE_CODE_BLOCK_RE, "").trim();
-      if (!text || text.length < 20) {
-        text = getCodeRefusalMessage(brandName);
-      } else {
-        text += "\n\n" + getCodeRefusalMessage(brandName);
-      }
-      sanitized = true;
-      reason = "code_block_removed";
+      // Disallowed code generation detected — completely replace with code refusal
+      // to ensure preambles or inline code fragments never leak to visitor
+      return {
+        cleanText: getCodeRefusalMessage(brandName),
+        sanitized: true,
+        reason: "code_block_removed",
+      };
     }
   }
 
@@ -327,10 +333,11 @@ export function sanitizeModelOutput(
   for (const pat of RAW_CODE_SNIPPETS_RE) {
     if (pat.test(text)) {
       if (!allowedKnowledge || !pat.test(allowedKnowledge)) {
-        text = getCodeRefusalMessage(brandName);
-        sanitized = true;
-        reason = "code_syntax_detected";
-        break;
+        return {
+          cleanText: getCodeRefusalMessage(brandName),
+          sanitized: true,
+          reason: "code_syntax_detected",
+        };
       }
     }
   }

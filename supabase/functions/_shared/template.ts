@@ -76,8 +76,8 @@ export function applyTemplate(
 
 /** Escape for interpolation into HTML email bodies. */
 export function escapeHtml(s: string): string {
-  return (s || "").replace(/[<>&"]/g, (c) =>
-    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]!));
+  return (s || "").replace(/[<>&"']/g, (c) =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" }[c]!));
 }
 
 /** Plain text (what the tenant wrote) → simple, safe HTML. Paragraphs from

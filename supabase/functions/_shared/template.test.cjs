@@ -206,11 +206,13 @@ async function test(name, fn) {
   });
 
   // ── escapeHtml ─────────────────────────────────────────────────────────────
-  await test('escapeHtml escapes & < > "', () => {
+  await test('escapeHtml escapes & < > " \'', () => {
     assert.strictEqual(escapeHtml('<b>'), '&lt;b&gt;');
     assert.strictEqual(escapeHtml('a & b'), 'a &amp; b');
     assert.strictEqual(escapeHtml('say "hi"'), 'say &quot;hi&quot;');
     assert.strictEqual(escapeHtml('<a href="x">1 & 2</a>'), '&lt;a href=&quot;x&quot;&gt;1 &amp; 2&lt;/a&gt;');
+    assert.strictEqual(escapeHtml("it's"), 'it&#39;s');
+    assert.strictEqual(escapeHtml("' onload='x"), '&#39; onload=&#39;x');
   });
 
   await test('escapeHtml is a single pass, so it cannot double-escape', () => {
@@ -220,18 +222,8 @@ async function test(name, fn) {
     assert.strictEqual(escapeHtml(escapeHtml('&')), '&amp;amp;');
   });
 
-  await test("escapeHtml does NOT escape ' — safe here, documented as a limit", () => {
-    // Asserting the real behaviour rather than omitting the character, because
-    // an untested character is how this stops being true by accident.
-    //
-    // It is safe for the one consumer that exists: textToHtml only ever emits
-    // double-quoted attributes (style="…" and href="…"), and an apostrophe in
-    // text content is inert. It becomes a hole the moment anyone interpolates
-    // escapeHtml() output into a SINGLE-quoted attribute, so if that ever
-    // happens, change template.ts to escape ' as &#39; and flip this
-    // assertion — do not delete it.
-    assert.strictEqual(escapeHtml("it's"), "it's");
-    assert.strictEqual(escapeHtml("' onload='x"), "' onload='x");
+  await test('escapeHtml safely neutralizes single-quote attribute breakout', () => {
+    assert.strictEqual(escapeHtml("user' onfocus='evil()"), "user&#39; onfocus=&#39;evil()");
   });
 
   await test('escapeHtml tolerates an empty string', () => {

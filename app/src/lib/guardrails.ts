@@ -16,25 +16,26 @@ const PROG_LANG_WORDS =
   /(?:\b(?:c\+\+|cpp|csharp|c#|python|java|javascript|typescript|golang|rust|solidity|ruby|php|kotlin|swift|perl|bash|powershell|sql|assembly|x86|arm64|html\/css|react|vue|node\.?js)(?![a-zA-Z0-9_+]))/i;
 
 const CODE_ARTIFACT_WORDS =
-  /\b(?:program|programme|code|script|algorithm|function|class|method|snippet|calculator|quicksort|binary search|mergesort|linked list|dfs|bfs|dijkstra|fibonacci|factorial|recursion|leetcode|hackerrank|codeforces|segfault|syntax error|compiler error|pointer|pointers|dynamic memory)\b/i;
+  /\b(?:program|programme|code|script|algorithm|function|class|method|snippet|calculator|quicksort|binary search|mergesort|bubble sort|insertion sort|topological sort|linked list|dfs|bfs|breadth first search|depth first search|dijkstra|knapsack|dynamic programming|fibonacci|factorial|recursion|leetcode|hackerrank|codeforces|segfault|syntax error|compiler error|pointer|pointers|dynamic memory)\b/i;
 
 const CODE_ACTION_VERBS =
-  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix|run|execute|translate|convert|compile|do|explain)\b/i;
+  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix|run|execute|translate|convert|compile|do|explain|send|share|return|supply|produce|deliver|furnish|post|paste|draft|compose|construct|detail|need|want|require)\b/i;
 
 const CODE_EXCLUSIONS =
   /\b(?:discount|promo|coupon|referral|voucher|postal|pin|zip|area|country)\s+code\b/i;
 
 const CODE_REQUEST_PATTERNS: RegExp[] = [
-  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix)\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b/i,
+  /\b(?:write|give|create|generate|provide|code|implement|show|build|debug|solve|fix|send|deliver|produce|supply|draft|compose)\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b/i,
   /\b(?:how\s+to\s+(?:write|code|program|implement|solve|build))\b.{0,30}\b(?:program|programme|code|script|algorithm|function|solution|snippet|query|calculator|quicksort|binary search|leetcode)\b/i,
-  /\b(?:can\s+you\s+(?:write|code|program|solve|generate|provide|give|do|show))\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet|calculator)\b/i,
+  /\b(?:can\s+you\s+(?:write|code|program|solve|generate|provide|give|do|show|send)|i\s+(?:need|want)\s+(?:a|an)?)\b.{0,40}\b(?:program|programme|code|script|algorithm|function|solution|snippet|calculator)\b/i,
   /(?:\b(?:c\+\+|cpp|c#)(?![a-zA-Z0-9_+])).{0,30}\b(?:query|question|code|program|programme|assignment|homework|exercise|task|problem|solution|help|algorithm|function|snippet|class|pointer|pointers)\b/i,
   /\b(?:query|question|code|program|programme|assignment|homework|exercise|task|problem|solution|help|algorithm|function|snippet|class|pointer|pointers)\b.{0,30}(?:\b(?:c\+\+|cpp|c#)(?![a-zA-Z0-9_+]))/i,
   /(?:\b(?:c\+\+|cpp|c#|python|java|javascript|typescript|rust|go|c|ruby|php|sql|bash)(?![a-zA-Z0-9_+])).{0,25}\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b/i,
-  /\b(?:write|give|solve|debug|fix|implement|code)\b.{0,40}\b(?:in|using|with)\b.{0,15}(?:\b(?:c\+\+|cpp|c#|python|java|javascript|rust|go|c|bash)(?![a-zA-Z0-9_+]))/i,
+  /\b(?:program|programme|code|script|algorithm|function|solution|snippet)\b.{0,20}\b(?:in|using|with)\b.{0,15}(?:\b(?:c\+\+|cpp|c#|python|java|javascript|typescript|rust|go|c|ruby|php|sql|bash)(?![a-zA-Z0-9_+]))/i,
+  /\b(?:write|give|solve|debug|fix|implement|code|send|supply|share)\b.{0,40}\b(?:in|using|with)\b.{0,15}(?:\b(?:c\+\+|cpp|c#|python|java|javascript|rust|go|c|bash)(?![a-zA-Z0-9_+]))/i,
   /\b(?:solve|do|finish|help with)\b.{0,30}\b(?:my|this|the)?\b.{0,30}\b(?:assignment|homework|coding (?:problem|task|test)|leetcode|hackerrank|codeforces)\b/i,
   /\b(?:leetcode|hackerrank|codeforces)\b/i,
-  /\b(?:quicksort|binary search|mergesort|linked list|dfs|bfs|dijkstra|fibonacci|factorial)\b/i,
+  /\b(?:quicksort|binary search|mergesort|bubble sort|insertion sort|topological sort|linked list|dfs|bfs|breadth first search|depth first search|dijkstra|knapsack|dynamic programming|fibonacci|factorial)\b/i,
   /#include\s*<[a-z0-9_.]+>|using\s+namespace\s+std;|std::cout|std::cin|printf\s*\(|malloc\s*\(|public\s+static\s+void\s+main/i,
   /def\s+[a-z_][a-z0-9_]*\s*\(.*?\):|class\s+[A-Z][a-zA-Z0-9_]*\s*\{|int\s+main\s*\(/,
   /```(?:c\+\+|cpp|c|python|java|javascript|ts|typescript|csharp|go|rust|bash|sh|sql)?/i,
@@ -135,20 +136,10 @@ export function testGuardrailLocally(message: string, brandName: string): Guardr
     }
   }
 
-  const isPrivacyInquiry = /\b(privacy\s+policy|data\s+protection|grievance\s+officer|delete\s+my\s+(data|info|number|email)|remove\s+my\s+(data|info|number|email)|how\s+do\s+you\s+(use|handle|store)\s+my\s+data|gdpr|dpdp)\b/i.test(text);
-  if (isPrivacyInquiry) {
-    return {
-      allowed: true,
-      threatScore: 0,
-      action: "pass",
-      flag: "privacy_compliance_query",
-      matchedPattern: "Statutory DPDP / GDPR Privacy Transparency",
-    };
-  }
-
   const isCodeExclusion = CODE_EXCLUSIONS.test(text);
   const isCommercialInquiry = COMMERCIAL_SERVICE_INTENT.some((p) => p.test(text));
 
+  // Check code generation BEFORE compliance transparency so "GDPR/DPDP" cannot be used as an injection bypass
   if (!isCodeExclusion) {
     for (const pattern of CODE_REQUEST_PATTERNS) {
       if (pattern.test(text)) {
@@ -186,6 +177,17 @@ export function testGuardrailLocally(message: string, brandName: string): Guardr
         };
       }
     }
+  }
+
+  const isPrivacyInquiry = /\b(privacy\s+policy|data\s+protection|grievance\s+officer|delete\s+my\s+(data|info|number|email)|remove\s+my\s+(data|info|number|email)|how\s+do\s+you\s+(use|handle|store)\s+my\s+data|gdpr|dpdp)\b/i.test(text);
+  if (isPrivacyInquiry) {
+    return {
+      allowed: true,
+      threatScore: 0,
+      action: "pass",
+      flag: "privacy_compliance_query",
+      matchedPattern: "Statutory DPDP / GDPR Privacy Transparency",
+    };
   }
 
   return {
