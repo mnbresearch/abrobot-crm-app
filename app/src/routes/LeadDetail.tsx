@@ -64,6 +64,10 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [scoreModalOpen, setScoreModalOpen] = useState(false);
   const [scoreResult, setScoreResult] = useState<ScoreResult | null>(null);
   const [applyingScore, setApplyingScore] = useState(false);
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [copilotModalOpen, setCopilotModalOpen] = useState(false);
+  const [copilotDossier, setCopilotDossier] = useState<{ summary?: string; rationale?: string; next_action?: string } | null>(null);
+  const [copilotRationale, setCopilotRationale] = useState<string | null>(null);
   // null = not known (not read yet, or the read failed). Unknown leaves the
   // button usable — whatsapp-send enforces the plan itself and says why — but
   // a KNOWN "not included" stops someone writing a message that can only be
@@ -388,6 +392,69 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     toast.show("Call logged");
   };
 
+  const getAiSuggestedReply = async (channel: "whatsapp" | "email") => {
+    if (!lead) return;
+    setCopilotLoading(true);
+    setCopilotRationale(null);
+    try {
+      const res = await callFunction<{
+        ok: boolean;
+        data?: { subject?: string | null; text?: string; rationale?: string };
+        error?: string;
+      }>("ai-copilot", {
+        lead_id: lead.id,
+        action: "suggest_reply",
+        channel,
+      });
+
+      if (!res.ok || !res.data) {
+        toast.error(res.error || "Could not generate AI draft reply");
+        return;
+      }
+
+      if (channel === "whatsapp") {
+        setWaText(res.data.text || "");
+        if (res.data.rationale) setCopilotRationale(res.data.rationale);
+      } else {
+        if (res.data.subject) setEmSubject(res.data.subject);
+        if (res.data.text) setEmText(res.data.text);
+        if (res.data.rationale) setCopilotRationale(res.data.rationale);
+      }
+      toast.show(`✨ AI contextual ${channel === "whatsapp" ? "WhatsApp" : "email"} draft generated`);
+    } catch (err) {
+      toast.error(`AI Copilot error: ${(err as Error).message}`);
+    } finally {
+      setCopilotLoading(false);
+    }
+  };
+
+  const generateDossierBriefing = async () => {
+    if (!lead) return;
+    setCopilotLoading(true);
+    try {
+      const res = await callFunction<{
+        ok: boolean;
+        data?: { summary?: string; rationale?: string; next_action?: string };
+        error?: string;
+      }>("ai-copilot", {
+        lead_id: lead.id,
+        action: "summarize_dossier",
+      });
+
+      if (!res.ok || !res.data) {
+        toast.error(res.error || "Could not generate intelligence summary");
+        return;
+      }
+
+      setCopilotDossier(res.data);
+      setCopilotModalOpen(true);
+    } catch (err) {
+      toast.error(`Intelligence error: ${(err as Error).message}`);
+    } finally {
+      setCopilotLoading(false);
+    }
+  };
+
   if (loading) return <Spinner />;
   if (loadError) {
     return (
@@ -418,9 +485,21 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
         deep link, which opens WhatsApp on your phone and leaves no trace here.
       </p>
 
-      {templates.filter((t) => t.channel !== "email").length > 0 && (
-        <div className="field">
-          <label className="label">Start from a template</label>
+      <div className="field">
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <label className="label" style={{ margin: 0 }}>Start from a template</label>
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ fontSize: 11, padding: "2px 8px", background: "rgba(58, 43, 255, 0.08)", color: "var(--accent)" }}
+            disabled={copilotLoading}
+            onClick={() => void getAiSuggestedReply("whatsapp")}
+            title="Generate custom personalized outreach based on lead history and scoring"
+          >
+            {copilotLoading ? "✨ Thinking…" : "✨ AI Draft Best Reply"}
+          </button>
+        </div>
+        {templates.filter((t) => t.channel !== "email").length > 0 && (
           <div className="row row-wrap">
             {templates.filter((t) => t.channel !== "email").map((t) => (
               <button key={t.id} className="btn btn-sm" onClick={() => applyTemplate(t.body)}>
@@ -428,6 +507,12 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
               </button>
             ))}
           </div>
+        )}
+      </div>
+
+      {copilotRationale && (
+        <div className="card" style={{ padding: "8px 12px", background: "rgba(58, 43, 255, 0.05)", border: "1px solid rgba(58, 43, 255, 0.2)", marginBottom: 12, fontSize: 12 }}>
+          <b>💡 AI Strategy:</b> {copilotRationale}
         </div>
       )}
 
@@ -477,9 +562,21 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
         </p>
       )}
 
-      {templates.filter((t) => t.channel === "email").length > 0 && (
-        <div className="field">
-          <label className="label">Start from a template</label>
+      <div className="field">
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <label className="label" style={{ margin: 0 }}>Start from a template</label>
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ fontSize: 11, padding: "2px 8px", background: "rgba(58, 43, 255, 0.08)", color: "var(--accent)" }}
+            disabled={copilotLoading}
+            onClick={() => void getAiSuggestedReply("email")}
+            title="Generate custom personalized email based on lead history and scoring"
+          >
+            {copilotLoading ? "✨ Thinking…" : "✨ AI Draft Best Email"}
+          </button>
+        </div>
+        {templates.filter((t) => t.channel === "email").length > 0 && (
           <div className="row row-wrap">
             {templates.filter((t) => t.channel === "email").map((t) => (
               <button
@@ -494,6 +591,12 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
               </button>
             ))}
           </div>
+        )}
+      </div>
+
+      {copilotRationale && (
+        <div className="card" style={{ padding: "8px 12px", background: "rgba(58, 43, 255, 0.05)", border: "1px solid rgba(58, 43, 255, 0.2)", marginBottom: 12, fontSize: 12 }}>
+          <b>💡 AI Strategy:</b> {copilotRationale}
         </div>
       )}
 
@@ -940,12 +1043,54 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
     </Modal>
   );
 
+  const copilotModal = copilotModalOpen && copilotDossier && (
+    <Modal title={`🧠 AI Dossier Briefing — ${lead?.name}`} onClose={() => setCopilotModalOpen(false)} wide>
+      <p className="sub" style={{ marginTop: -6, marginBottom: 14 }}>
+        Contextual AI deal intelligence synthesizing qualification fit, recent timeline interactions, and strategic next steps.
+      </p>
+
+      <div className="card" style={{ background: "rgba(58, 43, 255, 0.04)", border: "1px solid rgba(58, 43, 255, 0.2)", padding: "14px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)", marginBottom: 6 }}>
+          ⚡ Key Strategic Signal:
+        </div>
+        <div style={{ fontSize: 14 }}>{copilotDossier.rationale}</div>
+      </div>
+
+      <div className="stack" style={{ gap: 14 }}>
+        <div className="card" style={{ padding: "12px 14px" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>
+            Executive Synthesis
+          </div>
+          <div style={{ fontSize: 14, whiteSpace: "pre-line", lineHeight: 1.6 }}>
+            {copilotDossier.summary}
+          </div>
+        </div>
+
+        {copilotDossier.next_action && (
+          <div className="card" style={{ padding: "12px 14px", background: "rgba(34, 197, 94, 0.06)", border: "1px solid rgba(34, 197, 94, 0.25)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", color: "#15803d", marginBottom: 4 }}>
+              🎯 Recommended Next Best Action
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "#166534" }}>
+              {copilotDossier.next_action}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+        <button className="btn btn-primary" onClick={() => setCopilotModalOpen(false)}>Done</button>
+      </div>
+    </Modal>
+  );
+
   return (
     <div className="stack">
       {waModal}
       {emailModal}
       {complianceModal}
       {scoreModal}
+      {copilotModal}
       {detailsOpen && (
         <EditLeadDetails
           lead={lead}
@@ -965,6 +1110,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
           <div className="row row-wrap" style={{ marginTop: 7 }}>
             <StagePill stageKey={stageKey} stages={stages} />
             <ScoreChip score={lead.score} onClick={openScoreModal} />
+            <button
+              className="pill pill-interactive"
+              style={{ background: "rgba(58, 43, 255, 0.08)", color: "var(--accent)", border: "1px solid rgba(58, 43, 255, 0.25)", fontWeight: 600 }}
+              onClick={() => void generateDossierBriefing()}
+              disabled={copilotLoading}
+              title="Generate comprehensive AI Deal Dossier Briefing & Next Best Action"
+            >
+              {copilotLoading ? "✨ Analyzing…" : "🧠 AI Briefing"}
+            </button>
             <span className="pill pill-muted">via {lead.source}</span>
             {lead.nurture_opted_out && <span className="pill pill-red">Unsubscribed</span>}
             {consentPrefs.opt_out_whatsapp && (

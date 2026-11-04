@@ -100,6 +100,20 @@ const CAPABILITIES: { icon: string; title: string; detail: string; ask: string }
   },
 ];
 
+/** Advanced features built for enterprise and high-growth sales teams */
+export const ADVANCED_CAPABILITIES = [
+  {
+    icon: "🧠",
+    title: "AI Copilot & Deal Dossier",
+    explanation: "Synthesizes customer interaction histories into 1-click executive briefings and drafts personalized WhatsApp & email replies.",
+  },
+  {
+    icon: "🛡️",
+    title: "DPDP & GDPR Compliance Shield",
+    explanation: "Enterprise-grade consent governance, statutory Right to Erasure with cryptographic certificates, and zero-code prompt security guardrails.",
+  },
+];
+
 interface Msg { role: "you" | "bot"; text: string }
 
 export function Landing({ navigate }: { navigate: (to: string) => void }) {
@@ -380,6 +394,20 @@ export function Landing({ navigate }: { navigate: (to: string) => void }) {
                 <p>{c.detail}</p>
               </article>
             ))}
+          </div>
+
+          <div style={{ marginTop: 36, borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 32 }}>
+            <p className="lp-kicker" style={{ color: "#fbbf24" }}>Built for modern sales &amp; enterprise scale</p>
+            <h3 style={{ fontSize: 24, fontWeight: 700, margin: "6px 0 16px" }}>Advanced Intelligence &amp; Data Governance</h3>
+            <div className="lp-cards">
+              {ADVANCED_CAPABILITIES.map((c) => (
+                <article className="lp-card" key={c.title}>
+                  <div className="lp-card-ico" aria-hidden="true">{c.icon}</div>
+                  <h3>{c.title}</h3>
+                  <p>{c.explanation}</p>
+                </article>
+              ))}
+            </div>
           </div>
         </div>
       </section>
