@@ -714,7 +714,7 @@ Deno.serve(async (req) => {
       );
 
     if (unsubErr) {
-      console.error("nurture: unsubscribe FAILED for token", unsub, unsubErr.message);
+      console.error("nurture: unsubscribe FAILED for token", unsub ? unsub.slice(0, 8) + "..." : "none", unsubErr.message);
       return page(
         "We couldn't process that just now",
         "Please email contact@mnbresearch.com and we will remove you straight away. " +
