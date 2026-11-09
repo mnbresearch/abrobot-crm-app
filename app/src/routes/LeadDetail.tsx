@@ -68,6 +68,14 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   const [copilotModalOpen, setCopilotModalOpen] = useState(false);
   const [copilotDossier, setCopilotDossier] = useState<{ summary?: string; rationale?: string; next_action?: string } | null>(null);
   const [copilotRationale, setCopilotRationale] = useState<string | null>(null);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichedData, setEnrichedData] = useState<{
+    buyer_persona?: string;
+    urgency_tier?: string;
+    inferred_location?: string;
+    deal_risk_signals?: string;
+    suggested_tags?: string[];
+  } | null>(null);
   // null = not known (not read yet, or the read failed). Unknown leaves the
   // button usable — whatsapp-send enforces the plan itself and says why — but
   // a KNOWN "not included" stops someone writing a message that can only be
@@ -103,6 +111,18 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (lead?.custom && typeof lead.custom === "object" && "_ai_enrichment" in lead.custom) {
+      setEnrichedData(lead.custom._ai_enrichment as {
+        buyer_persona?: string;
+        urgency_tier?: string;
+        inferred_location?: string;
+        deal_risk_signals?: string;
+        suggested_tags?: string[];
+      });
+    }
+  }, [lead]);
 
   // Templates were pure CRUD with no consumer anywhere — the merge tokens the
   // editor documents were substituted by no code path in the repo. This is
@@ -452,6 +472,64 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
       toast.error(`Intelligence error: ${(err as Error).message}`);
     } finally {
       setCopilotLoading(false);
+    }
+  };
+
+  const enrichLead = async () => {
+    if (!lead || !org) return;
+    setEnriching(true);
+    try {
+      const res = await callFunction<{
+        ok: boolean;
+        data?: {
+          buyer_persona?: string;
+          urgency_tier?: string;
+          inferred_location?: string;
+          deal_risk_signals?: string;
+          suggested_tags?: string[];
+        };
+        error?: string;
+      }>("ai-copilot", {
+        lead_id: lead.id,
+        action: "ai_enrich",
+      });
+
+      if (!res.ok || !res.data) {
+        toast.error(res.error || "Could not enrich record");
+        return;
+      }
+
+      const enr = res.data;
+      setEnrichedData(enr);
+
+      const curTags = Array.isArray(lead.tags) ? lead.tags : [];
+      const newSuggested = Array.isArray(enr.suggested_tags) ? enr.suggested_tags : [];
+      const mergedTags = Array.from(new Set([...curTags, ...newSuggested]));
+
+      const nextCustom = {
+        ...(lead.custom || {}),
+        _ai_enrichment: enr,
+      };
+
+      setLead({ ...lead, tags: mergedTags, custom: nextCustom });
+
+      const { data, error } = await supabase.from("leads")
+        .update({ tags: mergedTags, custom: nextCustom })
+        .eq("id", lead.id)
+        .select("id");
+
+      if (error) {
+        toast.error(`Enriched but failed to persist: ${error.message}`);
+      } else if (!data?.length) {
+        toast.error("Enrichment not saved — record no longer visible or permission denied.");
+      } else {
+        toast.show("⚡ AI Enrichment applied and persisted!");
+        await log("system", `AI enriched lead attributes: ${enr.buyer_persona || "Persona identified"}, Urgency: ${enr.urgency_tier || "N/A"}.`);
+      }
+    } catch (err) {
+      toast.error(`Enrichment error: ${(err as Error).message}`);
+    } finally {
+      setEnriching(false);
     }
   };
 
@@ -1119,6 +1197,15 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
             >
               {copilotLoading ? "✨ Analyzing…" : "🧠 AI Briefing"}
             </button>
+            <button
+              className="pill pill-interactive"
+              style={{ background: "rgba(16, 185, 129, 0.08)", color: "#059669", border: "1px solid rgba(16, 185, 129, 0.25)", fontWeight: 600 }}
+              onClick={() => void enrichLead()}
+              disabled={enriching}
+              title="Run 1-Click AI Attribute & Persona Enrichment"
+            >
+              {enriching ? "⚡ Enriching…" : "⚡ AI Enrich"}
+            </button>
             <span className="pill pill-muted">via {lead.source}</span>
             {lead.nurture_opted_out && <span className="pill pill-red">Unsubscribed</span>}
             {consentPrefs.opt_out_whatsapp && (
@@ -1306,6 +1393,50 @@ export function LeadDetail({ id, navigate }: { id: string; navigate: (to: string
           </select>
         </div>
       </Card>
+
+      {enrichedData && (
+        <Card title="⚡ AI Enriched Intelligence">
+          <div className="grid grid-2" style={{ gap: 14 }}>
+            {enrichedData.buyer_persona && (
+              <div>
+                <span className="sub" style={{ fontSize: 12, display: "block", marginBottom: 2 }}>Buyer Persona</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>👤 {enrichedData.buyer_persona}</span>
+              </div>
+            )}
+            {enrichedData.urgency_tier && (
+              <div>
+                <span className="sub" style={{ fontSize: 12, display: "block", marginBottom: 2 }}>Urgency Tier</span>
+                <span
+                  className={`pill ${enrichedData.urgency_tier === "immediate" ? "pill-red" : enrichedData.urgency_tier === "this_quarter" ? "pill-amber" : "pill-muted"}`}
+                  style={{ textTransform: "uppercase", fontSize: 11, fontWeight: 700 }}
+                >
+                  ⏱️ {enrichedData.urgency_tier.replace(/_/g, " ")}
+                </span>
+              </div>
+            )}
+            {enrichedData.inferred_location && (
+              <div>
+                <span className="sub" style={{ fontSize: 12, display: "block", marginBottom: 2 }}>Inferred Location</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>📍 {enrichedData.inferred_location}</span>
+              </div>
+            )}
+            {enrichedData.deal_risk_signals && (
+              <div>
+                <span className="sub" style={{ fontSize: 12, display: "block", marginBottom: 2 }}>Deal Risk Assessment</span>
+                <span style={{
+                  fontWeight: 600,
+                  fontSize: 14,
+                  color: enrichedData.deal_risk_signals.toLowerCase().includes("risk") && !enrichedData.deal_risk_signals.toLowerCase().includes("no risk")
+                    ? "var(--red, #ef4444)"
+                    : "#15803d",
+                }}>
+                  🛡️ {enrichedData.deal_risk_signals}
+                </span>
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-2">
         <Card

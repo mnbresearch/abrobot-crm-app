@@ -121,7 +121,53 @@ export function Automations() {
   // the rule then quietly parks records with nobody.
   const [members, setMembers] = useState<Profile[]>([]);
   const [membersError, setMembersError] = useState<string | null>(null);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiGenerating, setAiGenerating] = useState(false);
   const toast = useToast();
+
+  const handleAiGenerate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiPrompt.trim() || aiGenerating) return;
+    setAiGenerating(true);
+    try {
+      const res = await callFunction<{
+        ok: boolean;
+        action: string;
+        data: {
+          name?: string;
+          trigger?: string;
+          trigger_value?: number | null;
+          conditions?: Condition[];
+          actions?: ActionSpec[];
+          cooldown_hours?: number;
+          explanation?: string;
+        };
+      }>("ai-copilot", {
+        action: "generate_automation",
+        instruction: aiPrompt.trim(),
+      });
+
+      if (res?.data) {
+        const d = res.data;
+        setEditing({
+          name: d.name || "AI Generated Rule",
+          trigger: d.trigger || "no_contact_for",
+          trigger_value: d.trigger_value !== undefined ? d.trigger_value : 48,
+          conditions: Array.isArray(d.conditions) ? d.conditions : [],
+          actions: Array.isArray(d.actions) ? d.actions : [],
+          cooldown_hours: typeof d.cooldown_hours === "number" ? d.cooldown_hours : 24,
+          enabled: false,
+        });
+        toast.show("✨ Rule draft synthesized! Review and save to activate.");
+      } else {
+        toast.error("Could not synthesize automation from this prompt.");
+      }
+    } catch (err) {
+      toast.error((err as Error).message || "AI automation generation failed.");
+    } finally {
+      setAiGenerating(false);
+    }
+  };
 
   const load = async () => {
     if (!org) { setLoading(false); return; }   // never leave the spinner up forever
@@ -364,6 +410,32 @@ export function Automations() {
         >
           + New rule
         </button>
+      </div>
+
+      {/* AI Natural Language Automation Builder */}
+      <div className="card" style={{ background: "linear-gradient(135deg, rgba(58, 43, 255, 0.04), rgba(168, 85, 247, 0.04))", border: "1px solid rgba(58, 43, 255, 0.2)", padding: "16px 18px" }}>
+        <div className="row" style={{ alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: "1.4rem" }}>✨</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: "0.95rem" }}>AI Natural Language Automation Builder</div>
+            <div className="sub" style={{ fontSize: "0.82rem" }}>
+              Describe an automation rule in plain English (e.g. <i>"When a lead has had no contact for 48 hours and score is over 70, alert Telegram and schedule follow-up in 4 hours"</i>).
+            </div>
+          </div>
+        </div>
+        <form onSubmit={handleAiGenerate} style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <input
+            className="input"
+            style={{ flex: 1 }}
+            placeholder="Type your automation in plain English..."
+            value={aiPrompt}
+            onChange={(e) => setAiPrompt(e.target.value)}
+            disabled={aiGenerating}
+          />
+          <button type="submit" className="btn btn-primary" disabled={aiGenerating || !aiPrompt.trim()}>
+            {aiGenerating ? "⚡ Generating…" : "⚡ Generate Rule"}
+          </button>
+        </form>
       </div>
 
       {/* Error branch first. "No automations yet" over a failed read invites an
