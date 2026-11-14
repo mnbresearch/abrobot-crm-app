@@ -42,7 +42,11 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
 
   const cleanPhone = useMemo(() => {
     if (!lead.phone) return null;
-    return lead.phone.replace(/[^0-9]/g, "");
+    let digits = lead.phone.replace(/[^0-9]/g, "");
+    if (digits.length === 10 && /^[6-9]/.test(digits)) {
+      digits = `91${digits}`;
+    }
+    return digits || null;
   }, [lead.phone]);
 
   const handleCopy = async () => {
@@ -55,18 +59,19 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
     }
   };
 
-  const handleLogExecutiveTouch = async (channel: "whatsapp" | "email") => {
+  const handleLogExecutiveTouch = async (channel: "whatsapp" | "email" | "note") => {
     if (!org) return;
     setSaving(true);
     setError(null);
     try {
       const nowIso = new Date().toISOString();
+      const channelTag = channel === "whatsapp" ? "WHATSAPP" : channel === "email" ? "EMAIL" : "DIRECT TOUCH";
       const { error: actErr } = await supabase.from("activities").insert({
         org_id: org.id,
         lead_id: lead.id,
         user_id: profile?.id ?? null,
         type: channel,
-        content: `[⚡ Executive War Room Rescue via ${channel.toUpperCase()}]\n${message}`,
+        content: `[⚡ Executive War Room Rescue via ${channelTag}]\n${message}`,
       });
       if (actErr) console.warn("Activity log failed:", actErr.message);
 
@@ -114,7 +119,7 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
         org_id: org.id,
         lead_id: lead.id,
         user_id: profile?.id ?? null,
-        type: "note",
+        type: "assignment",
         content: `⚡ Reassigned to ${repName} via Executive War Room Rescue to prevent pipeline leakage.`,
       });
 
@@ -209,9 +214,11 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
         </div>
 
         {/* Tab selection */}
-        <div className="row" style={{ gap: 8, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+        <div role="tablist" aria-label="Executive rescue actions" className="row" style={{ gap: 8, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === "message"}
             className={`btn btn-sm ${tab === "message" ? "btn-primary" : "btn-ghost"}`}
             onClick={() => setTab("message")}
           >
@@ -219,6 +226,8 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === "reassign"}
             className={`btn btn-sm ${tab === "reassign" ? "btn-primary" : "btn-ghost"}`}
             onClick={() => setTab("reassign")}
           >
@@ -226,6 +235,8 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === "escalate"}
             className={`btn btn-sm ${tab === "escalate" ? "btn-primary" : "btn-ghost"}`}
             onClick={() => setTab("escalate")}
           >
@@ -265,7 +276,7 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
                     target="_blank"
                     rel="noopener noreferrer"
                     className="btn btn-sm"
-                    style={{ background: "#25D366", color: "#fff", borderColor: "#25D366", fontWeight: 600 }}
+                    style={{ background: "#128C7E", color: "#fff", borderColor: "#128C7E", fontWeight: 600 }}
                     onClick={() => void handleLogExecutiveTouch("whatsapp")}
                   >
                     🚀 WhatsApp VIP Outreach
@@ -289,7 +300,7 @@ export function ExecutiveRescueModal({ deal, members, org, profile, onClose, onS
                 type="button"
                 className="btn btn-sm btn-primary"
                 disabled={saving}
-                onClick={() => void handleLogExecutiveTouch("whatsapp")}
+                onClick={() => void handleLogExecutiveTouch(cleanPhone ? "whatsapp" : lead.email ? "email" : "note")}
               >
                 {saving ? "Logging..." : "Mark Rescued & Touch Recorded"}
               </button>

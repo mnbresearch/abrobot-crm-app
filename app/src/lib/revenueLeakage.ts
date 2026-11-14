@@ -49,29 +49,34 @@ export interface RevenueLeakageReport {
 const DEFAULT_DEAL_VALUE_INR = 150000; // ₹1.5 Lakh baseline when budget is unstated
 
 export function estimateLeadValue(lead: Lead): number {
-  if (typeof lead.budget_inr === "number" && lead.budget_inr > 0) {
+  if (typeof lead.budget_inr === "number" && Number.isFinite(lead.budget_inr) && lead.budget_inr > 0) {
     return Math.round(lead.budget_inr);
   }
   // High-score leads without explicit budget are inferred at higher nominal value
-  if (lead.score >= 75) return 300000;
-  if (lead.score >= 50) return 200000;
+  const score = typeof lead.score === "number" && Number.isFinite(lead.score) ? lead.score : 0;
+  if (score >= 75) return 300000;
+  if (score >= 50) return 200000;
   return DEFAULT_DEAL_VALUE_INR;
 }
 
 export function formatCurrencyINR(amount: number, compact = false): string {
-  if (isNaN(amount) || amount === 0) return "₹0";
+  if (typeof amount !== "number" || !Number.isFinite(amount) || amount === 0) return "₹0";
+  const isNegative = amount < 0;
+  const abs = Math.abs(amount);
+  const prefix = isNegative ? "-₹" : "₹";
+
   if (compact) {
-    if (amount >= 10000000) {
-      return `₹${(amount / 10000000).toFixed(2)} Cr`;
+    if (abs >= 10000000) {
+      return `${prefix}${(abs / 10000000).toFixed(2)} Cr`;
     }
-    if (amount >= 100000) {
-      return `₹${(amount / 100000).toFixed(1)} L`;
+    if (abs >= 100000) {
+      return `${prefix}${(abs / 100000).toFixed(1)} L`;
     }
-    if (amount >= 1000) {
-      return `₹${(amount / 1000).toFixed(0)}k`;
+    if (abs >= 1000) {
+      return `${prefix}${(abs / 1000).toFixed(0)}k`;
     }
   }
-  return `₹${Math.round(amount).toLocaleString("en-IN")}`;
+  return `${isNegative ? "-" : ""}₹${Math.round(abs).toLocaleString("en-IN")}`;
 }
 
 export function analyzeRevenueLeakage(
@@ -127,7 +132,8 @@ export function analyzeRevenueLeakage(
     const value = estimateLeadValue(lead);
     totalPipelineValue += value;
 
-    const repKey = lead.assigned_to ?? null;
+    const rawAssigned = typeof lead.assigned_to === "string" ? lead.assigned_to.trim() : null;
+    const repKey = rawAssigned && rawAssigned.length > 0 ? rawAssigned : null;
     const repEntry = repStats.get(repKey) || {
       name: repKey ? (memberMap.get(repKey) || "Teammate") : "Unassigned Queue",
       atRiskCount: 0,
@@ -137,16 +143,21 @@ export function analyzeRevenueLeakage(
     repEntry.totalAssignedValue += value;
     repStats.set(repKey, repEntry);
 
-    const createdAtMs = new Date(lead.created_at).getTime();
-    const lastContactMs = lead.last_contacted_at ? new Date(lead.last_contacted_at).getTime() : createdAtMs;
-    const nextFollowUpMs = lead.next_follow_up_at ? new Date(lead.next_follow_up_at).getTime() : null;
+    const createdRaw = lead.created_at ? new Date(lead.created_at).getTime() : NaN;
+    const createdAtMs = Number.isFinite(createdRaw) ? createdRaw : now;
+
+    const contactRaw = lead.last_contacted_at ? new Date(lead.last_contacted_at).getTime() : NaN;
+    const lastContactMs = Number.isFinite(contactRaw) ? contactRaw : createdAtMs;
+
+    const followUpRaw = lead.next_follow_up_at ? new Date(lead.next_follow_up_at).getTime() : NaN;
+    const nextFollowUpMs = Number.isFinite(followUpRaw) ? followUpRaw : null;
 
     const hoursSinceContact = Math.max(0, (now - lastContactMs) / (1000 * 60 * 60));
     const daysSinceCreated = Math.max(0, (now - createdAtMs) / (1000 * 60 * 60 * 24));
     const overdueHours = nextFollowUpMs && nextFollowUpMs < now ? (now - nextFollowUpMs) / (1000 * 60 * 60) : 0;
 
     let detectedRisk: AtRiskDeal | null = null;
-    const assignedName = lead.assigned_to ? (memberMap.get(lead.assigned_to) || "Assigned Rep") : "Unassigned";
+    const assignedName = repKey ? (memberMap.get(repKey) || "Assigned Rep") : "Unassigned";
 
     // 1. SLA Silence Breach: >48 hours without any contact on high-score lead
     if (hoursSinceContact >= 48 && (lead.score >= 45 || value >= 200000)) {
@@ -192,7 +203,7 @@ export function analyzeRevenueLeakage(
       };
     }
     // 4. Unassigned High-Value Revenue floating with no owner
-    else if (!lead.assigned_to && (value >= 200000 || lead.score >= 50)) {
+    else if (!repKey && (value >= 200000 || lead.score >= 50)) {
       detectedRisk = {
         lead,
         riskType: "unassigned_revenue",
@@ -226,7 +237,7 @@ export function analyzeRevenueLeakage(
   });
 
   const leakageRatePct = totalPipelineValue > 0
-    ? Math.round((totalAtRiskValue / totalPipelineValue) * 100)
+    ? Math.min(100, Math.max(0, Math.round((totalAtRiskValue / totalPipelineValue) * 100)))
     : 0;
 
   const healthStatus: "healthy" | "attention" | "critical" =
@@ -237,14 +248,17 @@ export function analyzeRevenueLeakage(
     .filter((l) => wonKeys.has(l.stage_key ?? l.stage))
     .reduce((sum, l) => sum + estimateLeadValue(l), 0);
 
-  // Committed = Won + Active high-confidence non-risk deals (probability 85%)
-  const nonRiskActiveValue = totalPipelineValue - totalAtRiskValue;
+  // Committed = Won + Active high-confidence non-risk deals (probability 70%)
+  const nonRiskActiveValue = Math.max(0, totalPipelineValue - totalAtRiskValue);
   const committedValue = wonValue + Math.round(nonRiskActiveValue * 0.70);
 
   // Likely = Committed + Salvaged at-risk deals (probability 40% if rescued) + Mid-tier velocity
   const likelyValue = committedValue + Math.round(totalAtRiskValue * 0.40);
 
-  const targetQuota = customMonthlyQuota || Math.max(1000000, Math.round(totalPipelineValue * 0.75));
+  const validCustomQuota = typeof customMonthlyQuota === "number" && Number.isFinite(customMonthlyQuota) && customMonthlyQuota > 0
+    ? Math.round(customMonthlyQuota)
+    : undefined;
+  const targetQuota = validCustomQuota || Math.max(1000000, Math.round(totalPipelineValue * 0.75));
   const gapToQuota = Math.max(0, targetQuota - committedValue);
 
   const repMatrix: RepLeakageSummary[] = Array.from(repStats.entries())

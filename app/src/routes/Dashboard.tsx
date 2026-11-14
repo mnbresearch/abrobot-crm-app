@@ -198,6 +198,8 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
 
         {/* Segmented Control */}
         <div
+          role="group"
+          aria-label="Dashboard view mode"
           style={{
             display: "inline-flex",
             background: "var(--bg-2)",
@@ -209,6 +211,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
         >
           <button
             type="button"
+            aria-pressed={dashboardMode === "cockpit"}
             className={`btn btn-sm ${dashboardMode === "cockpit" ? "btn-primary" : "btn-ghost"}`}
             onClick={() => handleModeChange("cockpit")}
             style={{ fontSize: 13, fontWeight: 600 }}
@@ -217,6 +220,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
           </button>
           <button
             type="button"
+            aria-pressed={dashboardMode === "war_room"}
             className={`btn btn-sm ${dashboardMode === "war_room" ? "btn-primary" : "btn-ghost"}`}
             onClick={() => handleModeChange("war_room")}
             style={{ fontSize: 13, fontWeight: 600, position: "relative" }}
@@ -342,7 +346,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
           {/* Predictive Quota Forecaster Progress Bar */}
           <Card title="🎯 Predictive Quarter Close Forecast & Quota Attainment">
             <div className="stack" style={{ gap: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, flexWrap: "wrap", gap: 8 }}>
                 <div>
                   <strong>Target Quota:</strong> {formatCurrencyINR(targetQuota)}
                 </div>
@@ -384,8 +388,8 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
                 />
               </div>
 
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, marginTop: 2 }}>
-                <div className="row" style={{ gap: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, marginTop: 2, flexWrap: "wrap", gap: 8 }}>
+                <div className="row" style={{ gap: 14, flexWrap: "wrap" }}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <span style={{ width: 10, height: 10, borderRadius: 2, background: "var(--green)" }} /> Committed (High Confidence)
                   </span>
@@ -405,9 +409,10 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
           {/* At-Risk Deals Radar Table */}
           <Card title="⚡ At-Risk Revenue Radar: High-Priority Intervention Queue">
             {/* Filter Pills */}
-            <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            <div role="group" aria-label="Risk type filters" className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
               <button
                 type="button"
+                aria-pressed={riskFilter === "all"}
                 className={`btn btn-sm ${riskFilter === "all" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setRiskFilter("all")}
               >
@@ -415,6 +420,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
               </button>
               <button
                 type="button"
+                aria-pressed={riskFilter === "sla_breach"}
                 className={`btn btn-sm ${riskFilter === "sla_breach" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setRiskFilter("sla_breach")}
               >
@@ -422,6 +428,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
               </button>
               <button
                 type="button"
+                aria-pressed={riskFilter === "overdue_followup"}
                 className={`btn btn-sm ${riskFilter === "overdue_followup" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setRiskFilter("overdue_followup")}
               >
@@ -429,6 +436,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
               </button>
               <button
                 type="button"
+                aria-pressed={riskFilter === "velocity_stalled"}
                 className={`btn btn-sm ${riskFilter === "velocity_stalled" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setRiskFilter("velocity_stalled")}
               >
@@ -436,6 +444,7 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
               </button>
               <button
                 type="button"
+                aria-pressed={riskFilter === "unassigned_revenue"}
                 className={`btn btn-sm ${riskFilter === "unassigned_revenue" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setRiskFilter("unassigned_revenue")}
               >
@@ -471,8 +480,16 @@ export function Dashboard({ navigate }: { navigate: (to: string) => void }) {
                       <tr key={deal.lead.id}>
                         <td>
                           <div
-                            style={{ fontWeight: 600, cursor: "pointer", color: "var(--ink)" }}
+                            role="link"
+                            tabIndex={0}
+                            style={{ fontWeight: 600, cursor: "pointer", color: "var(--ink)", display: "inline-block" }}
                             onClick={() => navigate(`/leads/${deal.lead.id}`)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                navigate(`/leads/${deal.lead.id}`);
+                              }
+                            }}
                           >
                             {deal.lead.name}
                           </div>

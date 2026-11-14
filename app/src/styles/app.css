@@ -223,6 +223,8 @@
 
 .btn-primary { background: var(--grad); color: #fff; border-color: transparent; box-shadow: var(--shadow); }
 .btn-primary:hover:not(:disabled) { box-shadow: var(--shadow-md); filter: brightness(1.06); }
+.btn-secondary { background: var(--bg-2); border-color: var(--border); color: var(--text); }
+.btn-secondary:hover:not(:disabled) { background: var(--card-hover); border-color: var(--border-strong); }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-2); box-shadow: none; }
 .btn-sm { padding: 6px 11px; font-size: 13px; border-radius: 9px; }
@@ -250,6 +252,9 @@
 .pill-muted { background: var(--bg-2); color: var(--muted); }
 .pill-green { background: var(--green-soft); color: var(--green); }
 .pill-red { background: var(--red-soft); color: var(--red); }
+.pill-amber { background: var(--amber-soft); color: var(--brand-dark); }
+:root[data-theme="dark"] .pill-amber { color: var(--amber); }
+.pill-blue { background: var(--blue-soft); color: var(--blue); }
 .pill-interactive { cursor: pointer; border: none; }
 .pill-interactive:hover { transform: scale(1.06); }
 

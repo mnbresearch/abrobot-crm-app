@@ -166,3 +166,104 @@ test("analyzeRevenueLeakage: health status reflects leakage threshold accurately
   assert.strictEqual(report.leakageRatePct, 75);
   assert.strictEqual(report.healthStatus, "critical");
 });
+
+test("analyzeRevenueLeakage: handles empty state without NaN or errors", () => {
+  const report = analyzeRevenueLeakage([], []);
+  assert.strictEqual(report.totalPipelineValue, 0);
+  assert.strictEqual(report.totalAtRiskValue, 0);
+  assert.strictEqual(report.leakageRatePct, 0);
+  assert.strictEqual(report.healthStatus, "healthy");
+  assert.strictEqual(report.atRiskDeals.length, 0);
+  assert.strictEqual(report.repMatrix.length, 0);
+  assert.strictEqual(report.forecast.committedValue, 0);
+  assert.strictEqual(report.forecast.likelyValue, 0);
+  assert.strictEqual(report.forecast.targetQuota, 1000000);
+  assert.strictEqual(report.forecast.gapToQuota, 1000000);
+  assert.ok(!Number.isNaN(report.leakageRatePct));
+});
+
+test("estimateLeadValue & formatCurrencyINR: handles non-finite and extreme inputs safely", () => {
+  assert.strictEqual(estimateLeadValue({ score: 50, budget_inr: Infinity }), 200000);
+  assert.strictEqual(estimateLeadValue({ score: 50, budget_inr: -Infinity }), 200000);
+  assert.strictEqual(estimateLeadValue({ score: 50, budget_inr: NaN }), 200000);
+  assert.strictEqual(estimateLeadValue({ score: 50, budget_inr: -50000 }), 200000);
+
+  assert.strictEqual(formatCurrencyINR(NaN), "₹0");
+  assert.strictEqual(formatCurrencyINR(Infinity), "₹0");
+  assert.strictEqual(formatCurrencyINR(-Infinity), "₹0");
+  assert.strictEqual(formatCurrencyINR(null), "₹0");
+  assert.strictEqual(formatCurrencyINR(undefined), "₹0");
+  assert.strictEqual(formatCurrencyINR(-150000, true), "-₹1.5 L");
+  assert.strictEqual(formatCurrencyINR(-250000, false), "-₹2,50,000");
+});
+
+test("analyzeRevenueLeakage: resilient against invalid and future dates (no NaN in dwellDays)", () => {
+  const now = 1700000000000;
+  const stages = [{ key: "lead", label: "Lead", is_won: false, is_lost: false }];
+  const malformedLeads = [
+    { id: "m1", stage_key: "lead", score: 90, created_at: "not-a-valid-date" },
+    { id: "m2", stage_key: "lead", score: 90, created_at: "" },
+    { id: "m3", stage_key: "lead", score: 90, created_at: "2099-01-01T00:00:00Z" },
+    { id: "m4", stage_key: "lead", score: 90, created_at: new Date(now).toISOString(), last_contacted_at: "garbage" },
+    { id: "m5", stage_key: "lead", score: 90, created_at: new Date(now).toISOString(), next_follow_up_at: "garbage" },
+  ];
+  const report = analyzeRevenueLeakage(malformedLeads, stages, [], 1000000, now);
+  for (const deal of report.atRiskDeals) {
+    assert.ok(Number.isFinite(deal.dwellDays), `dwellDays must be finite, got ${deal.dwellDays}`);
+    assert.ok(deal.dwellDays >= 0, `dwellDays must be non-negative, got ${deal.dwellDays}`);
+  }
+});
+
+test("analyzeRevenueLeakage: mathematical consistency guarantees", () => {
+  const stages = [
+    { key: "won", label: "Won", is_won: true, is_lost: false },
+    { key: "pipe1", label: "Pipe 1", is_won: false, is_lost: false },
+    { key: "pipe2", label: "Pipe 2", is_won: false, is_lost: false },
+  ];
+  const now = 1700000000000;
+  const leads = [
+    { id: "w1", stage_key: "won", score: 90, budget_inr: 500000, created_at: new Date(now - 86400000).toISOString() },
+    { id: "p1", stage_key: "pipe1", score: 80, budget_inr: 300000, created_at: new Date(now - 100 * 3600 * 1000).toISOString(), last_contacted_at: new Date(now - 100 * 3600 * 1000).toISOString() },
+    { id: "p2", stage_key: "pipe2", score: 40, budget_inr: 200000, assigned_to: "rep1", created_at: new Date(now - 3600 * 1000).toISOString(), last_contacted_at: new Date(now - 3600 * 1000).toISOString() },
+  ];
+  const report = analyzeRevenueLeakage(leads, stages, [{ id: "rep1", full_name: "Rep One", email: "rep1@crm.com" }], 800000, now);
+
+  assert.ok(report.totalAtRiskValue <= report.totalPipelineValue);
+  assert.ok(report.forecast.likelyValue >= report.forecast.committedValue);
+  assert.ok(report.forecast.committedValue >= 500000); // won value included
+  assert.ok(report.forecast.gapToQuota >= 0);
+  assert.ok(report.leakageRatePct >= 0 && report.leakageRatePct <= 100);
+});
+
+test("analyzeRevenueLeakage: 10,000 leads stress performance test executes under 100ms", () => {
+  const stages = [
+    { key: "new", label: "New", is_won: false, is_lost: false },
+    { key: "demo", label: "Demo", is_won: false, is_lost: false },
+    { key: "won", label: "Won", is_won: true, is_lost: false },
+    { key: "lost", label: "Lost", is_won: false, is_lost: true },
+  ];
+  const stageKeys = ["new", "demo", "won", "lost"];
+  const now = Date.now();
+  const leads = [];
+  for (let i = 0; i < 10000; i++) {
+    leads.push({
+      id: `lead_${i}`,
+      stage_key: stageKeys[i % 4],
+      score: (i * 13) % 100,
+      budget_inr: (i % 7) * 75000,
+      created_at: new Date(now - (i % 20) * 86400000).toISOString(),
+      last_contacted_at: new Date(now - (i % 5) * 86400000).toISOString(),
+      assigned_to: i % 2 === 0 ? "rep_1" : null,
+    });
+  }
+
+  const start = performance.now();
+  const report = analyzeRevenueLeakage(leads, stages, [{ id: "rep_1", full_name: "Top Rep", email: "rep1@crm.com" }]);
+  const duration = performance.now() - start;
+
+  assert.ok(duration < 100, `Execution too slow: ${duration.toFixed(2)}ms`);
+  assert.ok(Number.isFinite(report.totalPipelineValue));
+  assert.ok(Number.isFinite(report.totalAtRiskValue));
+  assert.ok(Number.isFinite(report.leakageRatePct));
+  assert.ok(report.forecast.likelyValue >= report.forecast.committedValue);
+});
