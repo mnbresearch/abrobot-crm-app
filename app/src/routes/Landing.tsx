@@ -103,6 +103,11 @@ const CAPABILITIES: { icon: string; title: string; detail: string; ask: string }
 /** Advanced features built for enterprise and high-growth sales teams */
 export const ADVANCED_CAPABILITIES = [
   {
+    icon: "🏛️",
+    title: "Executive War Room & Revenue Radar",
+    explanation: "Real-time diagnostic radar that quantifies decaying pipeline value in INR, detects SLA silence breaches & stalled deals, and enables 1-click VIP executive rescue actions.",
+  },
+  {
     icon: "🧠",
     title: "AI Copilot & Deal Dossier",
     explanation: "Synthesizes customer interaction histories into 1-click executive briefings and drafts personalized WhatsApp & email replies.",
